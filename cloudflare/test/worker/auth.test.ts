@@ -148,10 +148,10 @@ describe("signed in", () => {
 		const before = h.requests.length;
 		const response = await h.request("/", { cookies: [`${SESSION}=${session!.value}`] });
 		const html = await response.text();
-		expect(html).toContain("Signed in as octo.");
+		expect(html).toContain('<span class="muted">octo</span>');
 		expect(html).toContain('href="/repos/moq-dev/moq"');
-		expect(html.indexOf("moq-dev/moq<")).toBeLessThan(html.indexOf("moq-dev/quest<"));
-		expect(html).toContain("private");
+		expect(html.indexOf(">moq</a>")).toBeLessThan(html.indexOf(">quest</a>"));
+		expect(html).toContain("Private");
 		expect(h.requests.length - before).toBe(2);
 		expect(response.headers.get("server-timing")).toMatch(/github;dur=\d+;desc="2 requests"/);
 		expect(response.headers.get("cache-control")).toBe("private, no-cache");

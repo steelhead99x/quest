@@ -189,11 +189,11 @@ describe("bench page", () => {
 		const response = await h.request("/repos/moq-dev/quest/bench", { cookies: [cookie] });
 		expect(response.status).toBe(200);
 		const html = await response.text();
-		expect(html).toContain("#5 Make it");
+		expect(html).toContain('Make it <span class="muted">#5</span>');
 		expect(html).toContain('<span class="ql-size ql-l">L</span>');
-		expect(html).toContain("<code>claude-opus-5-5</code>");
-		expect(html).toContain("score 9.0");
-		expect(html).toContain("12.0 h");
+		expect(html).toContain('<span class="muted">claude-opus-5-5</span>');
+		expect(html).toContain("9/10");
+		expect(html).toContain("12.0h to merge");
 		expect(response.headers.get("server-timing")).toContain('desc="1 requests"');
 	});
 

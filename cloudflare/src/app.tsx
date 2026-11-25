@@ -11,7 +11,7 @@ import { load as loadBench, type Window } from "./bench/load.ts";
 import { rollups, row } from "./bench/model.ts";
 import { BenchPage } from "./bench/page.tsx";
 import { cached } from "./cache.ts";
-import { Dispatch, RunList } from "./ci.tsx";
+import { Dispatch, PullCi, RunList } from "./ci.tsx";
 import { checks, dispatch, Refused, rerunFailed, runs } from "./github/ci.ts";
 import { Home, Message } from "./home.tsx";
 import type { User } from "./layout.tsx";
@@ -118,15 +118,16 @@ export function app(deps: Deps): App {
 		const path = new URL(c.req.url).pathname;
 		const repository = b.tree.repository;
 		const github = c.get("github").withToken(c.get("session")!.token);
-		const recent = await runs(github, repository, { branch: b.tree.branch }, deps.now(), 10);
+		const recent = await runs(github, repository, { branch: b.tree.branch }, deps.now(), 5);
 		return c.html(
 			<BoardPage b={b} user={user(c.get("session"))!} path={path}>
 				<RunList
 					title={`CI on ${b.tree.branch}`}
-					runs={recent}
+					runs={recent.runs}
+					more={recent.more}
 					repository={repository}
 					next={path}
-					more={`${b.tree.url}/actions?query=branch%3A${encodeURIComponent(b.tree.branch)}`}
+					link={`${b.tree.url}/actions?query=branch%3A${encodeURIComponent(b.tree.branch)}`}
 				/>
 				<Dispatch workflows={b.tree.workflows} repository={repository} branch={b.tree.branch} next={path} />
 			</BoardPage>,
@@ -171,24 +172,7 @@ export function app(deps: Deps): App {
 			const repository = b.tree.repository;
 			const checked = await checks(github, repository, pull.head, deps.now());
 			const ran = await runs(github, repository, { sha: pull.head }, deps.now());
-			ci = (
-				<>
-					<RunList
-						title={`Checks on #${pull.number}`}
-						runs={checked}
-						repository={repository}
-						next={path}
-						more={`${pull.url}/checks`}
-					/>
-					<RunList
-						title="Workflow runs"
-						runs={ran}
-						repository={repository}
-						next={path}
-						more={`${pull.url}/checks`}
-					/>
-				</>
-			);
+			ci = <PullCi runs={ran} checks={checked} repository={repository} next={path} link={`${pull.url}/checks`} />;
 		}
 		return c.html(
 			<QuestPage b={b} doc={doc.path} user={user(c.get("session"))!} path={path} now={deps.now()}>

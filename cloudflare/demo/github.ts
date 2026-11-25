@@ -189,6 +189,7 @@ export function github(snapshot: Snapshot, now: () => number) {
 					.filter((r) => r.head_sha === checks[1])
 					.map((r) => ({
 						id: r.id + 10_000,
+						app: { slug: "github-actions" },
 						name: r.name,
 						status: r.status,
 						conclusion: r.conclusion,

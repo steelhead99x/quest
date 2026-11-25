@@ -64,14 +64,15 @@ try {
 	await step("Signing in returns to the home page with the App's repositories", "02-repositories", async () => {
 		await act(`document.querySelector('a[href="/sign-in?next=%2F"]').click()`);
 		await expectPath("/");
-		await expectText("Signed in as demo.");
-		await expectText("steelhead99x/quest");
+		await expectText("Repositories");
+		const listed = await value<number>(`document.querySelectorAll('a[href="/repos/steelhead99x/quest"]').length`);
+		if (listed !== 1) throw new Error("the App's repository is not listed");
 	});
 
 	await step("The board shows stats, ready quests, waiting items, CI, and workflows", "03-board", async () => {
 		await act(`document.querySelector('a[href="/repos/steelhead99x/quest"]').click()`);
 		await expectPath("/repos/steelhead99x/quest");
-		for (const text of ["Stats", "Ready to start", "Waiting", "CI on main", "Start a workflow", "In review"])
+		for (const text of ["Ready to start", "Waiting", "CI on main", "Run a workflow on main", "In review"])
 			await expectText(text);
 		const width = await value<number>("document.documentElement.scrollWidth");
 		if (width > 390) throw new Error(`the board is ${width} px wide on a 390 px screen`);
@@ -82,22 +83,23 @@ try {
 			`[...document.querySelectorAll(".entry")].find((e) => e.textContent.includes("In review")).querySelector("a.entry-title").getAttribute("href")`,
 		);
 		await go(base + href);
-		await expectText("Checks on #41");
+		await expectText("CI");
 		await expectText("Re-run failed jobs");
-		await expectText("Waiting for a maintainer to approve it on GitHub");
+		await expectText("Approve it on GitHub");
 	});
 
 	await step("Re-running a failed run's jobs starts it, and the page shows it running", "05-rerun", async () => {
 		await act(`document.querySelector('form[action*="/rerun"] button').click()`);
 		await expectText("Re-run started");
 		await act(`document.querySelector('a[href^="/repos/steelhead99x/quest/quest/"]').click()`);
-		await expectText("in progress");
+		await expectText("Running");
 		const buttons = await value<number>(`document.querySelectorAll('form[action*="/rerun"]').length`);
 		if (buttons !== 0) throw new Error(`${buttons} re-run buttons remain after the re-run`);
 	});
 
 	await step("Dispatching a workflow queues a run on main", "06-dispatch", async () => {
 		await go(`${base}/repos/steelhead99x/quest`);
+		await value(`document.querySelector("details.ci").open = true`);
 		const name = await value<string>(
 			`document.querySelector('form[action$="/dispatch"]').closest(".entry").querySelector(".entry-title").textContent`,
 		);

@@ -256,14 +256,6 @@ pre {
 
 /* Home */
 
-.hero {
-	display: grid;
-	grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-	gap: 3.5rem;
-	align-items: center;
-	padding-block: 5rem 3rem;
-}
-
 .hero h1 {
 	margin: 0.5rem 0 0;
 }
@@ -278,18 +270,6 @@ pre {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 0.75rem;
-}
-
-.hero-log {
-	box-shadow: 0 30px 80px -30px rgb(0 0 0 / 0.8);
-}
-
-.log-title {
-	margin: 0 0 0.75rem;
-	font-size: 1.1rem;
-	letter-spacing: 0.16em;
-	text-transform: uppercase;
-	color: var(--ql-muted) !important;
 }
 
 .log {
@@ -362,80 +342,6 @@ pre {
 	margin-top: 0.35rem;
 }
 
-.intro {
-	max-width: 44rem;
-	margin: 0 0 2rem;
-	color: var(--ql-muted);
-}
-
-.split {
-	display: grid;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
-	gap: 2.5rem;
-	align-items: start;
-}
-
-.code-page {
-	margin: 0;
-}
-
-.code-page figcaption {
-	margin-bottom: 0.75rem;
-	color: var(--ql-muted);
-	font-family: var(--ql-font-mono);
-	font-size: 0.85rem;
-}
-
-.lifecycle,
-.steps {
-	list-style: none;
-	margin: 0;
-	padding: 0;
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
-	gap: 1rem;
-	counter-reset: step;
-}
-
-.lifecycle li,
-.steps li {
-	background: var(--ql-panel);
-	border: 1px solid var(--ql-rule);
-	border-radius: 6px;
-	padding: 1.1rem 1.25rem;
-}
-
-.lifecycle p {
-	margin: 0.25rem 0;
-}
-
-.state {
-	display: flex;
-	align-items: center;
-	gap: 0.4rem;
-	font-family: var(--ql-font-display);
-	font-size: 1.15rem;
-	font-weight: 700;
-	letter-spacing: 0.06em;
-	text-transform: uppercase;
-}
-
-.steps li {
-	counter-increment: step;
-}
-
-.steps h3 {
-	margin: 0 0 0.5rem;
-}
-
-.steps h3::before {
-	content: counter(step, decimal-leading-zero);
-	display: block;
-	margin-bottom: 0.4rem;
-	font-size: 2.25rem;
-	color: var(--ql-accent);
-}
-
 .note {
 	color: var(--ql-muted);
 	font-size: 0.95rem;
@@ -453,23 +359,6 @@ pre {
 .quest-page p,
 .quest-page ul {
 	margin: 0.5rem 0;
-}
-
-.quest-head {
-	display: flex;
-	align-items: center;
-	gap: 0.6rem;
-}
-
-.quest-head h3 {
-	flex: 1;
-	margin: 0;
-	font-size: 1.5rem;
-}
-
-.quest-status {
-	font-weight: 600;
-	margin-top: 0.25rem !important;
 }
 
 /* Breadcrumbs */
@@ -553,15 +442,6 @@ pre {
 	background: var(--ql-raised);
 }
 
-.milestone-head h2 a {
-	color: var(--ql-text);
-	text-decoration: none;
-}
-
-.milestone-head h2 a:hover {
-	color: var(--ql-accent);
-}
-
 .tally .ql-marker {
 	min-width: 0.9rem;
 }
@@ -579,47 +459,6 @@ pre {
 	margin-top: 1rem;
 }
 
-.milestone-summary {
-	max-width: 48rem;
-	margin: 0.25rem 0 1rem;
-}
-
-.progress {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 0.5rem 1rem;
-	margin-block: 0.75rem;
-}
-
-/* An experience bar: a thin track with a lit fill. */
-.progress-bar {
-	flex: 1 1 14rem;
-	max-width: 32rem;
-	height: 0.5rem;
-	background: var(--ql-raised);
-	border-radius: 999px;
-	overflow: hidden;
-}
-
-.progress-bar span {
-	display: block;
-	height: 100%;
-	border-radius: inherit;
-	background: linear-gradient(90deg, var(--ql-accent-dim), var(--ql-accent));
-	box-shadow: 0 0 12px rgb(255 197 61 / 0.5);
-}
-
-.progress-text {
-	margin: 0;
-	color: var(--ql-muted);
-	font-size: 0.95rem;
-}
-
-.progress-text strong {
-	color: var(--ql-text);
-}
-
 a.entry-title {
 	color: var(--ql-text);
 	text-decoration: none;
@@ -635,70 +474,29 @@ a.entry-title:hover {
 	font-size: 0.92rem;
 }
 
-.epic {
-	border-top: 1px solid var(--ql-rule);
-	padding-top: 0.9rem;
-	margin-top: 0.25rem;
-}
-
-.epic-head {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: baseline;
-	justify-content: space-between;
-	gap: 0.25rem 1rem;
-}
-
-.epic-head h3 {
-	margin: 0;
-	font-size: 1.4rem;
-}
-
-.epic-head h3 a {
-	color: var(--ql-text);
-	text-decoration: none;
-}
-
-.epic-head h3 a:hover {
-	color: var(--ql-accent);
-}
-
-.epic-count {
-	font-size: 0.9rem;
-}
-
-.epic > .log {
-	margin: 0.5rem 0 0.5rem 0.4rem;
-	padding-left: 1rem;
-	border-left: 1px solid var(--ql-rule);
-}
-
-.board-foot {
-	display: grid;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
-	gap: 2rem;
-	align-items: start;
-}
-
 /* Quest page */
 
 .quest-view {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) 20rem;
-	gap: 2rem;
-	align-items: start;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 1.25rem;
 	padding-block: 1.25rem 1rem;
 }
 
+/* A readable line length, left-aligned with the rest of the site. */
+.quest-view > * {
+	max-width: 48rem;
+}
+
+/* The state's marker sits beside the title, as in a list row. */
 .quest-title {
-	grid-column: 1 / -1;
+	display: flex;
+	align-items: baseline;
+	gap: 0.6rem;
 }
 
 .quest-title h1 {
-	display: flex;
-	align-items: center;
-	gap: 0.5rem;
-	margin: 0.5rem 0 0.25rem;
+	margin: 0.5rem 0 0;
 	font-size: clamp(2.1rem, 5vw, 3rem);
 }
 
@@ -732,86 +530,6 @@ a.entry-title:hover {
 
 .quest-page > h2:first-child {
 	margin-top: 0;
-}
-
-.quest-body > :first-child {
-	margin-top: 0;
-}
-
-.quest-body li + li {
-	margin-top: 0.35rem;
-}
-
-.quest-side {
-	display: grid;
-	gap: 1.25rem;
-}
-
-.panel {
-	padding: 1.5rem 1.25rem;
-}
-
-.panel h2 {
-	margin: 0 0 0.5rem;
-	font-size: 1.35rem;
-	text-transform: uppercase;
-}
-
-.panel p {
-	margin: 0 0 0.75rem;
-}
-
-.panel .button {
-	display: inline-flex;
-	align-items: center;
-	gap: 0.4rem;
-}
-
-.panel .button:disabled {
-	cursor: not-allowed;
-	opacity: 0.6;
-}
-
-.panel form {
-	margin: 0;
-}
-
-.note-small {
-	margin-top: 0.5rem !important;
-	font-size: 0.9rem;
-}
-
-.panel-links {
-	padding-top: 1rem;
-	border-top: 1px solid var(--ql-rule);
-	text-align: center;
-	font-size: 0.95rem;
-}
-
-@media (max-width: 52rem) {
-	.hero,
-	.split,
-	.board-foot,
-	.quest-view {
-		grid-template-columns: minmax(0, 1fr);
-	}
-
-	.hero {
-		padding-top: 2.5rem;
-	}
-
-	/* What to do next comes before the quest's full text. */
-	.quest-title {
-		order: -2;
-	}
-
-	.quest-side {
-		order: -1;
-	}
-
-	.ql-panel {
-		padding: 1.5rem 1.25rem;
-	}
 }
 
 /* On a phone the header scrolls away and the nav tightens. */
@@ -870,6 +588,10 @@ a.entry-title:hover {
 	text-align: right;
 }
 
+.stats-table th[scope="row"] {
+	white-space: nowrap;
+}
+
 .stats-table th[scope="row"],
 .stats-table thead th:first-child {
 	text-align: left;
@@ -912,5 +634,92 @@ a.entry-title:hover {
 
 .ci-state {
 	font-weight: 600;
-	text-transform: capitalize;
+}
+
+/* A row with no status marker: the title and its meta take the whole width. */
+.entry.plain {
+	grid-template-columns: minmax(0, 1fr);
+}
+
+.entry.plain .entry-meta,
+.entry.plain .entry-why {
+	grid-column: 1;
+}
+
+.entry-why {
+	grid-column: 2;
+	color: var(--ql-muted);
+	font-size: 0.92rem;
+}
+
+/* The home page's pitch, one column. */
+.hero {
+	padding-block: 3.5rem 1rem;
+	max-width: 40rem;
+}
+
+.group + .group {
+	margin-top: 1.5rem;
+}
+
+.group-title {
+	margin: 0 0 0.5rem;
+	font-size: 1rem;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--ql-muted);
+}
+
+/* A repository heading: the owner small above the name. */
+.board-head .owner {
+	margin: 0;
+	font-size: 0.95rem;
+}
+
+.board-head h1 {
+	margin: 0;
+	font-size: clamp(2rem, 9vw, 3.5rem);
+}
+
+.ql-panel h2 {
+	margin: 0 0 0.75rem;
+	font-size: 1.35rem;
+}
+
+.summary {
+	display: grid;
+	gap: 1rem;
+}
+
+.blocked-by {
+	color: var(--ql-muted);
+}
+
+.gaps {
+	margin: 0;
+	font-size: 0.92rem;
+}
+
+/* Folded panels open on tap; the summary is the panel's heading. */
+details.ql-panel > summary {
+	cursor: pointer;
+	font-family: var(--ql-font-display);
+	font-size: 1.2rem;
+	font-weight: 700;
+	list-style-position: inside;
+}
+
+details.ql-panel > summary .ql-eyebrow {
+	display: inline;
+	margin-right: 0.4rem;
+}
+
+details.ql-panel[open] > summary {
+	margin-bottom: 0.75rem;
+}
+
+@media (max-width: 40rem) {
+	.ql-panel {
+		padding: 1.1rem;
+	}
 }
