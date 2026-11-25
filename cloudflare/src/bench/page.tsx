@@ -84,8 +84,8 @@ export function BenchPage(props: {
 					</p>
 					{props.cut && (
 						<p class="muted" role="status">
-							Only the 50 most recently updated merged PRs were read. The totals may omit other merges in this
-							window.
+							Only the 50 most recently updated merged PRs were read. The totals may omit other merges in
+							this window.
 						</p>
 					)}
 				</header>

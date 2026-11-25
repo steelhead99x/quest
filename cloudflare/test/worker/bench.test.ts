@@ -149,7 +149,9 @@ describe("bench window", () => {
 
 	test("refuses an answer without pull requests or merge times", () => {
 		expect(() => window(null, NOW)).toThrow("no pull requests");
-		expect(() => window({ pullRequests: { nodes: [{ number: 1 }], pageInfo: { hasNextPage: false } } }, NOW)).toThrow("merge time");
+		expect(() =>
+			window({ pullRequests: { nodes: [{ number: 1 }], pageInfo: { hasNextPage: false } } }, NOW),
+		).toThrow("merge time");
 	});
 });
 
