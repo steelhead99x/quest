@@ -8,7 +8,7 @@ state), the ready ranking, the maintainer's waiting items, and a detail
 screen per quest with its claim PR, that PR's check runs, and its workflow
 runs. A signed-in user can re-run a failed workflow run or dispatch a
 workflow. A bench screen shows [bench](/quest/m2/mobile/bench.md)'s data
-once it lands. It follows the [pixel theme](/quest/m2/mobile/pixel-theme.md)
+once it lands. It follows the [mobile theme](/quest/m2/mobile/theme.md)
 and works offline from the last feed it cached.
 
 ## Plan
@@ -33,5 +33,5 @@ and works offline from the last feed it cached.
 - [Quest feed](/quest/m2/mobile/feed.md) - the data every screen reads
 - [GitHub App](/quest/m2/mobile/github-app.md) - sign-in, CI reads, and
   re-run and dispatch
-- [Pixel theme](/quest/m2/mobile/pixel-theme.md) - the shared look both
-  apps implement
+- [Mobile theme](/quest/m2/mobile/theme.md) - the quest log theme
+  both apps implement

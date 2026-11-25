@@ -7,8 +7,8 @@ repository's quest log on a phone: the tree's stats by milestone, size, and
 state, the ready ranking, what waits on the maintainer, each claimed quest's
 PR with its CI, and how merged quests performed. A signed-in user can re-run
 a failed workflow or start a dispatchable one from the phone. Both apps sign
-in through a GitHub App with no server of their own, and share one 8-bit
-presentation.
+in through a GitHub App with no server of their own, and follow the quest
+log theme in `design/theme.md`.
 
 Non-goals: writing quests, merging, or answering decisions from the phone;
 any backend or hosted service; tablet-specific layouts.
@@ -35,9 +35,10 @@ upstream. m2 holds it because it gates nothing in m0 or m1.
 - One codebase or two? ✅ Two native apps, Kotlin on Android and SwiftUI
   on iOS, each small enough that a cross-platform toolkit costs more than
   it saves (rejected: Flutter, React Native, Kotlin Multiplatform).
-- Style? ✅ 8-bit: a pixel display font for headings, pixel frames with
-  hard drop shadows, and hand-drawn sprites, on the theme's size colours
-  and markers ([pixel theme](/quest/m2/mobile/pixel-theme.md)).
+- Style? ✅ The existing quest log theme, `design/theme.md`, applied to
+  native screens: size colours with their labels, the `!` and `?`
+  markers, and `logo.svg` ([mobile theme](/quest/m2/mobile/theme.md)).
+  Rejected: an 8-bit look, which the theme forbids ("no pixel art").
 
 ## Waiting
 

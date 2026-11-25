@@ -7,7 +7,7 @@ A native iOS app in `apps/ios/` has the same screens and behavior as the
 waiting items, per-quest detail with its PR's checks and workflow runs,
 re-run and dispatch for a signed-in user, and the bench screen once
 [bench](/quest/m2/mobile/bench.md) lands. It follows the
-[pixel theme](/quest/m2/mobile/pixel-theme.md) and works offline from the
+[mobile theme](/quest/m2/mobile/theme.md) and works offline from the
 last feed it cached.
 
 ## Plan
@@ -37,5 +37,5 @@ last feed it cached.
 - [Quest feed](/quest/m2/mobile/feed.md) - the data every screen reads
 - [GitHub App](/quest/m2/mobile/github-app.md) - sign-in, CI reads, and
   re-run and dispatch
-- [Pixel theme](/quest/m2/mobile/pixel-theme.md) - the shared look both
-  apps implement
+- [Mobile theme](/quest/m2/mobile/theme.md) - the quest log theme
+  both apps implement
