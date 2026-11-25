@@ -24,8 +24,3 @@ where review rounds or CI time pile up.
 - Cross-check a sample of rows against `quest status <pr>` and the PR
   pages, and benchmark the page on
   the device bench (`cloudflare/DEVICES.md`).
-
-## Required
-
-- [Quest board](/quest/m2/mobile/board.md) - the repository pages this
-  adds a bench page to
