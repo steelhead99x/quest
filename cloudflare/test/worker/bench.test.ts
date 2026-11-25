@@ -118,6 +118,7 @@ describe("bench window", () => {
 		body: "",
 		createdAt: "2026-11-01T00:00:00Z",
 		mergedAt: merged,
+		updatedAt: merged,
 		commits: { nodes: [] },
 	});
 
@@ -125,6 +126,7 @@ describe("bench window", () => {
 		const w = window(
 			{
 				pullRequests: {
+					pageInfo: { hasNextPage: false },
 					nodes: [
 						node(1, "2026-11-24T00:00:00Z"),
 						node(2, "2026-11-24T00:00:00Z", "fix/x"),
@@ -140,12 +142,14 @@ describe("bench window", () => {
 
 	test("says when a full page leaves older merges unread", () => {
 		const nodes = Array.from({ length: MAX_MERGED }, (_, i) => node(i + 1, "2026-11-24T00:00:00Z"));
-		expect(window({ pullRequests: { nodes } }, NOW).cut).toBe(true);
+		nodes[0] = { ...node(99, "2026-10-01T00:00:00Z"), updatedAt: "2026-11-25T00:00:00Z" };
+		expect(window({ pullRequests: { nodes, pageInfo: { hasNextPage: true } } }, NOW).cut).toBe(true);
+		expect(window({ pullRequests: { nodes, pageInfo: { hasNextPage: false } } }, NOW).cut).toBe(false);
 	});
 
 	test("refuses an answer without pull requests or merge times", () => {
 		expect(() => window(null, NOW)).toThrow("no pull requests");
-		expect(() => window({ pullRequests: { nodes: [{ number: 1 }] } }, NOW)).toThrow("merge time");
+		expect(() => window({ pullRequests: { nodes: [{ number: 1 }], pageInfo: { hasNextPage: false } } }, NOW)).toThrow("merge time");
 	});
 });
 
@@ -167,6 +171,7 @@ describe("bench page", () => {
 					data: {
 						repository: {
 							pullRequests: {
+								pageInfo: { hasNextPage: false },
 								nodes: [
 									{
 										number: 5,
@@ -176,6 +181,7 @@ describe("bench page", () => {
 										body: body("L", "Claude Code, claude-opus-5-5, high effort", 9, 3),
 										createdAt: "2026-11-24T00:00:00Z",
 										mergedAt: "2026-11-24T12:00:00Z",
+										updatedAt: "2026-11-24T12:00:00Z",
 										commits: { nodes: [] },
 									},
 								],

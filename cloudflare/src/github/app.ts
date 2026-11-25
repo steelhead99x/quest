@@ -44,8 +44,8 @@ export function manifest(origin: string, redirect: string, name: string): Manife
 		public: true,
 		redirect_url: redirect,
 		callback_urls: [site.origin + CALLBACK],
-		// Installing signs the installer in, so the first visit lands signed in.
-		request_oauth_on_install: true,
+		// Sign-in must start on the Worker so it can bind state to the browser.
+		request_oauth_on_install: false,
 		// The manifest flow requires a hook URL even when nothing is delivered.
 		hook_attributes: { url: site.origin + "/webhooks/github", active: false },
 		default_permissions: PERMISSIONS,

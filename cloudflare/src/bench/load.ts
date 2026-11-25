@@ -33,8 +33,9 @@ export interface Window {
 export const QUERY = `query Bench($owner: String!, $name: String!) {
 	repository(owner: $owner, name: $name) {
 		pullRequests(states: MERGED, first: ${MAX_MERGED}, orderBy: { field: UPDATED_AT, direction: DESC }) {
+			pageInfo { hasNextPage }
 			nodes {
-				number url title headRefName body createdAt mergedAt
+				number url title headRefName body createdAt mergedAt updatedAt
 				commits(last: 1) { nodes { commit { checkSuites(first: 20) { nodes {
 					checkRuns(first: 50) { nodes { startedAt completedAt } }
 				} } } } }
@@ -56,12 +57,17 @@ export async function load(github: GitHub, owner: string, name: string, now: num
 
 /** Read the answer, keeping quest PRs merged inside the window. */
 export function window(value: unknown, now: number): Window {
-	const nodes = (value as { pullRequests?: { nodes?: unknown } } | null)?.pullRequests?.nodes;
-	if (!Array.isArray(nodes)) throw new Error("GitHub's bench answer has no pull requests");
+	const pulls = (value as { pullRequests?: { nodes?: unknown; pageInfo?: { hasNextPage?: unknown } } } | null)
+		?.pullRequests;
+	if (!Array.isArray(pulls?.nodes)) throw new Error("GitHub's bench answer has no pull requests");
+	const { nodes } = pulls;
+	const hasNextPage = pulls.pageInfo?.hasNextPage;
+	if (typeof hasNextPage !== "boolean") throw new Error("GitHub's bench answer has no page info");
 	const since = now - WINDOW_DAYS * 86_400_000;
 	const all = nodes.map((p: any): Merged => {
-		if (!Number.isSafeInteger(p?.number) || typeof p.mergedAt !== "string")
+		if (!Number.isSafeInteger(p?.number) || !Number.isFinite(Date.parse(p.mergedAt)))
 			throw new Error("a merged PR without its number or merge time");
+		if (!Number.isFinite(Date.parse(p.updatedAt))) throw new Error("a merged PR without its last update time");
 		const suites = p.commits?.nodes?.[0]?.commit?.checkSuites?.nodes ?? [];
 		return {
 			number: p.number,
@@ -79,7 +85,12 @@ export function window(value: unknown, now: number): Window {
 			),
 		};
 	});
-	// Ordered by last update, so a full page whose oldest update is inside the window may hide older merges.
-	const cut = nodes.length === MAX_MERGED && all.every((p) => Date.parse(p.merged) >= since);
-	return { pulls: all.filter((p) => p.branch.startsWith("quest/") && Date.parse(p.merged) >= since), cut };
+	// A later page can contain an in-window merge only if its last update can also be inside the window.
+	const cut = hasNextPage && Date.parse(nodes.at(-1)?.updatedAt) >= since;
+	return {
+		pulls: all
+			.filter((p) => p.branch.startsWith("quest/") && Date.parse(p.merged) >= since)
+			.sort((a, b) => Date.parse(b.merged) - Date.parse(a.merged)),
+		cut,
+	};
 }
