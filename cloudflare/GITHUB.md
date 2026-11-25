@@ -42,5 +42,6 @@ private key for the App; the Worker never uses one.
 
 Install the App from `https://github.com/apps/<slug>/installations/new` on
 each account or organization whose repositories the site should show,
-choosing the repositories. A person sees a repository only when the App is
+choosing the repositories. Then return to the quest log and select **Sign in**
+to start authorization. A person sees a repository only when the App is
 installed on it and they can read it on GitHub.

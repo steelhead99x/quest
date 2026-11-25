@@ -7,6 +7,7 @@ describe("manifest", () => {
 		expect(m.url).toBe("https://quest.example.dev");
 		expect(m.callback_urls).toEqual(["https://quest.example.dev" + CALLBACK]);
 		expect(m.redirect_url).toBe("http://localhost:8788/callback");
+		expect(m.request_oauth_on_install).toBe(false);
 		expect(m.hook_attributes.active).toBe(false);
 		expect(m.default_events).toEqual([]);
 		expect(m.default_permissions).toEqual(PERMISSIONS);

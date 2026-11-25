@@ -77,7 +77,11 @@ export function BenchPage(props: {
 						Quests merged in the last {WINDOW_DAYS} days. Medians; score out of 10, review rounds, hours
 						from claim to merge, and minutes of CI.
 					</p>
-					{props.cut && <p class="muted">Only the 50 most recently updated merged PRs were read.</p>}
+					{props.cut && (
+						<p class="muted" role="status">
+							Only the 50 most recently updated merged PRs were read, so totals may miss some merges.
+						</p>
+					)}
 				</RepoHeading>
 				{props.rows.length === 0 && <p>No quests merged in the last {WINDOW_DAYS} days.</p>}
 				{props.rows.length > 0 && (

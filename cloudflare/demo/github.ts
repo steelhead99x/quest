@@ -121,6 +121,7 @@ export function github(snapshot: Snapshot, now: () => number) {
 		body: recordBody(String(size), String(writer), Number(score), Number(rounds)),
 		createdAt: iso(t0 - (Number(hours) + 24 * (i + 1)) * HOUR),
 		mergedAt: iso(t0 - 24 * (i + 1) * HOUR),
+		updatedAt: iso(t0 - 24 * (i + 1) * HOUR),
 		commits: {
 			nodes: [
 				{
@@ -178,7 +179,7 @@ export function github(snapshot: Snapshot, now: () => number) {
 			const { query } = (await request.json()) as { query: string };
 			if (query.includes("query Board")) return json({ data: { repository: repository() } });
 			if (query.includes("query Bench"))
-				return json({ data: { repository: { pullRequests: { nodes: merged } } } });
+				return json({ data: { repository: { pullRequests: { nodes: merged, pageInfo: { hasNextPage: false } } } } });
 			return json({ errors: [{ message: "the demo answers only the board and bench queries" }] });
 		}
 		const checks = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/check-runs$/.exec(url.pathname);
