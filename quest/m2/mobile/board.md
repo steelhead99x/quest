@@ -2,7 +2,7 @@
 
 ## Goal
 
-The [Worker](/quest/m2/mobile/worker.md) shows, for each repository the
+The Worker (`cloudflare/DEPLOY.md`) shows, for each repository the
 user can read, a stats page (quests by milestone, size, and state: ready,
 blocked, waiting, claimed), the ready ranking in `quest unblocked`'s
 order, the maintainer's waiting items in `quest waiting`'s order, and a
@@ -25,8 +25,3 @@ read well on a phone and an iPad in both orientations.
   states, as the theme requires.
 - Benchmark and validate with the device bench (`cloudflare/DEVICES.md`)
   on the largest quest tree available (this repository's own).
-
-## Required
-
-- [Worker foundation](/quest/m2/mobile/worker.md) - the site, layout, and
-  sign-in these pages live in

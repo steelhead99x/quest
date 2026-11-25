@@ -40,6 +40,11 @@ remaining choices, marked "agent's choice" below):
   the parent of moq-dev/quest#575, and cut the rest (agent's choice:
   its layout, board, and sign-in were reviewed and tested; rejected:
   rewriting them).
+- Sessions? ✅ The App's user token and refresh token sealed with AES-GCM
+  in an HttpOnly cookie, with no database (agent's choice, on building the
+  Worker: kix needed Better Auth and D1 for several sign-in methods,
+  passkeys, and jobs, all cut here; rejected: restoring Better Auth on D1,
+  which adds a dependency, migrations, and a database to deploy).
 - Milestone? ✅ m2 (agent's choice: it gates nothing in m0 or m1, and m2
   is where kix's mobile app was noted as dropped).
 - How is it validated? ✅ On the contributor's physical Android phone and

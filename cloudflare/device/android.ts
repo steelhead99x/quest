@@ -1,6 +1,14 @@
 // Drive Chrome on an Android phone over adb with the Chrome DevTools Protocol.
 
-import { type DeviceInfo, type Driver, type Installable, type Load, pageTiming, TIMING_SCRIPT } from "./driver.ts";
+import {
+	type DeviceInfo,
+	type Driver,
+	type Installable,
+	type Load,
+	CONTROLLED_SCRIPT,
+	pageTiming,
+	TIMING_SCRIPT,
+} from "./driver.ts";
 import { Rpc } from "./rpc.ts";
 import { type Shell, sleep } from "./shell.ts";
 
@@ -95,7 +103,7 @@ export class Android implements Driver {
 		const installability = (await page.call("Page.getInstallabilityErrors")) as {
 			installabilityErrors?: { errorId: string }[];
 		};
-		const controlled = await this.evaluate(page, "navigator.serviceWorker.controller !== null");
+		const controlled = await this.evaluate(page, CONTROLLED_SCRIPT, true);
 		await page.call("Network.emulateNetworkConditions", {
 			offline: true,
 			latency: 0,
@@ -195,8 +203,8 @@ export class Android implements Driver {
 		throw new Error("the page's load event never finished");
 	}
 
-	private async evaluate(page: Rpc, expression: string): Promise<unknown> {
-		const out = (await page.call("Runtime.evaluate", { expression, returnByValue: true })) as {
+	private async evaluate(page: Rpc, expression: string, awaitPromise = false): Promise<unknown> {
+		const out = (await page.call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise })) as {
 			result?: { value?: unknown };
 			exceptionDetails?: { text?: string };
 		};

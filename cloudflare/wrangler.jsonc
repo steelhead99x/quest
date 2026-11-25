@@ -1,0 +1,17 @@
+{
+	"$schema": "../node_modules/wrangler/config-schema.json",
+	// No hostname, route, or account: each deployer supplies their own, so a fork
+	// deploys without editing this file (DEPLOY.md).
+	"name": "quest",
+	"main": "src/index.tsx",
+	"compatibility_date": "2026-11-01",
+	"observability": { "enabled": true },
+	"build": { "command": "bun scripts/build.ts", "watch_dir": ["src", "scripts", "../design"] },
+	"assets": { "directory": "build/public" },
+	"workers_dev": true,
+	"vars": {
+		// The App's slug, for its install link; each deploy registers its own (GITHUB.md).
+		"GITHUB_APP_SLUG": "",
+	},
+	"secrets": { "required": ["AUTH_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"] },
+}

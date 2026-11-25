@@ -2,7 +2,7 @@
 
 ## Goal
 
-The [Worker](/quest/m2/mobile/worker.md) shows, per repository, how quests
+The Worker (`cloudflare/DEPLOY.md`) shows, per repository, how quests
 performed: for each quest PR merged in the last 30 days, its size,
 implementers, review score and rounds, time from claim to merge, and CI
 wall time, with rollups by size and implementing model and the latest

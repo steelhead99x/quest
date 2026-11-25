@@ -1,0 +1,18 @@
+{
+	// The tools that run on Bun on a contributor's machine: the device bench and App registration.
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
+		"lib": ["ES2022", "DOM"],
+		"types": ["node", "bun"],
+		"strict": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noEmit": true,
+		"allowImportingTsExtensions": true,
+		"skipLibCheck": true,
+		"resolveJsonModule": true
+	},
+	"include": ["device", "scripts", "test/*.ts", "vitest.config.ts", "src/github/app.ts"]
+}

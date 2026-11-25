@@ -1,0 +1,6 @@
+# Copy to .dev.vars for `bun run dev`. Generate the secret with `openssl rand -hex 32`.
+AUTH_SECRET=replace-with-a-random-secret-at-least-32-characters
+# From `bun run register-app --origin http://localhost:8787` (GITHUB.md).
+GITHUB_CLIENT_ID=replace-with-github-app-client-id
+GITHUB_CLIENT_SECRET=replace-with-github-app-client-secret
+GITHUB_APP_SLUG=replace-with-github-app-slug

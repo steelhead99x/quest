@@ -77,6 +77,17 @@ export const TIMING_SCRIPT = `JSON.stringify((() => {
 	};
 })())`;
 
+/**
+ * A promise, as script text, that resolves true once a service worker controls
+ * the page: it waits for registration to finish and for the worker to claim
+ * the page, giving up after three seconds, since a page registers it after load.
+ */
+export const CONTROLLED_SCRIPT = `(navigator.serviceWorker ? Promise.race([
+	navigator.serviceWorker.ready.then(() => navigator.serviceWorker.controller !== null || new Promise((resolve) =>
+		navigator.serviceWorker.addEventListener("controllerchange", () => resolve(true), { once: true }))),
+	new Promise((resolve) => setTimeout(() => resolve(navigator.serviceWorker.controller !== null), 3000)),
+]) : Promise.resolve(false))`;
+
 /** Read what TIMING_SCRIPT returned, refusing anything that is not its shape. */
 export function pageTiming(json: unknown): PageTiming {
 	if (typeof json !== "string") throw new Error("the page returned no timing");
