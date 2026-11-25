@@ -64,7 +64,9 @@ export class ReviewLimitError extends Error {
 	}
 }
 
-export const SEVERITIES = ["high", "medium", "low"] as const;
+import { SEVERITIES } from "../core";
+
+export { SEVERITIES };
 /** What became of a finding by the next round: the head fixes it, the author's refutation holds, or it still holds. */
 export const DISPOSITIONS = ["fixed", "refuted", "open"] as const;
 

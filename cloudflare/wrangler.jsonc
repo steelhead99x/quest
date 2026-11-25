@@ -5,6 +5,8 @@
 	"name": "quest",
 	"main": "src/index.tsx",
 	"compatibility_date": "2026-11-01",
+	// node:crypto, which the CLI's model tables use for the writer A/B; the bench page reads them to parse `## Models`.
+	"compatibility_flags": ["nodejs_compat"],
 	"observability": { "enabled": true },
 	"build": { "command": "bun scripts/build.ts", "watch_dir": ["src", "scripts", "../design"] },
 	"assets": { "directory": "build/public" },
