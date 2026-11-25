@@ -29,3 +29,8 @@ later PRs compare against it.
   `cloudflare/`, or give an agent session a shell on that machine to run
   it. Check it is done when `cloudflare/bench/` holds an `android-*.json`
   and an `ipad-*.json`.
+
+## Required
+
+- [Deploy](/quest/m2/mobile/deploy.md) - the live site the baselines
+  measure
