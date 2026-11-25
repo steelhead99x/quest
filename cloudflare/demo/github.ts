@@ -179,7 +179,9 @@ export function github(snapshot: Snapshot, now: () => number) {
 			const { query } = (await request.json()) as { query: string };
 			if (query.includes("query Board")) return json({ data: { repository: repository() } });
 			if (query.includes("query Bench"))
-				return json({ data: { repository: { pullRequests: { nodes: merged, pageInfo: { hasNextPage: false } } } } });
+				return json({
+					data: { repository: { pullRequests: { nodes: merged, pageInfo: { hasNextPage: false } } } },
+				});
 			return json({ errors: [{ message: "the demo answers only the board and bench queries" }] });
 		}
 		const checks = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/check-runs$/.exec(url.pathname);
