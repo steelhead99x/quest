@@ -16,5 +16,14 @@
 		"jsx": "react-jsx",
 		"jsxImportSource": "hono/jsx"
 	},
-	"include": ["device", "scripts", "test/*.ts", "vitest.config.ts", "src/github/app.ts"]
+	"include": [
+		"device",
+		"scripts",
+		"demo/snapshot.ts",
+		"demo/build.ts",
+		"demo/e2e.ts",
+		"test/*.ts",
+		"vitest.config.ts",
+		"src/github/app.ts"
+	]
 }

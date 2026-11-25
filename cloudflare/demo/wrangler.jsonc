@@ -1,0 +1,20 @@
+{
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	// The end-to-end demo: the real Worker against a stand-in GitHub (demo/github.ts),
+	// so every page and action works with no App, account, or network. `bun run demo`.
+	"name": "quest-demo",
+	"main": "index.ts",
+	"compatibility_date": "2026-11-01",
+	"compatibility_flags": ["nodejs_compat"],
+	// Runs from cloudflare/, where `bun run demo` starts Wrangler.
+	"build": { "command": "bun demo/build.ts" },
+	"assets": { "directory": "../build/public" },
+	"workers_dev": false,
+	// Demo values only: the stand-in GitHub accepts any client and never sees a real token.
+	"vars": {
+		"AUTH_SECRET": "demo-only-secret-that-is-at-least-32-characters",
+		"GITHUB_CLIENT_ID": "Iv23demo",
+		"GITHUB_CLIENT_SECRET": "demo",
+		"GITHUB_APP_SLUG": "quest-demo",
+	},
+}

@@ -16,5 +16,12 @@
 		"jsx": "react-jsx",
 		"jsxImportSource": "hono/jsx"
 	},
-	"include": ["src", "test/worker", "worker-configuration.d.ts"]
+	"include": [
+		"src",
+		"demo/index.ts",
+		"demo/github.ts",
+		"demo/snapshot.d.ts",
+		"test/worker",
+		"worker-configuration.d.ts"
+	]
 }

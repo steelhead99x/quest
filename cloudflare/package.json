@@ -5,13 +5,15 @@
 	"scripts": {
 		"build": "bun scripts/build.ts",
 		"types": "wrangler types",
-		"check": "bun run build && wrangler types && tsc --noEmit && tsc --noEmit -p tsconfig.tools.json && prettier --check . && wrangler deploy --dry-run --outdir .wrangler/dry-run",
-		"test": "bun run build && wrangler types && vitest run",
+		"check": "bun run build && bun demo/snapshot.ts && wrangler types && tsc --noEmit && tsc --noEmit -p tsconfig.tools.json && prettier --check . && wrangler deploy --dry-run --outdir .wrangler/dry-run && wrangler deploy -c demo/wrangler.jsonc --dry-run --outdir .wrangler/demo-dry-run",
+		"test": "bun run build && bun demo/snapshot.ts && wrangler types && vitest run",
 		"fix": "prettier --write .",
 		"dev": "wrangler dev",
 		"deploy": "wrangler deploy",
 		"register-app": "bun scripts/register-app.ts",
-		"device-bench": "bun scripts/device-bench.ts"
+		"device-bench": "bun scripts/device-bench.ts",
+		"demo": "wrangler dev -c demo/wrangler.jsonc",
+		"demo:e2e": "bun demo/e2e.ts"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-plugin": "1.9.2",
