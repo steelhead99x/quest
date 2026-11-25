@@ -278,6 +278,8 @@ describe("helpers", () => {
 		expect(local("/repos/a/b?x=1")).toBe("/repos/a/b?x=1");
 		for (const bad of [null, "", "repos", "//x", "/\\x", "https://x", "/" + "a".repeat(600)])
 			expect(local(bad)).toBe("/");
+		expect(local("/\t/example.test")).toBe("/");
+		expect(local("/repos/a/b\n")).toBe("/");
 	});
 
 	test("bounded refuses an oversized body whether declared or streamed", async () => {

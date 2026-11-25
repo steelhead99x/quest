@@ -98,7 +98,8 @@ export function pending(value: unknown, now: number): Pending | null {
 /** A path on this site to return to, or `/` for anything else, such as `//evil.example` or a full URL. */
 export function local(next: string | null | undefined): string {
 	if (!next || !next.startsWith("/") || next.startsWith("//") || next.startsWith("/\\")) return "/";
-	return next.length > 512 ? "/" : next;
+	// URL parsers remove tabs and newlines before interpreting the path.
+	return next.length > 512 || /[\u0000-\u001f\u007f]/.test(next) ? "/" : next;
 }
 
 function base64url(bytes: Uint8Array): string {
