@@ -66,14 +66,28 @@ function Repos(props: { repos: Repositories; install: string }) {
 }
 
 /** A page with one message, for errors and the not-found page. */
-export function Message(props: { user: User | null; path: string; title: string; children: string }) {
+export function Message(props: {
+	user: User | null;
+	path: string;
+	title: string;
+	children: string;
+	/** Where to go back to, the home page by default. */
+	back?: string;
+	/** The result on GitHub, for an action's page. */
+	link?: string;
+}) {
 	return (
 		<Layout title={props.title} description={props.title} path={props.path} user={props.user}>
 			<section class="wrap section">
 				<h1>{props.title}</h1>
 				<p>{props.children}</p>
+				{props.link && (
+					<p>
+						<a href={props.link}>See it on GitHub</a>
+					</p>
+				)}
 				<p>
-					<a href="/">Back to the quest log</a>
+					<a href={props.back ?? "/"}>Back to the quest log</a>
 				</p>
 			</section>
 		</Layout>

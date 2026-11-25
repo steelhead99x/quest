@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { DEPTH, tree } from "../../src/board/load.ts";
+import { DEPTH, tree, workflows } from "../../src/board/load.ts";
 import { SESSION, seal } from "../../src/session.ts";
 import { env, harness, json, type Route } from "./fake.ts";
 
@@ -61,6 +61,7 @@ function repository(files: Record<string, string> = FILES, extra: Record<string,
 					title: "Delta",
 					isDraft: false,
 					headRefName: "quest/m0/d",
+					headRefOid: "d".repeat(40),
 					createdAt: "2026-11-20T00:00:00Z",
 					body: "",
 					author: { login: "steelhead99x" },
@@ -73,7 +74,13 @@ function repository(files: Record<string, string> = FILES, extra: Record<string,
 }
 
 function routes(repo: unknown = repository()): Record<string, Route> {
-	return { [GRAPHQL]: () => json({ data: { repository: repo } }) };
+	return {
+		[GRAPHQL]: () => json({ data: { repository: repo } }),
+		"GET https://api.github.com/repos/moq-dev/quest/actions/runs": () =>
+			json({ total_count: 0, workflow_runs: [] }),
+		[`GET https://api.github.com/repos/moq-dev/quest/commits/${"d".repeat(40)}/check-runs`]: () =>
+			json({ total_count: 0, check_runs: [] }),
+	};
 }
 
 describe("board", () => {
@@ -101,7 +108,8 @@ describe("board", () => {
 		expect(html).toContain('<span class="ql-size ql-l">L</span>');
 		const graphql = h.requests.find((r) => r.url === "https://api.github.com/graphql")!;
 		expect(graphql.headers.get("authorization")).toBe("Bearer ghu_7");
-		expect(response.headers.get("server-timing")).toContain('desc="1 requests"');
+		// The tree in one GraphQL request, and the default branch's runs in one more.
+		expect(response.headers.get("server-timing")).toContain('desc="2 requests"');
 	});
 
 	test("renders a quest page with tree links on the board, other files on GitHub, and raw HTML as text", async () => {
@@ -211,5 +219,192 @@ describe("loader", () => {
 			})
 		).text();
 		expect(html).toContain("This repository has no quest tree on main.");
+	});
+});
+
+const RUNS = "GET https://api.github.com/repos/moq-dev/quest/actions/runs";
+const run = (id: number, extra: Record<string, unknown> = {}) => ({
+	id,
+	name: `Check ${id}`,
+	status: "completed",
+	conclusion: "failure",
+	html_url: `https://github.com/moq-dev/quest/actions/runs/${id}`,
+	run_started_at: "2026-11-25T11:00:00Z",
+	updated_at: "2026-11-25T11:03:05Z",
+	...extra,
+});
+const WORKFLOWS = {
+	entries: [
+		{ name: "check.yml", type: "blob", object: { text: "name: Check\non:\n  push:\n  workflow_dispatch:\n" } },
+		{
+			name: "release.yml",
+			type: "blob",
+			object: { text: "name: Release\non: push\n# workflow_dispatch is off\n" },
+		},
+		{ name: "notes.txt", type: "blob", object: { text: "workflow_dispatch" } },
+	],
+};
+
+describe("CI", () => {
+	test("a quest page shows its PR's checks and runs, offering a re-run only for a failed run", async () => {
+		const h = harness({
+			...routes(),
+			[`GET https://api.github.com/repos/moq-dev/quest/commits/${"d".repeat(40)}/check-runs`]: () =>
+				json({
+					total_count: 31,
+					check_runs: [
+						{
+							id: 1,
+							name: "lint",
+							status: "completed",
+							conclusion: "success",
+							html_url: "https://x/1",
+							started_at: "2026-11-25T11:00:00Z",
+							completed_at: "2026-11-25T11:00:42Z",
+						},
+					],
+				}),
+			[RUNS]: (r) => {
+				expect(new URL(r.url).searchParams.get("head_sha")).toBe("d".repeat(40));
+				return json({
+					total_count: 3,
+					workflow_runs: [
+						run(10),
+						run(11, { conclusion: "success" }),
+						run(12, { conclusion: "action_required" }),
+					],
+				});
+			},
+		});
+		const html = await (await h.request("/repos/moq-dev/quest/quest/m0/d", { cookies: [await signedIn()] })).text();
+		expect(html).toContain("Checks on #12");
+		expect(html).toContain(">lint</a>");
+		expect(html).toContain("42s");
+		expect(html).toContain("3m 05s");
+		expect(html.match(/Re-run failed jobs/g)).toHaveLength(1);
+		expect(html).toContain('action="/repos/moq-dev/quest/runs/10/rerun"');
+		expect(html).toContain("Waiting for a maintainer to approve it on GitHub");
+		// 31 check runs exist and 30 are shown.
+		expect(html).toContain('More on <a href="https://github.com/moq-dev/quest/pull/12/checks">GitHub</a>');
+	});
+
+	test("the board shows the default branch's runs and only the dispatchable workflows", async () => {
+		const h = harness({
+			...routes(repository(FILES, { workflows: WORKFLOWS })),
+			[RUNS]: (r) => {
+				expect(new URL(r.url).searchParams.get("branch")).toBe("main");
+				return json({ total_count: 1, workflow_runs: [run(20, { conclusion: "success" })] });
+			},
+		});
+		const html = await (await h.request("/repos/moq-dev/quest", { cookies: [await signedIn()] })).text();
+		expect(html).toContain("CI on main");
+		expect(html).toContain("Check 20");
+		expect(html).toContain('action="/repos/moq-dev/quest/workflows/check.yml/dispatch"');
+		expect(html).not.toContain("release.yml/dispatch");
+	});
+
+	test("reads workflow names and triggers, ignoring a commented trigger", () => {
+		expect(workflows(WORKFLOWS.entries)).toEqual([
+			{ file: "check.yml", name: "Check", dispatch: true },
+			{ file: "release.yml", name: "Release", dispatch: false },
+		]);
+		expect(workflows(undefined)).toEqual([]);
+	});
+
+	test("re-runs a failed run after rechecking it with GitHub", async () => {
+		let posted = false;
+		const h = harness({
+			"GET https://api.github.com/repos/moq-dev/quest/actions/runs/10": () => json(run(10)),
+			"POST https://api.github.com/repos/moq-dev/quest/actions/runs/10/rerun-failed-jobs": () => (
+				(posted = true),
+				json({}, 201)
+			),
+		});
+		const response = await h.request("/repos/moq-dev/quest/runs/10/rerun", {
+			method: "POST",
+			headers: { origin: "https://quest.test", "content-type": "application/x-www-form-urlencoded" },
+			body: "next=%2Frepos%2Fmoq-dev%2Fquest%2Fquest%2Fm0%2Fd",
+			cookies: [await signedIn()],
+		});
+		expect(response.status).toBe(200);
+		expect(posted).toBe(true);
+		const html = await response.text();
+		expect(html).toContain("Re-run started");
+		expect(html).toContain('href="/repos/moq-dev/quest/quest/m0/d"');
+		const call = h.requests.find((r) => r.method === "POST")!;
+		expect(call.headers.get("authorization")).toBe("Bearer ghu_7");
+	});
+
+	test.each([
+		["a run awaiting approval", run(10, { conclusion: "action_required" }), "approve it on GitHub"],
+		["a run that passed", run(10, { conclusion: "success" }), "no failed jobs"],
+		["a run still going", run(10, { status: "in_progress", conclusion: null }), "no failed jobs"],
+	])("refuses to re-run %s", async (_, value, message) => {
+		const h = harness({ "GET https://api.github.com/repos/moq-dev/quest/actions/runs/10": () => json(value) });
+		const response = await h.request("/repos/moq-dev/quest/runs/10/rerun", {
+			method: "POST",
+			headers: { origin: "https://quest.test", "content-type": "application/x-www-form-urlencoded" },
+			body: "next=%2F",
+			cookies: [await signedIn()],
+		});
+		expect(response.status).toBe(409);
+		expect(await response.text()).toContain(message);
+		expect(h.requests.filter((r) => r.method === "POST")).toEqual([]);
+	});
+
+	test("shows GitHub's refusal when the person lacks write access", async () => {
+		const h = harness({
+			"GET https://api.github.com/repos/moq-dev/quest/actions/runs/10": () => json(run(10)),
+			"POST https://api.github.com/repos/moq-dev/quest/actions/runs/10/rerun-failed-jobs": () =>
+				json({ message: "Must have admin rights to Repository." }, 403),
+		});
+		const response = await h.request("/repos/moq-dev/quest/runs/10/rerun", {
+			method: "POST",
+			headers: { origin: "https://quest.test", "content-type": "application/x-www-form-urlencoded" },
+			body: "next=%2F",
+			cookies: [await signedIn()],
+		});
+		expect(response.status).toBe(403);
+		expect(await response.text()).toContain("Must have admin rights to Repository.");
+	});
+
+	test("actions refuse another site's post and a signed-out one", async () => {
+		const h = harness();
+		const other = await h.request("/repos/moq-dev/quest/runs/10/rerun", {
+			method: "POST",
+			headers: { origin: "https://evil.example" },
+			cookies: [await signedIn()],
+		});
+		expect(other.status).toBe(403);
+		const out = await h.request("/repos/moq-dev/quest/runs/10/rerun", {
+			method: "POST",
+			headers: { origin: "https://quest.test" },
+		});
+		expect(out.status).toBe(401);
+		expect(h.requests).toEqual([]);
+	});
+
+	test("dispatches a workflow on the default branch, and only one with the trigger", async () => {
+		let body: unknown = null;
+		const h = harness({
+			...routes(repository(FILES, { workflows: WORKFLOWS })),
+			"POST https://api.github.com/repos/moq-dev/quest/actions/workflows/check.yml/dispatches": async (r) => (
+				(body = await r.json()),
+				new Response(null, { status: 204 })
+			),
+		});
+		const post = (file: string) =>
+			h.request(`/repos/moq-dev/quest/workflows/${file}/dispatch`, {
+				method: "POST",
+				headers: { origin: "https://quest.test", "content-type": "application/x-www-form-urlencoded" },
+				body: "next=%2Frepos%2Fmoq-dev%2Fquest",
+				cookies: [signed],
+			});
+		const signed = await signedIn();
+		const ok = await post("check.yml");
+		expect(ok.status).toBe(200);
+		expect(await ok.text()).toContain("GitHub queued Check on main.");
+		expect(body).toEqual({ ref: "main" });
+		expect((await post("release.yml")).status).toBe(409);
 	});
 });

@@ -18,6 +18,9 @@ later PRs compare against it.
   `Page.snapshotRect`.
 - Record baselines from `/` and a repository's board once the Worker
   deploys, with both devices charged and cool.
+- From each device, re-run a real failed workflow run and dispatch a
+  workflow in the contributor's fork, and watch each start on github.com:
+  the Worker's tests fake GitHub's Actions API.
 
 ## Waiting
 
