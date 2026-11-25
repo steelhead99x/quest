@@ -23,11 +23,9 @@ where review rounds or CI time pile up.
   the Cache API, and say when the window was cut short.
 - Cross-check a sample of rows against `quest status <pr>` and the PR
   pages, and benchmark the page on
-  [device bench](/quest/m2/mobile/devices.md).
+  the device bench (`cloudflare/DEVICES.md`).
 
 ## Required
 
 - [Quest board](/quest/m2/mobile/board.md) - the repository pages this
   adds a bench page to
-- [Device bench](/quest/m2/mobile/devices.md) - validation on the
-  physical Android phone and iPad

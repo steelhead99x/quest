@@ -43,8 +43,8 @@ remaining choices, marked "agent's choice" below):
 - Milestone? ✅ m2 (agent's choice: it gates nothing in m0 or m1, and m2
   is where kix's mobile app was noted as dropped).
 - How is it validated? ✅ On the contributor's physical Android phone and
-  iPad, through [device bench](/quest/m2/mobile/devices.md), which every
-  user-facing quest here requires (agent's choice: emulators miss real
+  iPad, through the device bench (`cloudflare/DEVICES.md`), which every
+  user-facing quest here runs for its `## Validation` (agent's choice: emulators miss real
   WebKit, thermal, and network behavior; rejected: emulators only).
 
 ## Waiting

@@ -27,10 +27,5 @@ their fork to their own account's `workers.dev` subdomain.
 - Icons are `design/theme/logo.svg` exported at the manifest's sizes.
 - Wrangler config names no hostname or account: those come from each
   deployer's environment, so a fork deploys without editing it.
-- Validate with [device bench](/quest/m2/mobile/devices.md): install from
+- Validate with the device bench (`cloudflare/DEVICES.md`): install from
   the browser on both devices, sign in, and open offline.
-
-## Required
-
-- [Device bench](/quest/m2/mobile/devices.md) - validation on the
-  physical Android phone and iPad
