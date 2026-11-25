@@ -1,33 +1,35 @@
-# [M] GitHub App for the mobile apps
+# [S] GitHub App for the mobile quest log
 
 ## Goal
 
-A GitHub App manifest, checked in, defines the app both phones sign in
-through. Users sign in with GitHub's device flow, so neither app holds a
-client secret and nothing is hosted. With the user's token the apps read
-pull requests, check runs, and workflow runs, and can re-run a failed
-workflow run or start a `workflow_dispatch` workflow, never more than the
-signed-in user could do on github.com.
+A checked-in GitHub App manifest, cut down from kix's, defines the App the
+[Worker](/quest/m2/mobile/worker.md) signs people in with. Its user tokens
+read pull requests, check runs, and workflow runs, and can re-run a failed
+run or dispatch a workflow, never more than the signed-in user could do on
+github.com. A `docs/` page says how to register it from the manifest,
+install it, and set the Worker's secrets.
 
 ## Plan
 
 - Permissions, all repository-scoped: metadata read, contents read, pull
-  requests read, checks read, actions write (re-run and dispatch). No
-  webhooks, since nothing is hosted to receive them.
-- Device flow: show the user code and open github.com/login/device; poll
-  at the interval GitHub returns. Store the user token and its refresh
-  token in the Android Keystore and the iOS Keychain, refresh on expiry,
-  and sign out on a refresh failure rather than retrying.
-- The apps never approve a workflow run waiting on approval for a
-  first-time or outside contributor's PR, and hide re-run on such runs:
-  that runs code from someone without write access.
-- A short `docs/` page says how to register the App from the manifest and
-  install it on a repository.
+  requests read, checks read, actions write. Rejected: kix's write access
+  to contents, issues, pull requests, and checks, and its administration,
+  secrets, and environments reads, which served jobs and its CI safety
+  check, both cut.
+- No webhook (agent's choice: pages read GitHub on demand through the
+  Cache API, so there is no event state to keep; rejected: kix's webhook,
+  which kept D1 in step for jobs).
+- The callback URL and homepage come from the deployer's hostname, so a
+  fork registers its own App from the same manifest.
+- moq-bot stays the only App the host's daemons act as; this App acts
+  only for signed-in people.
 
 ## Waiting
 
-- Maintainer: register the App from the manifest under the owner that
-  installs it, enable the device flow, and put its client ID in the apps'
-  build config. Check it is done when the device flow returns a user code
-  for that client ID. An agent cannot take this step: registration needs
-  the owner's browser session, and GitHub offers no API to register an App.
+- Maintainer: register the upstream App from the manifest under the
+  owner that installs it, and set its client ID and secret on the
+  upstream Worker. Check it is done when signing in at the upstream
+  hostname reaches GitHub's authorize page for that App. An agent cannot
+  take this step: GitHub has no API to register an App, and it needs the
+  owner's browser session. The contributor registers a separate App for
+  their fork's deploy.
