@@ -107,7 +107,11 @@ describe("the board agrees with the CLI", () => {
 	});
 
 	test.each(cases)("%s: waiting items", (_, dir) => {
-		const cli = JSON.parse(quest(dir, ["waiting", "--json"])) as { path: string; waits: { text: string }[] }[];
+		// Both inputs contain only local quest documents. Skip live drafts even in an authenticated clone.
+		const cli = JSON.parse(quest(dir, ["waiting", "--json", "--remote", "quest-board-test-no-remote"])) as {
+			path: string;
+			waits: { text: string }[];
+		}[];
 		const b = board(tree(dir), NOW);
 		expect(b.waiting.map((w) => [w.path, w.waits.map((x) => x.text)])).toEqual(
 			cli.map((w) => [w.path, w.waits.map((x) => x.text)]),
