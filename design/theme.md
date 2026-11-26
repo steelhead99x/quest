@@ -67,6 +67,30 @@ square. It carries its own fill, so it reads on light and dark pages, and it
 stays legible at 16 px. Use it as is: do not recolour it, add text inside it,
 or pair it with game art.
 
+## On moq-dev's sites
+
+The quest log site (`cloudflare/`) sits beside moq.dev, so it wears moq-dev's
+house scheme for everything that isn't Quest's own: the slate surfaces, ink,
+Signal Green accent, and type of moq-dev/moq.dev's `src/layouts/global.css`.
+
+| Token | Hex | Use |
+| --- | --- | --- |
+| bg | `#0f172a` | Page |
+| surface | `#131d33` | Panels and entries |
+| surface-2 | `#1a2540` | Raised controls |
+| line | `#1f2a42` | Hairlines |
+| line-strong | `#2c3a57` | Hover and emphasis |
+| ink | `#eef2f8` | Headings and titles |
+| ink-2 | `#c4cddc` | Body text |
+| ink-3 | `#8c99b0` | Secondary text |
+| accent | `#22c55e` | Primary buttons, focus |
+| accent-ink | `#4ade80` | Links and labels |
+
+Headings use Bricolage Grotesque, bold, in sentence case; body text uses DM
+Sans; labels and figures use DM Mono. All three are open-licensed and served by
+the site. Quest's markers, size colours, and mark stay as above: the amber `!`
+and `?`, the rarity ladder with its labels, and the amber square.
+
 ## Social image
 
 [`theme/og.svg`](theme/og.svg) is the source and

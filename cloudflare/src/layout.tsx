@@ -1,8 +1,8 @@
 import type { Child } from "hono/jsx";
 
 // The site shell: every HTML page the Worker serves renders inside Layout.
-// Colours, type, and glyphs follow design/theme.md; tokens live in /theme/theme.css,
-// and the theme's fonts are served from /fonts (scripts/build.ts).
+// Quest's markers, sizes, and mark follow design/theme.md (/theme/theme.css); the
+// surfaces, ink, accent, and type are moq-dev's (src/site.css), served from /fonts.
 
 export const repo = "https://github.com/moq-dev/quest";
 
@@ -35,14 +35,21 @@ export function Layout(props: Page & { children: Child }) {
 				<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 				<title>{title}</title>
 				<meta name="description" content={props.description} />
-				<meta name="theme-color" content="#0a0c11" />
+				<meta name="theme-color" content="#0f172a" />
 				<link rel="icon" href="/theme/logo.svg" type="image/svg+xml" />
 				<link rel="manifest" href="/manifest.webmanifest" />
 				<link rel="apple-touch-icon" href="/theme/icon-192.png" />
-				{/* The display face draws every heading, so fetch it before the stylesheet asks. */}
+				{/* The body and display faces draw the first screen, so fetch them before the stylesheet asks. */}
 				<link
 					rel="preload"
-					href="/fonts/barlow-condensed-latin-700-normal.woff2"
+					href="/fonts/dm-sans-latin-wght-normal.woff2"
+					as="font"
+					type="font/woff2"
+					crossorigin=""
+				/>
+				<link
+					rel="preload"
+					href="/fonts/bricolage-grotesque-latin-wght-normal.woff2"
 					as="font"
 					type="font/woff2"
 					crossorigin=""
@@ -124,7 +131,7 @@ function Crumbs(props: { crumbs: Crumb[] }) {
 export function Bang() {
 	return (
 		<svg class="glyph" viewBox="-10 -22 20 44" aria-hidden="true">
-			<g fill="currentColor" stroke="#0a0c11" stroke-width="2.4" stroke-linejoin="round" paint-order="stroke">
+			<g fill="currentColor" stroke="#0f172a" stroke-width="2.4" stroke-linejoin="round" paint-order="stroke">
 				<path d="M-7 -19 H7 L3.5 4 H-3.5 Z" />
 				<rect x="-5" y="8.5" width="10" height="10" rx="2" />
 			</g>
@@ -137,7 +144,7 @@ export function Query() {
 	return (
 		<svg class="glyph" viewBox="-12 -22 24 44" aria-hidden="true">
 			<g stroke-linecap="round" stroke-linejoin="round">
-				<path d="M-8 -9 C-8 -21 8 -21 8 -9 C8 -1 0 -1 0 5" fill="none" stroke="#0a0c11" stroke-width="9.5" />
+				<path d="M-8 -9 C-8 -21 8 -21 8 -9 C8 -1 0 -1 0 5" fill="none" stroke="#0f172a" stroke-width="9.5" />
 				<path d="M-8 -9 C-8 -21 8 -21 8 -9 C8 -1 0 -1 0 5" fill="none" stroke="currentColor" stroke-width="5" />
 				<rect
 					x="-5"
@@ -146,7 +153,7 @@ export function Query() {
 					height="10"
 					rx="2"
 					fill="currentColor"
-					stroke="#0a0c11"
+					stroke="#0f172a"
 					stroke-width="2.4"
 					paint-order="stroke"
 				/>
