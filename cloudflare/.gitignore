@@ -6,3 +6,4 @@ node_modules/
 .github-app.json
 build/
 worker-configuration.d.ts
+demo/snapshot.gen.js
