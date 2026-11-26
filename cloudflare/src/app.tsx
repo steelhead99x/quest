@@ -4,6 +4,10 @@ import { authorizeUrl, type Config, exchange, refreshed, revoke } from "./auth.t
 import { CALLBACK } from "./github/app.ts";
 import { type Fetch, GitHub, GitHubError, Spent } from "./github/client.ts";
 import { repositories } from "./github/repos.ts";
+import { load, NotFound, type Tree } from "./board/load.ts";
+import { board, lookup } from "./board/model.ts";
+import { BoardPage, QuestPage } from "./board/pages.tsx";
+import { cached } from "./cache.ts";
 import { Home, Message } from "./home.tsx";
 import type { User } from "./layout.tsx";
 import { local, open, pending, SESSION, type Session, STATE, seal, session } from "./session.ts";
@@ -20,6 +24,8 @@ export interface Env {
 export interface Deps {
 	fetch: Fetch;
 	now: () => number;
+	/** Where GitHub answers are cached briefly, or null for none. */
+	cache: () => Promise<Cache | null>;
 }
 
 type Vars = { github: GitHub; session: Session | null; config: Config; install: string; cookies: string[] };
@@ -101,6 +107,30 @@ export function app(deps: Deps): App {
 		return c.html(<Home user={user(s)} install={c.get("install")} repos={repos} />);
 	});
 
+	web.get("/repos/:owner/:name", async (c) => {
+		const b = await boardFor(c, deps);
+		if (b instanceof Response) return b;
+		return c.html(<BoardPage b={b} user={user(c.get("session"))!} path={new URL(c.req.url).pathname} />);
+	});
+
+	web.get("/repos/:owner/:name/*", async (c) => {
+		const b = await boardFor(c, deps);
+		if (b instanceof Response) return b;
+		const prefix = `/repos/${c.req.param("owner")}/${c.req.param("name")}/`;
+		const page = decodeURIComponent(new URL(c.req.url).pathname.slice(prefix.length));
+		const doc = lookup(b, page);
+		if (!doc) return page404(c);
+		return c.html(
+			<QuestPage
+				b={b}
+				doc={doc.path}
+				user={user(c.get("session"))!}
+				path={new URL(c.req.url).pathname}
+				now={deps.now()}
+			/>,
+		);
+	});
+
 	web.get("/sign-in", async (c) => {
 		const state = crypto.randomUUID();
 		const next = local(c.req.query("next"));
@@ -144,7 +174,7 @@ export function app(deps: Deps): App {
 		return c.redirect("/", 303);
 	});
 
-	web.notFound((c) => page(c, 404, "Not found", "There is no page here."));
+	web.notFound((c) => page404(c));
 
 	web.onError((error, c) => {
 		if (error instanceof Spent)
@@ -154,6 +184,13 @@ export function app(deps: Deps): App {
 			return page(c, 401, "Signed out", "GitHub no longer accepts your sign-in. Sign in again.");
 		}
 		if (error instanceof Misconfigured) return c.text(error.message, 500);
+		if (error instanceof NotFound)
+			return page(
+				c,
+				404,
+				"Repository not found",
+				`${error.message} does not exist, or you cannot read it, or the App is not installed on it.`,
+			);
 		console.error(error);
 		return page(c, 500, "Something broke", error.message);
 	});
@@ -172,6 +209,26 @@ function page(c: Context, status: number, title: string, text: string) {
 		</Message>,
 		status as 400,
 	);
+}
+
+function page404(c: Context) {
+	return page(c, 404, "Not found", "There is no page here.");
+}
+
+/** A repository name GitHub would accept, so a path cannot smuggle anything into the query. */
+const NAME = /^[A-Za-z0-9_.-]{1,100}$/;
+
+/** The board for the route's repository, or a response sending the person to sign in. */
+async function boardFor(c: Context, deps: Deps) {
+	const s = c.get("session");
+	const owner = c.req.param("owner") ?? "";
+	const name = c.req.param("name") ?? "";
+	if (!NAME.test(owner) || !NAME.test(name)) return page404(c);
+	if (!s) return c.redirect(`/sign-in?next=${encodeURIComponent(new URL(c.req.url).pathname)}`, 302);
+	const github = c.get("github").withToken(s.token);
+	const key = `board ${s.id} ${owner}/${name}`.toLowerCase();
+	const tree = await cached<Tree>(await deps.cache(), key, () => load(github, owner, name));
+	return board(tree, deps.now());
 }
 
 /** Refuse a form post from another site, or from a browser that hides where it came from. */

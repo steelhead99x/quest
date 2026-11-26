@@ -499,6 +499,8 @@ pre {
 
 .board {
 	display: grid;
+	/* One column no wider than the screen, whatever its widest child. */
+	grid-template-columns: minmax(0, 1fr);
 	gap: 2rem;
 	padding-block: 2.5rem 1rem;
 }
@@ -835,4 +837,68 @@ a.entry-title:hover {
 		gap: 0.5rem;
 		font-size: 0.85rem;
 	}
+}
+
+/* Board stats: state tallies, a milestone table, and size counts. */
+.tally-item {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	min-height: 2.25rem;
+	background: var(--ql-panel);
+	border: 1px solid var(--ql-rule);
+	border-radius: 4px;
+	padding: 0.3rem 0.8rem 0.3rem 0.5rem;
+}
+
+.stats-table {
+	width: 100%;
+	margin-top: 1rem;
+	border-collapse: collapse;
+	font-variant-numeric: tabular-nums;
+}
+
+.stats-table caption {
+	text-align: left;
+	font-size: 0.9rem;
+}
+
+.stats-table th,
+.stats-table td {
+	padding: 0.4rem 0.5rem;
+	border-bottom: 1px solid var(--ql-rule);
+	text-align: right;
+}
+
+.stats-table th[scope="row"],
+.stats-table thead th:first-child {
+	text-align: left;
+}
+
+.size-tally {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.75rem;
+}
+
+.entry-status.ql-ready,
+.entry-status.ql-review {
+	color: var(--ql-accent);
+}
+
+.entry-status.ql-blocked {
+	color: var(--ql-grey);
+}
+
+/* A narrow screen scrolls the table, not the page. */
+.stats-scroll {
+	overflow-x: auto;
+}
+
+/* Long repository names and quest titles wrap rather than widen the page. */
+.board-head h1,
+.quest-title h1,
+.entry-title {
+	overflow-wrap: anywhere;
+	min-width: 0;
 }

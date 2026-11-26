@@ -20,8 +20,11 @@ export const json = (body: unknown, status = 200) =>
 export function harness(routes: Record<string, Route> = {}) {
 	const requests: Request[] = [];
 	let now = Date.UTC(2026, 10, 25, 12);
+	// Each harness gets its own cache, so no test sees another's boards.
+	const store = caches.open(`test-${crypto.randomUUID()}`);
 	const worker = app({
 		now: () => now,
+		cache: () => store,
 		fetch: async (input, init) => {
 			const request = new Request(input, init);
 			requests.push(request.clone());

@@ -12,7 +12,9 @@
 		"noEmit": true,
 		"allowImportingTsExtensions": true,
 		"skipLibCheck": true,
-		"resolveJsonModule": true
+		"resolveJsonModule": true,
+		"jsx": "react-jsx",
+		"jsxImportSource": "hono/jsx"
 	},
 	"include": ["device", "scripts", "test/*.ts", "vitest.config.ts", "src/github/app.ts"]
 }

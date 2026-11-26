@@ -22,8 +22,3 @@ recent workflow runs on the default branch.
 - Validate on the device bench (`cloudflare/DEVICES.md`): re-run a real
   failed run in the contributor's fork from each device and watch it
   start on github.com.
-
-## Required
-
-- [Quest board](/quest/m2/mobile/board.md) - the quest pages this adds
-  CI to

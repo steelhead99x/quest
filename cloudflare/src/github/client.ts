@@ -54,9 +54,9 @@ export class GitHub {
 		return this.json<T>("GET", path);
 	}
 
-	/** POST `body` to `path`, returning the parsed JSON or null for an empty answer. */
-	post<T>(path: string, body: unknown): Promise<T> {
-		return this.json<T>("POST", path, body);
+	/** POST `body` to `path`, returning the parsed JSON or null for an empty answer, of at most `max` bytes. */
+	post<T>(path: string, body: unknown, max = MAX_RESPONSE): Promise<T> {
+		return this.json<T>("POST", path, body, max);
 	}
 
 	/** Count and time one request outside the REST API, such as GitHub's OAuth endpoints. */
@@ -71,7 +71,7 @@ export class GitHub {
 		}
 	}
 
-	private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
+	private async json<T>(method: string, path: string, body?: unknown, max = MAX_RESPONSE): Promise<T> {
 		if (!path.startsWith("/")) throw new Error(`a GitHub API path must start with /: ${path}`);
 		const response = await this.raw(`https://api.github.com${path}`, {
 			method,
@@ -84,7 +84,7 @@ export class GitHub {
 			},
 			body: body === undefined ? undefined : JSON.stringify(body),
 		});
-		const text = await bounded(response);
+		const text = await bounded(response, max);
 		if (!response.ok) {
 			let message = text.slice(0, 200);
 			try {
