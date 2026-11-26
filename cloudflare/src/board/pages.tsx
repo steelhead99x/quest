@@ -1,7 +1,17 @@
 import type { Child } from "hono/jsx";
 import { raw } from "hono/html";
 import { type Blocker, questBranch } from "../../../src/core/index.ts";
-import { type Crumb, Difficulty, Layout, Marker, type Size, type Status, type User } from "../layout.tsx";
+import {
+	type Crumb,
+	Difficulty,
+	Entry,
+	Heading,
+	Layout,
+	Marker,
+	type Size,
+	type Status,
+	type User,
+} from "../layout.tsx";
 import { render } from "./markdown.ts";
 import { type Board, type Counts, holdsBack, name, parents, type Quest } from "./model.ts";
 
@@ -43,33 +53,34 @@ function State(props: { quest: Quest }) {
 	return <span class={`entry-status ql-${q.status}`}>{q.handedBack ? "Handed back" : LABELS[q.status]}</span>;
 }
 
-/** A quest row. `state` shows its state label, which a list of one state leaves out. */
-function Row(props: { b: Board; quest: Quest; state?: boolean; note?: string }) {
+/** A quest row, with its state label beside its marker, as design/theme.md requires. */
+function Row(props: { b: Board; quest: Quest; note?: string }) {
 	const { quest } = props;
 	return (
-		<li class="entry">
-			<Marker status={quest.status} />
-			<a class="entry-title" href={questHref(props.b.tree.repository, quest.path)}>
-				{quest.title}
-			</a>
-			<span class="entry-meta">
-				{quest.size && <Difficulty size={quest.size} />}
-				{props.state !== false && <State quest={quest} />}
-				{quest.pull && <a href={quest.pull.url}>#{quest.pull.number}</a>}
-				{props.note && <span class="muted">{props.note}</span>}
-			</span>
-		</li>
+		<Entry
+			title={quest.title}
+			href={questHref(props.b.tree.repository, quest.path)}
+			status={quest.status}
+			size={quest.size}
+		>
+			{quest.size && <Difficulty size={quest.size} />}
+			<State quest={quest} />
+			{quest.pull && <a href={quest.pull.url}>#{quest.pull.number}</a>}
+			{props.note && <span class="muted">{props.note}</span>}
+		</Entry>
 	);
 }
 
+/** Each state's count as a tile: the number large, its marker and label under it. */
 function Tally(props: { counts: Counts }) {
 	return (
-		<ul class="tally" aria-label="Quests by state">
+		<ul class="stats" aria-label="Quests by state">
 			{ORDER.map((s) => (
-				<li>
-					<span class="tally-item">
+				<li class={`stat stat-${s}`}>
+					<strong class="stat-value">{props.counts[s]}</strong>
+					<span class="stat-label">
 						<Marker status={s} />
-						{LABELS[s]} <strong>{props.counts[s]}</strong>
+						{LABELS[s]}
 					</span>
 				</li>
 			))}
@@ -77,34 +88,32 @@ function Tally(props: { counts: Counts }) {
 	);
 }
 
+/** Each milestone's counts by state, as a row that opens its section below. */
 function Milestones(props: { b: Board }) {
-	const { b } = props;
 	return (
-		<div class="stats-scroll">
-			<table class="stats-table">
-				<thead>
-					<tr>
-						<th scope="col">Milestone</th>
-						{ORDER.map((s) => (
-							<th scope="col">{LABELS[s]}</th>
-						))}
-					</tr>
-				</thead>
-				<tbody>
-					{b.milestones.map((m) => (
-						<tr>
-							<th scope="row">
-								<a href={`#${m.path.split("/")[1]}`}>{m.path.split("/")[1]}</a>{" "}
-								<span class="muted">{m.title}</span>
-							</th>
-							{ORDER.map((s) => (
-								<td>{m.counts[s]}</td>
-							))}
-						</tr>
-					))}
-				</tbody>
-			</table>
-		</div>
+		<ul class="milestones" aria-label="Milestones">
+			{props.b.milestones.map((m) => {
+				const id = m.path.split("/")[1]!;
+				return (
+					<li>
+						<a class="milestone-row" href={`#${id}`}>
+							<span class="milestone-name">
+								<span class="ql-eyebrow">{id}</span>
+								{m.title}
+							</span>
+							<span class="milestone-counts">
+								{ORDER.filter((s) => m.counts[s] > 0).map((s) => (
+									<span class={`count-chip ql-${s}`}>
+										<Marker status={s} />
+										{m.counts[s]} <span class="muted">{LABELS[s].toLowerCase()}</span>
+									</span>
+								))}
+							</span>
+						</a>
+					</li>
+				);
+			})}
+		</ul>
 	);
 }
 
@@ -113,7 +122,7 @@ function Sizes(props: { b: Board }) {
 	return (
 		<p class="size-tally" aria-label="Open quests by size">
 			{sizes.map((s) => (
-				<span>
+				<span class="size-count">
 					<Difficulty size={s} /> {props.b.sizes[s]}
 				</span>
 			))}
@@ -182,66 +191,67 @@ export function BoardPage(props: { b: Board; user: User; path: string; children?
 				{quests.length > 0 && (
 					<section class="summary">
 						<Tally counts={b.counts} />
-						<Milestones b={b} />
 						<Sizes b={b} />
+						<Milestones b={b} />
 					</section>
 				)}
-				{b.ranked.length > 0 && (
-					<section class="ql-panel">
-						<h2>Ready to start</h2>
-						<ol class="log">
-							{b.ranked.slice(0, READY_SHOWN).map((r) => (
-								<Row
-									b={b}
-									quest={r.quest}
-									state={false}
-									note={r.dependents ? `unblocks ${r.dependents}` : undefined}
-								/>
-							))}
-						</ol>
-						{b.ranked.length > READY_SHOWN && (
-							<p class="muted">{b.ranked.length - READY_SHOWN} more under their milestones.</p>
-						)}
-					</section>
-				)}
-				{b.waiting.length > 0 && (
-					<section class="ql-panel">
-						<h2>Waiting</h2>
-						<ul class="log">
-							{b.waiting.slice(0, WAITING_SHOWN).map((w) => (
-								<li class="entry plain">
-									{w.path ? (
-										<a class="entry-title" href={questHref(repository, w.path)}>
-											{b.quests.get(w.path)?.title ??
-												name(b.docs.find((d) => d.path === w.path)!)}
-										</a>
-									) : (
-										<a class="entry-title" href={w.pr!}>
-											{w.pr}
-										</a>
-									)}
-									<span class="entry-why">
-										<strong>{w.waits[0]!.party}:</strong> {clip(w.waits[0]!.text, 100)}
-										{w.waits.length > 1 && ` (and ${w.waits.length - 1} more)`}
-									</span>
-								</li>
-							))}
-						</ul>
-						{b.waiting.length > WAITING_SHOWN && (
-							<p class="muted">{b.waiting.length - WAITING_SHOWN} more.</p>
-						)}
-					</section>
-				)}
+				<div class="columns">
+					{b.ranked.length > 0 && (
+						<section class="block">
+							<Heading eyebrow="Up next" title="Ready to start" count={b.ranked.length} />
+							<ol class="log">
+								{b.ranked.slice(0, READY_SHOWN).map((r) => (
+									<Row
+										b={b}
+										quest={r.quest}
+										note={r.dependents ? `unblocks ${r.dependents}` : undefined}
+									/>
+								))}
+							</ol>
+							{b.ranked.length > READY_SHOWN && (
+								<p class="muted">{b.ranked.length - READY_SHOWN} more under their milestones.</p>
+							)}
+						</section>
+					)}
+					{b.waiting.length > 0 && (
+						<section class="block">
+							<Heading eyebrow="Needs a person" title="Waiting" count={b.waiting.length} />
+							<ul class="log">
+								{b.waiting.slice(0, WAITING_SHOWN).map((w) => (
+									<Entry
+										title={
+											w.path
+												? (b.quests.get(w.path)?.title ??
+													name(b.docs.find((d) => d.path === w.path)!))
+												: w.pr!
+										}
+										href={w.path ? questHref(repository, w.path) : w.pr!}
+										tone="wait"
+									>
+										<span class="entry-why">
+											<span class="tag">{w.waits[0]!.party}</span> {clip(w.waits[0]!.text, 100)}
+											{w.waits.length > 1 && ` (and ${w.waits.length - 1} more)`}
+										</span>
+									</Entry>
+								))}
+							</ul>
+							{b.waiting.length > WAITING_SHOWN && (
+								<p class="muted">{b.waiting.length - WAITING_SHOWN} more.</p>
+							)}
+						</section>
+					)}
+				</div>
 				{props.children}
 				{b.milestones.map((m) => {
 					const mine = quests.filter((q) => q.path.startsWith(m.path.replace(/README\.md$/, "")));
 					return (
-						<details class="ql-panel milestone" id={m.path.split("/")[1]}>
+						<details class="fold milestone" id={m.path.split("/")[1]}>
 							<summary>
-								<span class="ql-eyebrow">{m.path.split("/")[1]}</span> {m.title}{" "}
-								<span class="muted">{mine.length}</span>
+								<span class="ql-eyebrow">{m.path.split("/")[1]}</span>
+								<span class="fold-title">{m.title}</span>
+								<span class="count">{mine.length}</span>
 							</summary>
-							<p>
+							<p class="fold-link">
 								<a href={questHref(repository, m.path)}>About this milestone</a>
 							</p>
 							<ul class="log">
@@ -305,20 +315,29 @@ export function QuestPage(props: { b: Board; path: string; doc: string; user: Us
 						</span>
 					)}
 					{quest?.status === "claimed" && !quest.pull && <span class="muted">branch pushed, no PR yet</span>}
-					<a href={blob(b, doc.path)}>Source</a>
+					<a class="source" href={blob(b, doc.path)}>
+						View source
+					</a>
 				</p>
 				{blocked.length > 0 && (
-					<p class="blocked-by">
-						Blocked by{" "}
-						{blocked.map((x, i) => {
-							const target = x.path ? b.docs.find((d) => d.path === x.path) : undefined;
-							return (
-								<>
-									{i > 0 && ", "}
-									{target ? <a href={questHref(repository, target.path)}>{name(target)}</a> : x.text}
-								</>
-							);
-						})}
+					<p class="callout blocked-by">
+						<Marker status="blocked" />
+						<span>
+							Blocked by{" "}
+							{blocked.map((x, i) => {
+								const target = x.path ? b.docs.find((d) => d.path === x.path) : undefined;
+								return (
+									<>
+										{i > 0 && ", "}
+										{target ? (
+											<a href={questHref(repository, target.path)}>{name(target)}</a>
+										) : (
+											x.text
+										)}
+									</>
+								);
+							})}
+						</span>
 					</p>
 				)}
 				{props.children}

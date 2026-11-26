@@ -3,8 +3,9 @@
  *
  * design/theme.md is canonical. Change it first, then this file.
  *
- * Fonts are open-licensed (SIL Open Font License 1.1). Load them from Google Fonts:
- * <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;600&display=swap">
+ * Fonts are open-licensed (SIL Open Font License 1.1): Barlow Condensed 600 and
+ * 700, Inter 400 and 600. The quest log site serves them itself from @fontsource
+ * (cloudflare/scripts/build.ts, cloudflare/src/site.css).
  */
 
 :root {

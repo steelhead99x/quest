@@ -1,5 +1,5 @@
 import { boardHref, RepoHeading } from "../board/pages.tsx";
-import { Difficulty, Layout, type Size, type User } from "../layout.tsx";
+import { Difficulty, Entry, Heading, Layout, type Size, type User } from "../layout.tsx";
 import { WINDOW_DAYS } from "./load.ts";
 import type { Rollup, Row } from "./model.ts";
 
@@ -17,10 +17,10 @@ function SizeLabel(props: { size: string | null }) {
 
 function Rollups(props: { title: string; label: string; rows: Rollup[]; sized?: boolean }) {
 	return (
-		<section class="ql-panel">
-			<h2>{props.title}</h2>
+		<section class="block">
+			<Heading title={props.title} />
 			<div class="stats-scroll">
-				<table class="stats-table">
+				<table class="stats-table cards">
 					<thead>
 						<tr>
 							<th scope="col">{props.label}</th>
@@ -35,11 +35,11 @@ function Rollups(props: { title: string; label: string; rows: Rollup[]; sized?: 
 						{props.rows.map((r) => (
 							<tr>
 								<th scope="row">{props.sized ? <SizeLabel size={r.key} /> : r.key}</th>
-								<td>{r.pulls}</td>
-								<td>{num(r.score)}</td>
-								<td>{num(r.rounds)}</td>
-								<td>{r.hours === null ? "–" : `${num(r.hours)}h`}</td>
-								<td>{r.ci === null ? "–" : `${num(r.ci)}m`}</td>
+								<td data-label="PRs">{r.pulls}</td>
+								<td data-label="Score">{num(r.score)}</td>
+								<td data-label="Rounds">{num(r.rounds)}</td>
+								<td data-label="To merge">{r.hours === null ? "–" : `${num(r.hours)}h`}</td>
+								<td data-label="CI">{r.ci === null ? "–" : `${num(r.ci)}m`}</td>
 							</tr>
 						))}
 					</tbody>
@@ -88,26 +88,29 @@ export function BenchPage(props: {
 					<>
 						<Rollups title="By size" label="Size" rows={props.sizes} sized />
 						<Rollups title="By writer" label="Model" rows={props.writers} />
-						<section class="ql-panel">
-							<h2>Merged</h2>
+						<section class="block">
+							<Heading title="Merged" count={props.rows.length} />
 							<ul class="log">
 								{props.rows.map((r) => (
-									<li class="entry plain">
-										<a class="entry-title" href={r.url}>
-											{r.title} <span class="muted">#{r.number}</span>
-										</a>
-										<span class="entry-meta">
-											<SizeLabel size={r.size} />
-											{r.models[0] && <span class="muted">{r.models[0]}</span>}
-											{r.score !== null && <span>{r.score}/10</span>}
-											{r.rounds !== null && <span>{plural(r.rounds, "round")}</span>}
-											<span>{num(r.hours)}h to merge</span>
-											{r.ci !== null && <span>{num(r.ci)}m CI</span>}
-											{r.unreadable && (
-												<span class="muted">Review record unreadable: {r.unreadable}</span>
-											)}
-										</span>
-									</li>
+									<Entry
+										title={
+											<>
+												{r.title} <span class="muted">#{r.number}</span>
+											</>
+										}
+										href={r.url}
+										size={r.size && SIZES.includes(r.size) ? (r.size as Size) : null}
+									>
+										<SizeLabel size={r.size} />
+										{r.models[0] && <span class="muted">{r.models[0]}</span>}
+										{r.score !== null && <span>{r.score}/10</span>}
+										{r.rounds !== null && <span>{plural(r.rounds, "round")}</span>}
+										<span>{num(r.hours)}h to merge</span>
+										{r.ci !== null && <span>{num(r.ci)}m CI</span>}
+										{r.unreadable && (
+											<span class="muted">Review record unreadable: {r.unreadable}</span>
+										)}
+									</Entry>
 								))}
 							</ul>
 						</section>

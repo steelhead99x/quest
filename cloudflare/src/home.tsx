@@ -1,26 +1,47 @@
 import type { Repositories } from "./github/repos.ts";
-import { Layout, type User } from "./layout.tsx";
+import { Difficulty, Entry, Heading, Layout, type User } from "./layout.tsx";
 
 const description = "A quest log for your repo and your agents: quest stats, PR checks, and re-runs, on your phone.";
 
 /** The home page: sign-in, or the signed-in person's repositories. */
-export function Home(props: { user: User | null; install: string; repos: Repositories | null }) {
+export function Home(props: { user: User | null; install: string; repos: Repositories | null; origin: string }) {
 	return (
-		<Layout description={description} path="/" user={props.user}>
+		<Layout description={description} path="/" user={props.user} origin={props.origin}>
 			{props.repos ? (
 				<Repos repos={props.repos} install={props.install} />
 			) : (
 				<section class="wrap hero">
-					<h1>A quest log for your repo and your agents</h1>
-					<p class="lede">Quest stats, PR checks, and re-runs, on your phone.</p>
-					<p class="actions">
-						<a class="button primary" href="/sign-in?next=%2F">
-							Sign in with GitHub
-						</a>
-					</p>
-					<p class="muted">
-						New here? <a href={props.install}>Install the App</a> on the repositories you plan in.
-					</p>
+					<div class="hero-copy">
+						<h1>A quest log for your repo and your agents</h1>
+						<p class="lede">Readable plans. Explicit dependencies. Reviewable Git changes.</p>
+						<p>Your quest tree on your phone: what's ready, what's in review, and its CI, with re-runs.</p>
+						<p class="actions">
+							<a class="button primary" href="/sign-in?next=%2F">
+								Sign in with GitHub
+							</a>
+							<a class="button quiet" href={props.install}>
+								Install the App
+							</a>
+						</p>
+					</div>
+					{/* The social image's sample entries, as an illustration of what a board shows. */}
+					<figure class="sample">
+						<ul class="log" aria-label="Example quests">
+							<Entry title="Add the CSV endpoint" status="ready" size="S">
+								<Difficulty size="S" />
+								<span class="entry-status ql-ready">Ready</span>
+							</Entry>
+							<Entry title="Build the quest board" status="review" size="L">
+								<Difficulty size="L" />
+								<span class="entry-status ql-review">In review</span>
+							</Entry>
+							<Entry title="Add a download button" status="blocked" size="M">
+								<Difficulty size="M" />
+								<span class="entry-status ql-blocked">Blocked</span>
+							</Entry>
+						</ul>
+						<figcaption class="muted">Example quests</figcaption>
+					</figure>
 				</section>
 			)}
 		</Layout>
@@ -31,32 +52,31 @@ function Repos(props: { repos: Repositories; install: string }) {
 	const { installations, more } = props.repos;
 	return (
 		<section class="wrap section">
-			<h1>Repositories</h1>
+			<header class="page-head">
+				<h1>Repositories</h1>
+				<a class="button quiet" href={props.install}>
+					Add a repository
+				</a>
+			</header>
 			{installations.length === 0 && (
 				<p class="muted">
 					The App isn't on any repository you can read yet. <a href={props.install}>Install it</a>.
 				</p>
 			)}
 			{installations.map((i) => (
-				<div class="group">
-					<h2 class="group-title">{i.account}</h2>
+				<section class="block">
+					<Heading title={i.account} count={i.repositories.length} />
 					<ul class="log">
 						{i.repositories.map((r) => (
-							<li class="entry plain">
-								<a class="entry-title" href={`/repos/${r.owner}/${r.name}`}>
-									{r.name}
-								</a>
-								{r.private && <span class="entry-meta muted">Private</span>}
-							</li>
+							<Entry title={r.name} href={`/repos/${r.owner}/${r.name}`}>
+								{r.private && <span class="tag">Private</span>}
+							</Entry>
 						))}
 					</ul>
 					{i.more && <p class="muted">Showing the first 100.</p>}
-				</div>
+				</section>
 			))}
 			{more && <p class="muted">Showing the first 10 accounts.</p>}
-			<p class="muted">
-				<a href={props.install}>Add a repository</a>
-			</p>
 		</section>
 	);
 }
@@ -78,8 +98,14 @@ export function Message(props: {
 				<h1>{props.title}</h1>
 				<p>{props.children}</p>
 				<p class="actions">
-					{props.link && <a href={props.link}>View on GitHub</a>}
-					<a href={props.back ?? "/"}>Back</a>
+					<a class="button primary" href={props.back ?? "/"}>
+						Back
+					</a>
+					{props.link && (
+						<a class="button quiet" href={props.link}>
+							View on GitHub
+						</a>
+					)}
 				</p>
 			</section>
 		</Layout>

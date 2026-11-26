@@ -85,12 +85,12 @@ export function cookie(name: string, value: string | null, maxAge: number): stri
 	return `${name}=${value ?? ""}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${value === null ? 0 : Math.max(0, Math.floor(maxAge))}`;
 }
 
-/** The site's content security policy: its own scripts only, the theme's fonts, and GitHub for sign-in. */
+/** The site's content security policy: its own scripts, styles, and fonts, and GitHub for sign-in. */
 export const CSP = [
 	"default-src 'self'",
 	"script-src 'self'",
-	"style-src 'self' https://fonts.googleapis.com",
-	"font-src https://fonts.gstatic.com",
+	"style-src 'self'",
+	"font-src 'self'",
 	"img-src 'self' data: https://avatars.githubusercontent.com",
 	"connect-src 'self'",
 	"form-action 'self' https://github.com",
@@ -135,7 +135,7 @@ export function app(deps: Deps): App {
 	web.get("/", async (c) => {
 		const s = c.get("session");
 		const repos = s ? await repositories(c.get("github").withToken(s.token)) : null;
-		return c.html(<Home user={user(s)} install={c.get("install")} repos={repos} />);
+		return c.html(<Home user={user(s)} install={c.get("install")} repos={repos} origin={c.get("config").origin} />);
 	});
 
 	web.get("/repos/:owner/:name", async (c) => {

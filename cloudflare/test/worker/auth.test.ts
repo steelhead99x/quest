@@ -45,6 +45,19 @@ describe("signed out", () => {
 		expect(h.requests).toEqual([]);
 	});
 
+	test("pages use the theme's own fonts, never a third party's, and the home page has a social preview", async () => {
+		const response = await harness().request("/");
+		const html = await response.text();
+		const csp = response.headers.get("content-security-policy")!;
+		expect(csp).toContain("font-src 'self'");
+		expect(csp).toContain("style-src 'self';");
+		expect(html).not.toContain("googleapis");
+		expect(html).toContain('href="/fonts/barlow-condensed-latin-700-normal.woff2" as="font"');
+		expect(html).toContain('<meta property="og:image" content="https://quest.test/theme/og.png"/>');
+		// The sample rows pair each marker with its label, as design/theme.md requires.
+		for (const label of ["Ready", "In review", "Blocked"]) expect(html).toContain(`">${label}</span>`);
+	});
+
 	test("a deploy missing settings says which, on every page", async () => {
 		const h = harness();
 		const response = await h.request("/", {}, { ...env, GITHUB_CLIENT_SECRET: "", GITHUB_APP_SLUG: "" });
