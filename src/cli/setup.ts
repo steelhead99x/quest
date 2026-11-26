@@ -107,19 +107,12 @@ function register(root: string): void {
 	}
 }
 
-/**
- * Remove the merge driver Quest registered from the clone's config, inside a
- * git work tree. A custom driver stays, as `register` leaves it, and so does
- * any other setting in the section; the section goes only once it is empty.
- */
+/** Remove the merge driver from the clone's config, inside a git work tree. */
 function unregister(root: string): void {
 	try {
 		if (git(root, ["rev-parse", "--is-inside-work-tree"]) !== "true") return;
-		const current = git(root, ["config", "--local", "--get", "merge.quest.driver"]);
-		if (current !== DRIVER && !OLD_DRIVERS.includes(current)) return;
-		git(root, ["config", "--local", "--unset", "merge.quest.driver"]);
-		if (git(root, ["config", "--local", "--get-regexp", "^merge\\.quest\\."]) === "")
-			git(root, ["config", "--local", "--remove-section", "merge.quest"]);
+		if (git(root, ["config", "--local", "--get", "merge.quest.driver"]) === "") return;
+		git(root, ["config", "--local", "--remove-section", "merge.quest"]);
 	} catch {
 		// Not a repository, or its config is not writable.
 	}

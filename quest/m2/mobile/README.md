@@ -61,6 +61,13 @@ remaining choices, marked "agent's choice" below):
   contributor deploys their fork to their own account's `workers.dev`
   subdomain. An agent cannot take this step: it needs the account owner's
   credentials and DNS.
+- Maintainer: register the upstream GitHub App with
+  `bun run register-app` in `cloudflare/` (`cloudflare/GITHUB.md`), as the
+  owner that installs it, and set its secrets on the upstream Worker. Check
+  it is done when signing in at the upstream hostname reaches GitHub's
+  authorize page for that App. An agent cannot press Create: GitHub has no
+  API to register an App without the owner's browser session. Each fork's
+  deploy registers its own App the same way.
 
 ## Related
 

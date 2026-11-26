@@ -1,13 +1,12 @@
 #!/bin/sh
 # Install the Quest release binary for this machine.
 #
-# The Release workflow publishes this as quest-installer.sh with its repository
-# and tag filled in (scripts/installer-release.sh). The binary goes to QUEST_INSTALL_DIR (default ~/.local/bin); no shell
+# The Release workflow publishes this as quest-installer.sh with its tag filled
+# in. The binary goes to QUEST_INSTALL_DIR (default ~/.local/bin); no shell
 # configuration is edited. QUEST_DOWNLOAD_URL replaces the release's download
 # URL, for a mirror or a local copy.
 set -eu
 
-repository='@REPOSITORY@'
 tag='@TAG@'
 
 # Everything runs from main, so a truncated download runs nothing.
@@ -17,9 +16,8 @@ main() {
         exit 1
     }
 
-    # The template's placeholders hold no slash and no leading v.
-    case $repository/$tag in
-        */*/v*) default_url="https://github.com/$repository/releases/download/$tag" ;;
+    case $tag in
+        v*) default_url="https://github.com/moq-dev/quest/releases/download/$tag" ;;
         *) default_url= ;;
     esac
     base=${QUEST_DOWNLOAD_URL:-$default_url}

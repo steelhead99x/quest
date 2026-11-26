@@ -58,7 +58,6 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_REPOSITORY: ${{ github.repository }}
           MISE_GITHUB_TOKEN: ${{ github.token }}
           INSTALL_METHOD: ${{ matrix.method }}
           INSTALL_TARGET: ${{ matrix.target }}
@@ -99,8 +98,7 @@ jobs:
         shell: pwsh
         env:
           RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_REPOSITORY: ${{ github.repository }}
           MISE_GITHUB_TOKEN: ${{ github.token }}
           INSTALL_METHOD: ${{ matrix.method }}
           INSTALL_TARGET: ${{ matrix.target }}
-        run: ./scripts/install-check.ps1 -Method $env:INSTALL_METHOD -Target $env:INSTALL_TARGET -Tag $env:RELEASE_TAG -Repository $env:RELEASE_REPOSITORY
+        run: ./scripts/install-check.ps1 -Method $env:INSTALL_METHOD -Target $env:INSTALL_TARGET -Tag $env:RELEASE_TAG

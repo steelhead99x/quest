@@ -396,32 +396,18 @@ describe.skipIf(process.platform === "win32")("the merge driver", () => {
 		});
 	}
 
-	test("any command registers a driver .gitattributes names, and uninstall removes only Quest's", () => {
+	test("any command registers a driver .gitattributes names, and uninstall removes it", () => {
 		const dir = diverged();
 		writeFileSync(join(dir, ".gitattributes"), "* text=auto\nquest/** merge=quest\n");
 		heal(dir);
 		expect(git(dir, "config", "--get", "merge.quest.driver")).toContain("quest resolve");
+		git(dir, "config", "merge.quest.driver", "custom");
+		heal(dir);
+		expect(git(dir, "config", "--get", "merge.quest.driver")).toBe("custom");
+
 		uninstall(dir);
 		expect(readFileSync(join(dir, ".gitattributes"), "utf8")).toBe("* text=auto\n");
-		expect(spawnSync("git", ["-C", dir, "config", "--get-regexp", "^merge\\.quest\\."]).status).toBe(1);
-	});
-
-	test("uninstall keeps a custom merge driver and the section's other settings", () => {
-		const dir = diverged();
-		writeFileSync(join(dir, ".gitattributes"), "quest/** merge=quest\n");
-		git(dir, "config", "merge.quest.driver", "custom %A %O %B");
-		git(dir, "config", "merge.quest.name", "my driver");
-		heal(dir);
-		expect(git(dir, "config", "--get", "merge.quest.driver")).toBe("custom %A %O %B");
-		uninstall(dir);
-		expect(git(dir, "config", "--get", "merge.quest.driver")).toBe("custom %A %O %B");
-		expect(git(dir, "config", "--get", "merge.quest.name")).toBe("my driver");
-
-		// Quest's own driver goes, but a setting beside it keeps the section.
-		git(dir, "config", "merge.quest.driver", DRIVER);
-		uninstall(dir);
 		expect(spawnSync("git", ["-C", dir, "config", "--get", "merge.quest.driver"]).status).toBe(1);
-		expect(git(dir, "config", "--get", "merge.quest.name")).toBe("my driver");
 	});
 
 	test("any command upgrades a driver an older quest registered, but not a custom one", () => {

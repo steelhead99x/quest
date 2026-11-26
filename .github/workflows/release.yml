@@ -229,7 +229,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           TAG: v${{ needs.plan.outputs.version }}
-        run: ./scripts/install-check.ps1 -Method archive -Target $env:TARGET -Tag $env:TAG -Repository $env:GITHUB_REPOSITORY -ReleaseDirectory (Resolve-Path release).Path
+        run: ./scripts/install-check.ps1 -Method archive -Target $env:TARGET -Tag $env:TAG -ReleaseDirectory (Resolve-Path release).Path
 
   publish:
     needs: [plan, check, macos, gate-macos, windows]
@@ -258,7 +258,7 @@ jobs:
             while read -r id tag; do
               if [[ $tag == v[0-9]* ]]; then gh api -X DELETE "repos/$GH_REPO/releases/$id"; fi
             done
-          bash scripts/installer-release.sh "$GH_REPO" "$TAG" > release/quest-installer.sh
+          sed "s/@TAG@/$TAG/" scripts/installer.sh > release/quest-installer.sh
           cd release
           sha256sum quest-*.tar.gz quest-*.zip quest-installer.sh > SHA256SUMS
           notes=(--generate-notes)

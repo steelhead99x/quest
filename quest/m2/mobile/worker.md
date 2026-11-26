@@ -7,7 +7,7 @@ epic's Goal: Hono pages rendered on the server with no client bundle, the
 shared layout following `design/theme.md`, a web app manifest and service
 worker so it installs on Android and iPad home screens and opens offline
 to its last page, and GitHub sign-in through the
-[GitHub App](/quest/m2/mobile/github-app.md) with Better Auth on D1. A
+GitHub App (`cloudflare/GITHUB.md`) with Better Auth on D1. A
 signed-in user sees the repositories the App is installed on that they can
 read. `just check` and `just test` cover it, and a contributor can deploy
 their fork to their own account's `workers.dev` subdomain.
@@ -32,6 +32,5 @@ their fork to their own account's `workers.dev` subdomain.
 
 ## Required
 
-- [GitHub App](/quest/m2/mobile/github-app.md) - the App sign-in uses
 - [Device bench](/quest/m2/mobile/devices.md) - validation on the
   physical Android phone and iPad

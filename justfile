@@ -23,6 +23,7 @@ _check:
     shellcheck scripts/*.sh
     shfmt -d scripts/*.sh
     nixfmt --check flake.nix nix/*.nix
+    just worker-check
 
 # Run tests, including the install scripts and the lifecycle of both builds.
 test:
@@ -37,6 +38,7 @@ _test:
     bash scripts/lifecycle-check.sh "$PWD/dist/quest.js" dev
     bun run compile
     bash scripts/lifecycle-check.sh "$PWD/dist/quest" dev
+    just worker-test
 
 # Check that `quest review` runs nothing a reviewed head plants, with the real
 # Codex and Claude Code CLIs. Uses each CLI's login and spends its usage; run it
@@ -61,3 +63,11 @@ compile:
 # Run the local CLI, for example `just run ready`.
 run *args:
     bun run --silent quest {{args}}
+
+# Check the Worker in cloudflare/: types and formatting.
+worker-check:
+    cd cloudflare && bun run check
+
+# Test the Worker in cloudflare/.
+worker-test:
+    cd cloudflare && bun run test
