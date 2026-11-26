@@ -24,6 +24,8 @@ const load = (overrides: Partial<Load> = {}): Load => ({
 	bytes: 20_000,
 	worker: 12,
 	status: 200,
+	// Empty: the fake driver fills in the page it was asked for.
+	url: "",
 	wall: 340,
 	...overrides,
 });
@@ -48,7 +50,8 @@ function fake(info: DeviceInfo, loads: Load[]): Driver & { calls: string[] } {
 		info: async () => info,
 		load: async (url, cold) => {
 			calls.push(`${cold ? "cold" : "warm"} ${url}`);
-			return { url, ...loads[i++ % loads.length]! };
+			const l = loads[i++ % loads.length]!;
+			return { ...l, url: l.url || url };
 		},
 		installable: async () => ({ manifest: true, serviceWorker: true, offline: true, errors: [] }),
 		screenshot: async (_, dark) => new Uint8Array([dark ? 1 : 0]),

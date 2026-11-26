@@ -185,6 +185,7 @@ describe("the board agrees with the CLI", () => {
 			author: "octo",
 			body,
 			created: "2026-11-01T00:00:00Z",
+			repository: "o/r",
 		});
 		t.branches = ["quest/m0/a", "quest/m0/d"];
 		t.pulls = [
