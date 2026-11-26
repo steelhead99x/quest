@@ -39,13 +39,23 @@ export interface Load extends PageTiming {
 	wall: number;
 }
 
-/** Whether the page can be installed to the home screen and opens offline. */
+/**
+ * What opening a page offline gave: the page itself, from the service worker's cache;
+ * only the site's offline notice, which the worker serves for a page it doesn't keep
+ * (always, for signed-in pages); or nothing.
+ */
+export type OfflineView = "page" | "notice" | "none";
+
+/** Whether the page can be installed to the home screen, and what opening it offline gives. */
 export interface Installable {
 	manifest: boolean;
 	serviceWorker: boolean;
-	offline: boolean;
+	offline: OfflineView;
 	errors: string[];
 }
+
+/** Whether a loaded document is the site's offline notice, which marks its root element. */
+export const OFFLINE_NOTICE_SCRIPT = `document.documentElement.hasAttribute("data-offline-notice")`;
 
 /** A device the bench can drive. */
 export interface Driver {
