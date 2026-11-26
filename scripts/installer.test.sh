@@ -113,11 +113,22 @@ exit 22
 MOCK
 chmod +x "$work/bin/curl"
 export INSTALL_TEST_LOG="$work/curl.log"
-sed 's/@TAG@/v0.1.0/' "$script_dir/installer.sh" >"$work/quest-installer.sh"
-if sh "$work/quest-installer.sh" >"$work/output" 2>&1; then
-    echo 'Expected the failed download to stop the installer' >&2
-    exit 1
-fi
-[[ $(cat "$INSTALL_TEST_LOG") == https://github.com/moq-dev/quest/releases/download/v0.1.0/quest-x86_64-unknown-linux-gnu.tar.gz ]]
+# A release's installer downloads from the repository that published it, a fork's included.
+for repository in moq-dev/quest steelhead99x/quest; do
+    : >"$INSTALL_TEST_LOG"
+    bash "$script_dir/installer-release.sh" "$repository" v0.1.0 >"$work/quest-installer.sh"
+    if sh "$work/quest-installer.sh" >"$work/output" 2>&1; then
+        echo 'Expected the failed download to stop the installer' >&2
+        exit 1
+    fi
+    [[ $(cat "$INSTALL_TEST_LOG") == "https://github.com/$repository/releases/download/v0.1.0/quest-x86_64-unknown-linux-gnu.tar.gz" ]]
+done
+for bad in "moq-dev/quest;rm v0.1.0" "moq-dev/quest v0.1.0;x" "moq-dev v0.1.0"; do
+    # shellcheck disable=SC2086
+    if bash "$script_dir/installer-release.sh" $bad >/dev/null 2>&1; then
+        printf 'Expected installer-release.sh to refuse %s\n' "$bad" >&2
+        exit 1
+    fi
+done
 
 echo 'release installer: regression tests passed'
