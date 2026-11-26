@@ -8,6 +8,8 @@ import { load, NotFound, type Tree } from "./board/load.ts";
 import { board, lookup } from "./board/model.ts";
 import { BoardPage, QuestPage } from "./board/pages.tsx";
 import { cached } from "./cache.ts";
+import { Dispatch, RunList } from "./ci.tsx";
+import { checks, dispatch, Refused, rerunFailed, runs } from "./github/ci.ts";
 import { Home, Message } from "./home.tsx";
 import type { User } from "./layout.tsx";
 import { local, open, pending, SESSION, type Session, STATE, seal, session } from "./session.ts";
@@ -110,7 +112,22 @@ export function app(deps: Deps): App {
 	web.get("/repos/:owner/:name", async (c) => {
 		const b = await boardFor(c, deps);
 		if (b instanceof Response) return b;
-		return c.html(<BoardPage b={b} user={user(c.get("session"))!} path={new URL(c.req.url).pathname} />);
+		const path = new URL(c.req.url).pathname;
+		const repository = b.tree.repository;
+		const github = c.get("github").withToken(c.get("session")!.token);
+		const recent = await runs(github, repository, { branch: b.tree.branch }, deps.now(), 10);
+		return c.html(
+			<BoardPage b={b} user={user(c.get("session"))!} path={path}>
+				<RunList
+					title={`CI on ${b.tree.branch}`}
+					runs={recent}
+					repository={repository}
+					next={path}
+					more={`${b.tree.url}/actions?query=branch%3A${encodeURIComponent(b.tree.branch)}`}
+				/>
+				<Dispatch workflows={b.tree.workflows} repository={repository} branch={b.tree.branch} next={path} />
+			</BoardPage>,
+		);
 	});
 
 	web.get("/repos/:owner/:name/*", async (c) => {
@@ -120,14 +137,76 @@ export function app(deps: Deps): App {
 		const page = decodeURIComponent(new URL(c.req.url).pathname.slice(prefix.length));
 		const doc = lookup(b, page);
 		if (!doc) return page404(c);
+		const path = new URL(c.req.url).pathname;
+		const pull = b.quests.get(doc.path)?.pull ?? null;
+		let ci = null;
+		if (pull) {
+			const github = c.get("github").withToken(c.get("session")!.token);
+			const repository = b.tree.repository;
+			const checked = await checks(github, repository, pull.head, deps.now());
+			const ran = await runs(github, repository, { sha: pull.head }, deps.now());
+			ci = (
+				<>
+					<RunList
+						title={`Checks on #${pull.number}`}
+						runs={checked}
+						repository={repository}
+						next={path}
+						more={`${pull.url}/checks`}
+					/>
+					<RunList
+						title="Workflow runs"
+						runs={ran}
+						repository={repository}
+						next={path}
+						more={`${pull.url}/checks`}
+					/>
+				</>
+			);
+		}
 		return c.html(
-			<QuestPage
-				b={b}
-				doc={doc.path}
-				user={user(c.get("session"))!}
-				path={new URL(c.req.url).pathname}
-				now={deps.now()}
-			/>,
+			<QuestPage b={b} doc={doc.path} user={user(c.get("session"))!} path={path} now={deps.now()}>
+				{ci}
+			</QuestPage>,
+		);
+	});
+
+	web.post("/repos/:owner/:name/runs/:id/rerun", async (c) => {
+		const refused = sameOrigin(c.req.raw);
+		if (refused) return page(c, 403, "Refused", refused);
+		const s = c.get("session");
+		if (!s) return page(c, 401, "Sign in first", "Sign in to re-run a workflow.");
+		const repository = repoParam(c);
+		const id = Number(c.req.param("id"));
+		if (!repository || !Number.isSafeInteger(id) || id <= 0) return page404(c);
+		const next = local(String((await c.req.parseBody()).next ?? ""));
+		const run = await act(c, () => rerunFailed(c.get("github").withToken(s.token), repository, id, deps.now()));
+		if (run instanceof Response) return run;
+		return done(c, "Re-run started", `GitHub is re-running the failed jobs of ${run.name}.`, run.url, next);
+	});
+
+	web.post("/repos/:owner/:name/workflows/:file/dispatch", async (c) => {
+		const refused = sameOrigin(c.req.raw);
+		if (refused) return page(c, 403, "Refused", refused);
+		const s = c.get("session");
+		if (!s) return page(c, 401, "Sign in first", "Sign in to start a workflow.");
+		const b = await boardFor(c, deps);
+		if (b instanceof Response) return b;
+		const file = c.req.param("file") ?? "";
+		const workflow = b.tree.workflows.find((w) => w.file === file && w.dispatch);
+		if (!workflow)
+			return page(c, 409, "Not startable", `${file} has no workflow_dispatch trigger on ${b.tree.branch}.`);
+		const next = local(String((await c.req.parseBody()).next ?? ""));
+		const ok = await act(c, () =>
+			dispatch(c.get("github").withToken(s.token), b.tree.repository, workflow.file, b.tree.branch),
+		);
+		if (ok instanceof Response) return ok;
+		return done(
+			c,
+			"Workflow started",
+			`GitHub queued ${workflow.name} on ${b.tree.branch}.`,
+			`${b.tree.url}/actions/workflows/${encodeURIComponent(workflow.file)}`,
+			next,
 		);
 	});
 
@@ -208,6 +287,35 @@ function page(c: Context, status: number, title: string, text: string) {
 			{text}
 		</Message>,
 		status as 400,
+	);
+}
+
+/** The route's `owner/name`, or null when either part is not a name GitHub accepts. */
+function repoParam(c: Context): string | null {
+	const owner = c.req.param("owner") ?? "";
+	const name = c.req.param("name") ?? "";
+	return NAME.test(owner) && NAME.test(name) ? `${owner}/${name}` : null;
+}
+
+/** Run an action, turning GitHub's refusal into a page that shows its answer. */
+async function act<T>(c: Context, action: () => Promise<T>): Promise<T | Response> {
+	try {
+		return await action();
+	} catch (error) {
+		if (error instanceof Refused) return page(c, 409, "Not done", error.message);
+		if (error instanceof GitHubError && error.status !== 401)
+			return page(c, error.status === 404 ? 404 : 403, "GitHub refused", error.message);
+		throw error;
+	}
+}
+
+/** The page after an action GitHub accepted. */
+function done(c: Context, title: string, text: string, github: string, back: string) {
+	const s = c.get("session");
+	return c.html(
+		<Message user={user(s)} path={back} title={title} back={back} link={github}>
+			{text}
+		</Message>,
 	);
 }
 

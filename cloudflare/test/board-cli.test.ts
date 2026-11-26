@@ -54,6 +54,7 @@ function tree(dir: string): Tree {
 		documents: documents(dir),
 		pulls: [],
 		branches: [],
+		workflows: [],
 		gaps: [],
 	};
 }
@@ -157,6 +158,7 @@ describe("the board agrees with the CLI", () => {
 			title: `PR ${n}`,
 			draft,
 			branch,
+			head: "c".repeat(40),
 			author: "octo",
 			body,
 			created: "2026-11-01T00:00:00Z",

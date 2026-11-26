@@ -22,9 +22,20 @@ export interface Pull {
 	draft: boolean;
 	/** Its head branch, which names the quest it claims. */
 	branch: string;
+	/** The head commit, whose checks and workflow runs the quest page shows. */
+	head: string;
 	author: string;
 	body: string;
 	created: string;
+}
+
+/** A workflow file on the default branch. */
+export interface Workflow {
+	/** Its file name, which GitHub's API takes as the workflow's id. */
+	file: string;
+	name: string;
+	/** It has a `workflow_dispatch` trigger, so the site can start it. */
+	dispatch: boolean;
 }
 
 /** A repository's quest tree and what claims it, at one commit. */
@@ -39,6 +50,7 @@ export interface Tree {
 	pulls: Pull[];
 	/** Quest branches on the repository, such as `quest/m0/foo`. */
 	branches: string[];
+	workflows: Workflow[];
 	/** What the board could not read in full, said on the page. */
 	gaps: string[];
 }
@@ -59,8 +71,9 @@ export const QUERY = `query Board($owner: String!, $name: String!) {
 		defaultBranchRef { name target { oid ... on Commit { committedDate } } }
 		object(expression: "HEAD:quest") { ... on Tree { ${entries(DEPTH)} } }
 		pullRequests(states: OPEN, first: ${MAX_PULLS}, orderBy: { field: CREATED_AT, direction: ASC }) {
-			totalCount nodes { number url title isDraft headRefName createdAt body author { login } }
+			totalCount nodes { number url title isDraft headRefName headRefOid createdAt body author { login } }
 		}
+		workflows: object(expression: "HEAD:.github/workflows") { ... on Tree { entries { name type object { ... on Blob { text } } } } }
 		refs(refPrefix: "refs/heads/quest/", first: ${MAX_BRANCHES}) { totalCount nodes { name } }
 	}
 }`;
@@ -138,11 +151,28 @@ export function tree(value: unknown): Tree {
 			title: String(p.title),
 			draft: p.isDraft === true,
 			branch: String(p.headRefName),
+			head: String(p.headRefOid),
 			author: String(p.author?.login ?? "ghost"),
 			body: String(p.body ?? ""),
 			created: String(p.createdAt),
 		})),
 		branches: refs.nodes.map((n: { name: string }) => `quest/${n.name}`),
+		workflows: workflows(r.workflows?.entries),
 		gaps,
 	};
+}
+
+/** The workflow files, read for their names and whether they can be dispatched. */
+export function workflows(list: unknown): Workflow[] {
+	if (!Array.isArray(list)) return [];
+	return list
+		.filter((e) => e?.type === "blob" && /\.ya?ml$/.test(String(e.name)) && typeof e.object?.text === "string")
+		.map((e) => {
+			const text: string = e.object.text;
+			const name = /^name:\s*["']?(.+?)["']?\s*$/m.exec(text)?.[1] ?? String(e.name);
+			// A trigger key outside comments; GitHub answers for anything this misreads, and the page shows it.
+			const dispatch = /^[^#\n]*\bworkflow_dispatch\b/m.test(text);
+			return { file: String(e.name), name, dispatch };
+		})
+		.sort((a, b) => a.file.localeCompare(b.file));
 }

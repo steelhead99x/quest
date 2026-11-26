@@ -124,7 +124,7 @@ function Stats(props: { b: Board }) {
 }
 
 /** A repository's board: stats, ready quests, what waits on the maintainer, and every milestone. */
-export function BoardPage(props: { b: Board; user: User; path: string }) {
+export function BoardPage(props: { b: Board; user: User; path: string; children?: unknown }) {
 	const { b } = props;
 	const repository = b.tree.repository;
 	const quests = [...b.quests.values()];
@@ -173,6 +173,7 @@ export function BoardPage(props: { b: Board; user: User; path: string }) {
 					</ul>
 				)}
 				{quests.length > 0 && <Stats b={b} />}
+				{props.children}
 				{b.ranked.length > 0 && (
 					<section class="ql-panel">
 						<h2>Ready to start</h2>

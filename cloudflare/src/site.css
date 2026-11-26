@@ -902,3 +902,15 @@ a.entry-title:hover {
 	overflow-wrap: anywhere;
 	min-width: 0;
 }
+
+/* CI rows keep their buttons on the meta line. */
+.ci-run form,
+.ci .entry form {
+	display: inline;
+	margin: 0;
+}
+
+.ci-state {
+	font-weight: 600;
+	text-transform: capitalize;
+}
