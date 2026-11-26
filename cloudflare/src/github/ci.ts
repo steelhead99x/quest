@@ -23,6 +23,8 @@ export interface Run {
 	rerun: boolean;
 	/** Why a failed run cannot be re-run here, shown in place of the button. */
 	why: string | null;
+	/** A check run GitHub Actions made, which its workflow run already shows. */
+	actions: boolean;
 }
 
 /** A list of runs, and whether GitHub has more than one page. */
@@ -56,7 +58,8 @@ export function workflowRun(r: Record<string, any>, now: number): Run {
 		url: String(r.html_url),
 		seconds: seconds(r.run_started_at, r.status === "completed" ? r.updated_at : undefined, now),
 		rerun: failed && !waiting,
-		why: waiting ? "Waiting for a maintainer to approve it on GitHub" : null,
+		why: waiting ? "Approve it on GitHub" : null,
+		actions: true,
 	};
 }
 
@@ -72,6 +75,7 @@ export function checkRun(r: Record<string, any>, now: number): Run {
 		seconds: seconds(r.started_at, r.completed_at, now),
 		rerun: false,
 		why: null,
+		actions: r.app?.slug === "github-actions",
 	};
 }
 
@@ -105,7 +109,11 @@ export async function runs(
 export async function rerunFailed(github: GitHub, repository: string, id: number, now: number): Promise<Run> {
 	const run = workflowRun(await github.get(`/repos/${repository}/actions/runs/${id}`), now);
 	if (!run.rerun)
-		throw new Refused(run.why ?? `${run.name} is ${run.conclusion ?? run.status}, with no failed jobs to re-run`);
+		throw new Refused(
+			run.why
+				? `${run.name} is waiting for a maintainer's approval on GitHub.`
+				: `${run.name} is ${run.conclusion ?? run.status}, with no failed jobs to re-run.`,
+		);
 	await github.post(`/repos/${repository}/actions/runs/${id}/rerun-failed-jobs`, {});
 	return run;
 }

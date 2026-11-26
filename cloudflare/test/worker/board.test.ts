@@ -130,15 +130,15 @@ describe("board", () => {
 			await harness(routes()).request("/repos/moq-dev/quest/quest/m0/b", { cookies: [await signedIn()] })
 		).text();
 		expect(html).toContain("Blocked by");
-		expect(html).toContain("quest/m0/a.md");
+		expect(html).toContain('Blocked by <a href="/repos/moq-dev/quest/quest/m0/a">Alpha</a>');
 	});
 
 	test("shows a review PR's claim on its quest page", async () => {
 		const html = await (
 			await harness(routes()).request("/repos/moq-dev/quest/quest/m0/d", { cookies: [await signedIn()] })
 		).text();
-		expect(html).toContain("ready for review");
-		expect(html).toContain("from steelhead99x");
+		expect(html).toContain("In review");
+		expect(html).toContain("by steelhead99x");
 	});
 
 	test("a missing repository, quest, or malformed name is a 404", async () => {
@@ -167,7 +167,7 @@ describe("board", () => {
 		const html = await (
 			await harness(routes(repository(files))).request("/repos/moq-dev/quest", { cookies: [await signedIn()] })
 		).text();
-		expect(html).toContain("The quest tree is invalid");
+		expect(html).toContain("Invalid quest tree");
 		expect(html).toContain("Required cycle");
 		expect(html).not.toContain("Ready to start");
 	});
@@ -218,7 +218,7 @@ describe("loader", () => {
 				cookies: [await signedIn()],
 			})
 		).text();
-		expect(html).toContain("This repository has no quest tree on main.");
+		expect(html).toContain("No quest tree on main.");
 	});
 });
 
@@ -277,15 +277,15 @@ describe("CI", () => {
 			},
 		});
 		const html = await (await h.request("/repos/moq-dev/quest/quest/m0/d", { cookies: [await signedIn()] })).text();
-		expect(html).toContain("Checks on #12");
+		expect(html).toContain("<h2>CI</h2>");
 		expect(html).toContain(">lint</a>");
 		expect(html).toContain("42s");
 		expect(html).toContain("3m 05s");
 		expect(html.match(/Re-run failed jobs/g)).toHaveLength(1);
 		expect(html).toContain('action="/repos/moq-dev/quest/runs/10/rerun"');
-		expect(html).toContain("Waiting for a maintainer to approve it on GitHub");
-		// 31 check runs exist and 30 are shown.
-		expect(html).toContain('More on <a href="https://github.com/moq-dev/quest/pull/12/checks">GitHub</a>');
+		expect(html).toContain("Approve it on GitHub");
+		// 31 check runs exist and 30 are read.
+		expect(html).toContain('<a href="https://github.com/moq-dev/quest/pull/12/checks">All runs on GitHub</a>');
 	});
 
 	test("the board shows the default branch's runs and only the dispatchable workflows", async () => {
@@ -336,7 +336,7 @@ describe("CI", () => {
 	});
 
 	test.each([
-		["a run awaiting approval", run(10, { conclusion: "action_required" }), "approve it on GitHub"],
+		["a run awaiting approval", run(10, { conclusion: "action_required" }), "waiting for a maintainer"],
 		["a run that passed", run(10, { conclusion: "success" }), "no failed jobs"],
 		["a run still going", run(10, { status: "in_progress", conclusion: null }), "no failed jobs"],
 	])("refuses to re-run %s", async (_, value, message) => {

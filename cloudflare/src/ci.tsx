@@ -1,10 +1,26 @@
 import type { Workflow } from "./board/load.ts";
 import type { Run, Runs } from "./github/ci.ts";
 
-/** A run's state as a word, colour-coded but never by colour alone. */
+const WORDS: Record<string, string> = {
+	success: "Passed",
+	failure: "Failed",
+	cancelled: "Cancelled",
+	timed_out: "Timed out",
+	action_required: "Needs approval",
+	skipped: "Skipped",
+	neutral: "Neutral",
+	stale: "Stale",
+	in_progress: "Running",
+	queued: "Queued",
+	waiting: "Waiting",
+	requested: "Queued",
+	pending: "Queued",
+};
+
+/** A run's state in plain words. */
 export function state(run: Run): string {
-	if (run.status !== "completed") return run.status.replace(/_/g, " ");
-	return (run.conclusion ?? "done").replace(/_/g, " ");
+	const key = run.status === "completed" ? (run.conclusion ?? "neutral") : run.status;
+	return WORDS[key] ?? key.replace(/_/g, " ");
 }
 
 /** How long a run took, such as `3m 05s`. */
@@ -26,64 +42,79 @@ const TONE: Record<string, string> = {
 function RunRow(props: { run: Run; repository: string; next: string }) {
 	const { run } = props;
 	return (
-		<li class="entry ci-run">
-			<span class="ql-marker" />
+		<li class="entry plain ci-run">
 			<a class="entry-title" href={run.url}>
 				{run.name}
 			</a>
 			<span class="entry-meta">
 				<span class={`ci-state ${TONE[run.conclusion ?? ""] ?? ""}`}>{state(run)}</span>
-				{run.seconds !== null && <span class="muted">{took(run.seconds)}</span>}
+				{run.seconds !== null && run.seconds > 0 && <span class="muted">{took(run.seconds)}</span>}
+				{run.why && <a href={run.url}>{run.why}</a>}
 				{run.rerun && (
 					<form method="post" action={`/repos/${props.repository}/runs/${run.id}/rerun`}>
 						<input type="hidden" name="next" value={props.next} />
 						<button class="button quiet">Re-run failed jobs</button>
 					</form>
 				)}
-				{run.why && <span class="muted">{run.why}</span>}
 			</span>
 		</li>
 	);
 }
 
-/** A list of runs under a heading, saying when GitHub has more. */
-export function RunList(props: { title: string; runs: Runs; repository: string; next: string; more: string }) {
+/** A list of runs under a heading, with a link to GitHub when it has more. */
+export function RunList(props: {
+	title: string;
+	runs: Run[];
+	more: boolean;
+	repository: string;
+	next: string;
+	link: string;
+}) {
 	return (
 		<section class="ql-panel ci">
 			<h2>{props.title}</h2>
-			{props.runs.runs.length === 0 && <p class="muted">None yet.</p>}
+			{props.runs.length === 0 && <p class="muted">No runs yet.</p>}
 			<ul class="log">
-				{props.runs.runs.map((run) => (
+				{props.runs.map((run) => (
 					<RunRow run={run} repository={props.repository} next={props.next} />
 				))}
 			</ul>
-			{props.runs.more && (
-				<p class="muted">
-					More on <a href={props.more}>GitHub</a>.
+			{props.more && (
+				<p>
+					<a href={props.link}>All runs on GitHub</a>
 				</p>
 			)}
 		</section>
 	);
 }
 
-/** The workflows a signed-in person can start on the default branch. */
+/** A PR's CI: its workflow runs, then any checks from apps other than Actions. */
+export function PullCi(props: { runs: Runs; checks: Runs; repository: string; next: string; link: string }) {
+	const others = props.checks.runs.filter((r) => !r.actions);
+	return (
+		<RunList
+			title="CI"
+			runs={[...props.runs.runs, ...others]}
+			more={props.runs.more || props.checks.more}
+			repository={props.repository}
+			next={props.next}
+			link={props.link}
+		/>
+	);
+}
+
+/** The workflows a signed-in person can start on the default branch, folded away. */
 export function Dispatch(props: { workflows: Workflow[]; repository: string; branch: string; next: string }) {
 	const startable = props.workflows.filter((w) => w.dispatch);
 	if (startable.length === 0) return null;
 	return (
-		<section class="ql-panel ci">
-			<h2>Start a workflow</h2>
-			<p class="muted">
-				Runs it on {props.branch}. GitHub checks that you can, and workflows with required inputs start on
-				GitHub.
-			</p>
+		<details class="ql-panel ci">
+			<summary>Run a workflow on {props.branch}</summary>
 			<ul class="log">
 				{startable.map((w) => (
-					<li class="entry">
-						<span class="ql-marker" />
+					<li class="entry plain">
 						<span class="entry-title">{w.name}</span>
 						<span class="entry-meta">
-							<span class="muted">{w.file}</span>
 							<form method="post" action={`/repos/${props.repository}/workflows/${w.file}/dispatch`}>
 								<input type="hidden" name="next" value={props.next} />
 								<button class="button quiet">Run</button>
@@ -92,6 +123,6 @@ export function Dispatch(props: { workflows: Workflow[]; repository: string; bra
 					</li>
 				))}
 			</ul>
-		</section>
+		</details>
 	);
 }

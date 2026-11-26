@@ -53,11 +53,10 @@ export function Layout(props: Page & { children: Child }) {
 							<img src="/theme/logo.svg" alt="" width="32" height="32" />
 							Quest
 						</a>
-						<a href={repo}>GitHub</a>
 						<span class="account">
 							{props.user ? (
 								<>
-									<span class="muted">Signed in as {props.user.login}.</span>
+									<span class="muted">{props.user.login}</span>
 									<form method="post" action="/sign-out">
 										<button class="button quiet">Sign out</button>
 									</form>
@@ -74,7 +73,7 @@ export function Layout(props: Page & { children: Child }) {
 				<main>{props.children}</main>
 				<footer class="wrap site-footer">
 					<p>
-						<a href="/">Quest</a> · <a href={repo}>GitHub</a> · MIT or Apache-2.0
+						<a href={repo}>Source</a> · MIT or Apache-2.0
 					</p>
 				</footer>
 			</body>
