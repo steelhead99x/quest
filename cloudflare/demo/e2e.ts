@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { CONTROLLED_SCRIPT } from "../device/driver.ts";
+import { Offline } from "../device/offline.ts";
 import { Rpc } from "../device/rpc.ts";
 import { sleep } from "../device/shell.ts";
 
@@ -39,6 +40,9 @@ const chrome = Bun.spawn(
 	],
 	{ stdout: "ignore", stderr: "ignore" },
 );
+
+/** Every path any cache holds, read in the page. */
+const KEPT = `caches.keys().then((names) => Promise.all(names.map((n) => caches.open(n).then((c) => c.keys())))).then((lists) => lists.flat().map((r) => new URL(r.url).pathname))`;
 
 const results: { step: string; ok: boolean; detail: string; ms: number }[] = [];
 let page: Rpc | null = null;
@@ -137,17 +141,28 @@ try {
 		},
 	);
 
-	await step("Offline, the board opens from the last copy", "09-offline", async () => {
+	await step("Offline, a signed-in page shows the offline notice, never a kept copy", "09-offline", async () => {
+		// The page's offline switch leaves its service worker online, so switch the worker too.
+		const workers = await Offline.attach(port, 15_000);
+		if (workers.workers === 0) throw new Error("no service worker to take offline");
 		await page!.call("Network.emulateNetworkConditions", {
 			offline: true,
 			latency: 0,
 			downloadThroughput: -1,
 			uploadThroughput: -1,
 		});
+		await workers.set(true);
 		try {
 			await go(`${base}/repos/steelhead99x/quest`);
-			await expectText("Ready to start");
+			await expectText("You're offline");
+			const body = await value<string>("document.body.innerText");
+			if (body.includes("Ready to start")) throw new Error("the board's private content was served offline");
+			const kept = await value<string[]>(KEPT, true);
+			const leaked = kept.filter((path) => path.startsWith("/repos/"));
+			if (leaked.length) throw new Error(`signed-in pages are cached: ${leaked.join(", ")}`);
 		} finally {
+			await workers.set(false);
+			workers.close();
 			await page!.call("Network.emulateNetworkConditions", {
 				offline: false,
 				latency: 0,
@@ -158,14 +173,16 @@ try {
 	});
 
 	await step("Signing out drops the session and the cached pages", "10-signed-out", async () => {
+		await go(`${base}/`);
 		await act(`document.querySelector('form[action="/sign-out"] button').click()`);
 		await expectPath("/");
 		await expectText("Sign in with GitHub");
 		const cookies = (await page!.call("Network.getCookies")) as { cookies: { name: string }[] };
 		if (cookies.cookies.some((c) => c.name === "__Host-quest-session"))
 			throw new Error("the session cookie survived");
-		const keys = await value<string[]>("caches.keys()", true);
-		if (keys.includes("pages")) throw new Error("the cached pages survived sign-out");
+		const kept = await value<string[]>(KEPT, true);
+		const leaked = kept.filter((path) => path.startsWith("/repos/"));
+		if (leaked.length) throw new Error(`cached signed-in pages: ${leaked.join(", ")}`);
 	});
 } finally {
 	page?.close();

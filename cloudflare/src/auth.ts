@@ -60,27 +60,59 @@ export async function exchange(github: GitHub, config: Config, code: string, now
 	);
 	const user = await github.withToken(issued.token).get<{ id: number; login: string }>("/user");
 	if (!Number.isSafeInteger(user.id) || typeof user.login !== "string") throw new Error("GitHub returned no user");
-	return { id: user.id, login: user.login, ...issued };
+	return { sid: crypto.randomUUID(), id: user.id, login: user.login, ...issued };
 }
 
-/** The session with a fresh token if it is about to expire, or null once it cannot be refreshed. */
-export async function refreshed(github: GitHub, config: Config, s: Session, now: number): Promise<Session | null> {
-	if (s.expires - EARLY > now) return s;
-	if (s.refreshExpires <= now) return null;
+/** What refreshing a session came to. */
+export type Refreshed =
+	/** The token is current, or was just rotated, by this request or a concurrent one. */
+	| { kind: "fresh"; session: Session; changed: boolean }
+	/** GitHub refused the refresh token: it was revoked or expired. */
+	| { kind: "revoked" }
+	/** GitHub could not be asked or answered oddly: the session stays, and its token is used while valid. */
+	| { kind: "unavailable" };
+
+/** GitHub's answer for a refresh token that will never work again. */
+const REVOKED = "bad_refresh_token";
+
+/**
+ * The session with a fresh token if it is about to expire. `rotate` asks
+ * GitHub through the token's coordinator (rotation.ts), so concurrent
+ * refreshes of one session, from any location, spend its token once.
+ */
+export async function refreshed(
+	s: Session,
+	now: number,
+	rotate: (s: Session) => Promise<Refreshed>,
+): Promise<Refreshed> {
+	if (s.expires - EARLY > now) return { kind: "fresh", session: s, changed: false };
+	if (s.refreshExpires <= now) return { kind: "revoked" };
 	try {
-		const issued = tokens(
-			await post(github, {
-				client_id: config.clientId,
-				client_secret: config.clientSecret,
-				grant_type: "refresh_token",
-				refresh_token: s.refresh,
-			}),
-			now,
-		);
-		return { ...s, ...issued };
+		return await rotate(s);
+	} catch (error) {
+		console.error("the rotation coordinator failed", error);
+		return { kind: "unavailable" };
+	}
+}
+
+/** Ask GitHub once to rotate a session's refresh token. Only `bad_refresh_token` counts as refused. */
+export async function refreshOnce(
+	github: GitHub,
+	config: Pick<Config, "clientId" | "clientSecret">,
+	s: Session,
+	now: number,
+): Promise<Refreshed> {
+	try {
+		const answer = (await post(github, {
+			client_id: config.clientId,
+			client_secret: config.clientSecret,
+			grant_type: "refresh_token",
+			refresh_token: s.refresh,
+		})) as Record<string, unknown>;
+		if (answer?.error === REVOKED) return { kind: "revoked" };
+		return { kind: "fresh", session: { ...s, ...tokens(answer, now) }, changed: true };
 	} catch {
-		// A revoked or reused refresh token: sign out rather than retry.
-		return null;
+		return { kind: "unavailable" };
 	}
 }
 

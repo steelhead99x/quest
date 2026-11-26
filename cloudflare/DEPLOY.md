@@ -38,8 +38,21 @@ registered for the deploy's origin (`GITHUB.md`):
 cd cloudflare
 openssl rand -hex 32 | bunx wrangler secret put AUTH_SECRET
 bunx wrangler secret bulk .github-app.json && rm .github-app.json
-bunx wrangler deploy --var GITHUB_APP_SLUG:<slug> --domain quest.example.dev
+bunx wrangler deploy --var GITHUB_APP_SLUG:<slug> --var SCHEDULE_TIMEZONE:<zone> --domain quest.example.dev
 ```
+
+`SCHEDULE_TIMEZONE` is the IANA timezone, such as `America/Los_Angeles`,
+whose calendar day decides when a `## Scheduled` date opens. The CLI reads
+those dates on its own machine's calendar, so set the zone the maintainer
+plans in; it defaults to `UTC`, and a name Intl doesn't know fails every page
+with a 500 that says so.
+
+The deploy also creates the `Rotations` Durable Object (SQLite-backed, on
+Workers Free or Paid): one per sign-in, where its refreshes and its sign-out
+meet. A session refreshed from two Cloudflare locations at once spends its
+single-use GitHub token once, and a refresh that finishes after sign-out is
+refused and its token revoked. Each keeps a rotation for ten minutes and a
+sign-out until the session's refresh token would have expired.
 
 `--domain` attaches the custom domain; leave it out to serve from
 `workers.dev`. Nothing in `wrangler.jsonc` names an account, hostname, or

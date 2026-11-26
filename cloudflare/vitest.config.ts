@@ -18,6 +18,7 @@ export default defineConfig({
 								GITHUB_CLIENT_ID: "Iv23test",
 								GITHUB_CLIENT_SECRET: "test-client-secret",
 								GITHUB_APP_SLUG: "quest-test",
+								SCHEDULE_TIMEZONE: "UTC",
 							},
 						},
 					}),

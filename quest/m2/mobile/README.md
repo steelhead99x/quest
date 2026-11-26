@@ -63,9 +63,10 @@ remaining choices, marked "agent's choice" below):
   because it reverses a recorded maintainer decision.
 - Maintainer: choose the Cloudflare account and hostname it deploys to
   upstream (quest.moq.dev was retired with kix). Until then the
-  contributor's fork serves at `quest.moq-bench.dev`
-  ([deploy](/quest/m2/mobile/deploy.md)). An agent cannot take this step: it needs the account owner's
-  credentials and DNS.
+  contributor's fork is planned to serve at `quest.moq-bench.dev`; it does
+  not serve there yet, and [deploy](/quest/m2/mobile/deploy.md) is done
+  when it does. An agent cannot take this step: it needs the account
+  owner's credentials and DNS.
 - Maintainer: register the upstream GitHub App with
   `bun run register-app` in `cloudflare/` (`cloudflare/GITHUB.md`), as the
   owner that installs it, and set its secrets on the upstream Worker. Check

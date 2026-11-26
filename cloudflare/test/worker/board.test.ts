@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { DEPTH, tree, workflows } from "../../src/board/load.ts";
+import { claims, DEPTH, merge, tree, upstreamOf, workflows } from "../../src/board/load.ts";
 import { SESSION, seal } from "../../src/session.ts";
 import { env, harness, json, type Route } from "./fake.ts";
 
@@ -8,6 +8,7 @@ const GRAPHQL = "POST https://api.github.com/graphql";
 /** A signed-in session cookie for `id`, valid well past the test clock. */
 async function signedIn(id = 7) {
 	const value = await seal(env.AUTH_SECRET, "session", {
+		sid: crypto.randomUUID(),
 		id,
 		login: "octo",
 		token: `ghu_${id}`,
@@ -229,6 +230,7 @@ const run = (id: number, extra: Record<string, unknown> = {}) => ({
 	status: "completed",
 	conclusion: "failure",
 	html_url: `https://github.com/moq-dev/quest/actions/runs/${id}`,
+	head_repository: { full_name: "moq-dev/quest" },
 	run_started_at: "2026-11-25T11:00:00Z",
 	updated_at: "2026-11-25T11:03:05Z",
 	...extra,
@@ -241,6 +243,20 @@ const WORKFLOWS = {
 			type: "blob",
 			object: { text: "name: Release\non: push\n# workflow_dispatch is off\n" },
 		},
+		{
+			name: "named.yml",
+			type: "blob",
+			object: { text: 'name: "Run workflow_dispatch by hand"\non: push\n' },
+		},
+		{
+			name: "tag.yaml",
+			type: "blob",
+			object: {
+				text: "name: Tag\non:\n  workflow_dispatch:\n    inputs:\n      tag:\n        required: true\n      dry:\n        required: true\n        default: false\n",
+			},
+		},
+		{ name: "list.yml", type: "blob", object: { text: "name: List\non: [push, workflow_dispatch]\n" } },
+		{ name: "broken.yml", type: "blob", object: { text: "name: [unclosed\n" } },
 		{ name: "notes.txt", type: "blob", object: { text: "workflow_dispatch" } },
 	],
 };
@@ -267,11 +283,12 @@ describe("CI", () => {
 			[RUNS]: (r) => {
 				expect(new URL(r.url).searchParams.get("head_sha")).toBe("d".repeat(40));
 				return json({
-					total_count: 3,
+					total_count: 4,
 					workflow_runs: [
 						run(10),
 						run(11, { conclusion: "success" }),
 						run(12, { conclusion: "action_required" }),
+						run(13, { head_repository: { full_name: "mallory/quest" } }),
 					],
 				});
 			},
@@ -282,6 +299,7 @@ describe("CI", () => {
 		expect(html).toContain("42s");
 		expect(html).toContain("3m 05s");
 		expect(html.match(/Re-run failed jobs/g)).toHaveLength(1);
+		expect(html).toContain("From a fork: re-run it on GitHub");
 		expect(html).toContain('action="/repos/moq-dev/quest/runs/10/rerun"');
 		expect(html).toContain("Approve it on GitHub");
 		// 31 check runs exist and 30 are read.
@@ -301,12 +319,21 @@ describe("CI", () => {
 		expect(html).toContain("Check 20");
 		expect(html).toContain('action="/repos/moq-dev/quest/workflows/check.yml/dispatch"');
 		expect(html).not.toContain("release.yml/dispatch");
+		expect(html).not.toContain("named.yml/dispatch");
+		// A required input with no default can't be given by the form, so the row links to GitHub.
+		expect(html).not.toContain("tag.yaml/dispatch");
+		expect(html).toContain('href="https://github.com/moq-dev/quest/actions/workflows/tag.yaml"');
+		expect(html).toContain("Needs inputs");
 	});
 
-	test("reads workflow names and triggers, ignoring a commented trigger", () => {
+	test("reads workflow names and triggers from the YAML, not from its text", () => {
 		expect(workflows(WORKFLOWS.entries)).toEqual([
-			{ file: "check.yml", name: "Check", dispatch: true },
-			{ file: "release.yml", name: "Release", dispatch: false },
+			{ file: "broken.yml", name: "broken.yml", dispatch: false, inputs: false },
+			{ file: "check.yml", name: "Check", dispatch: true, inputs: false },
+			{ file: "list.yml", name: "List", dispatch: true, inputs: false },
+			{ file: "named.yml", name: "Run workflow_dispatch by hand", dispatch: false, inputs: false },
+			{ file: "release.yml", name: "Release", dispatch: false, inputs: false },
+			{ file: "tag.yaml", name: "Tag", dispatch: true, inputs: true },
 		]);
 		expect(workflows(undefined)).toEqual([]);
 	});
@@ -339,6 +366,8 @@ describe("CI", () => {
 		["a run awaiting approval", run(10, { conclusion: "action_required" }), "waiting for a maintainer"],
 		["a run that passed", run(10, { conclusion: "success" }), "no failed jobs"],
 		["a run still going", run(10, { status: "in_progress", conclusion: null }), "no failed jobs"],
+		["a fork's finished failure", run(10, { head_repository: { full_name: "mallory/quest" } }), "ran from a fork"],
+		["a run whose source is unknown", run(10, { head_repository: null }), "ran from a fork"],
 	])("refuses to re-run %s", async (_, value, message) => {
 		const h = harness({ "GET https://api.github.com/repos/moq-dev/quest/actions/runs/10": () => json(value) });
 		const response = await h.request("/repos/moq-dev/quest/runs/10/rerun", {
@@ -406,5 +435,214 @@ describe("CI", () => {
 		expect(await ok.text()).toContain("GitHub queued Check on main.");
 		expect(body).toEqual({ ref: "main" });
 		expect((await post("release.yml")).status).toBe(409);
+		expect((await post("named.yml")).status).toBe(409);
+		const inputs = await post("tag.yaml");
+		expect(inputs.status).toBe(409);
+		expect(await inputs.text()).toContain("needs inputs");
+	});
+});
+
+describe("private data", () => {
+	test("a page rendered for a signed-in person is never stored; a signed-out one may be", async () => {
+		const h = harness(routes());
+		const signed = await h.request("/repos/moq-dev/quest", { cookies: [await signedIn()] });
+		expect(signed.headers.get("cache-control")).toBe("private, no-store");
+		const out = await h.request("/");
+		expect(out.headers.get("cache-control")).toBe("no-cache");
+	});
+
+	test("the offline page is public and names no one", async () => {
+		const response = await harness().request("/offline", { cookies: [await signedIn()] });
+		const html = await response.text();
+		expect(response.headers.get("cache-control")).toBe("no-cache");
+		expect(html).toContain("You&#39;re offline");
+		expect(html).not.toContain("octo");
+	});
+
+	test("a cached private board is rechecked with GitHub, and revoked access ends at once", async () => {
+		let allowed = true;
+		const h = harness({
+			...routes(repository(FILES, { isPrivate: true })),
+			"GET https://api.github.com/repos/moq-dev/quest": () =>
+				allowed ? json({ full_name: "moq-dev/quest" }) : json({ message: "Not Found" }, 404),
+		});
+		const cookie = await signedIn();
+		expect((await h.request("/repos/moq-dev/quest", { cookies: [cookie] })).status).toBe(200);
+		expect((await h.request("/repos/moq-dev/quest", { cookies: [cookie] })).status).toBe(200);
+		expect(h.requests.filter((r) => r.url.endsWith("/repos/moq-dev/quest"))).toHaveLength(1);
+		allowed = false;
+		expect((await h.request("/repos/moq-dev/quest", { cookies: [cookie] })).status).toBe(404);
+	});
+
+	test("a cached public board is not rechecked", async () => {
+		const h = harness(routes());
+		const cookie = await signedIn();
+		await h.request("/repos/moq-dev/quest", { cookies: [cookie] });
+		await h.request("/repos/moq-dev/quest", { cookies: [cookie] });
+		expect(h.requests.filter((r) => r.url.endsWith("/repos/moq-dev/quest"))).toHaveLength(0);
+	});
+});
+
+describe("claims, as the CLI reads them", () => {
+	const UPSTREAM_PR = {
+		number: 77,
+		url: "https://github.com/moq-dev/quest/pull/77",
+		title: "Alpha upstream",
+		isDraft: true,
+		headRefName: "quest/m0/a",
+		headRefOid: "e".repeat(40),
+		createdAt: "2026-11-19T00:00:00Z",
+		body: "",
+		author: { login: "kixelated" },
+	};
+
+	/** The fork steelhead99x/quest, whose parent moq-dev/quest keeps the quest tree. */
+	function fork(extra: Record<string, unknown> = {}) {
+		return repository(FILES, {
+			nameWithOwner: "steelhead99x/quest",
+			url: "https://github.com/steelhead99x/quest",
+			parent: { nameWithOwner: "moq-dev/quest", tree: { id: "x" }, parent: null },
+			pullRequests: { totalCount: 0, nodes: [] },
+			refs: { totalCount: 0, nodes: [] },
+			...extra,
+		});
+	}
+
+	test("a fork's board counts its upstream's claims", async () => {
+		let upstreamAsked = false;
+		const h = harness({
+			...routes(),
+			[GRAPHQL]: async (r) => {
+				const { query, variables } = (await r.json()) as { query: string; variables: { owner: string } };
+				if (query.includes("query Upstream")) {
+					upstreamAsked = true;
+					expect(variables.owner).toBe("moq-dev");
+					return json({
+						data: {
+							repository: {
+								pullRequests: { totalCount: 1, nodes: [UPSTREAM_PR] },
+								refs: { totalCount: 0, nodes: [] },
+							},
+						},
+					});
+				}
+				return json({ data: { repository: fork() } });
+			},
+			"GET https://api.github.com/repos/steelhead99x/quest/actions/runs": () =>
+				json({ total_count: 0, workflow_runs: [] }),
+		});
+		const html = await (await h.request("/repos/steelhead99x/quest", { cookies: [await signedIn()] })).text();
+		expect(upstreamAsked).toBe(true);
+		const ready = html.slice(html.indexOf("Ready to start"), html.indexOf("<h2>Waiting"));
+		expect(ready).not.toContain("Alpha");
+		expect(html).toContain('href="https://github.com/moq-dev/quest/pull/77">#77</a>');
+	});
+
+	/** A fork board whose quest m0/a is claimed by moq-dev/quest#77, with `ci` answering the upstream's CI. */
+	function forkClaimed(ci: Record<string, Route>) {
+		return harness({
+			...routes(),
+			[GRAPHQL]: async (r) => {
+				const { query } = (await r.json()) as { query: string };
+				if (query.includes("query Upstream"))
+					return json({
+						data: {
+							repository: {
+								pullRequests: { totalCount: 1, nodes: [UPSTREAM_PR] },
+								refs: { totalCount: 0, nodes: [] },
+							},
+						},
+					});
+				return json({ data: { repository: fork() } });
+			},
+			...ci,
+		});
+	}
+
+	test("a fork's quest page reads an upstream claim's CI from the upstream", async () => {
+		const sha = "e".repeat(40);
+		const h = forkClaimed({
+			[`GET https://api.github.com/repos/moq-dev/quest/commits/${sha}/check-runs`]: () =>
+				json({ total_count: 0, check_runs: [] }),
+			"GET https://api.github.com/repos/moq-dev/quest/actions/runs": (r) => {
+				expect(new URL(r.url).searchParams.get("head_sha")).toBe(sha);
+				return json({ total_count: 1, workflow_runs: [run(40, { conclusion: "success", head_sha: sha })] });
+			},
+		});
+		const response = await h.request("/repos/steelhead99x/quest/quest/m0/a", { cookies: [await signedIn()] });
+		expect(response.status).toBe(200);
+		expect(await response.text()).toContain("Check 40");
+		expect(h.requests.some((r) => r.url.includes("/repos/steelhead99x/quest/actions"))).toBe(false);
+	});
+
+	test("a quest page whose PR's CI can't be read still shows, linking to the checks", async () => {
+		const h = forkClaimed({});
+		const response = await h.request("/repos/steelhead99x/quest/quest/m0/a", { cookies: [await signedIn()] });
+		expect(response.status).toBe(200);
+		const html = await response.text();
+		expect(html).toContain("can&#39;t read moq-dev/quest&#39;s CI");
+		expect(html).toContain('href="https://github.com/moq-dev/quest/pull/77/checks"');
+	});
+
+	test("a parent without a quest tree is not an upstream", () => {
+		expect(upstreamOf(fork({ parent: { nameWithOwner: "someone/quest", tree: null, parent: null } }))).toBe(
+			"steelhead99x/quest",
+		);
+		expect(
+			upstreamOf(
+				fork({
+					parent: {
+						nameWithOwner: "moq-dev/quest",
+						tree: { id: "x" },
+						parent: { nameWithOwner: "kixel-ai/quest", tree: { id: "y" }, parent: null },
+					},
+				}),
+			),
+		).toBe("kixel-ai/quest");
+	});
+
+	test("a retained branch whose tip landed holds nothing", () => {
+		const tip = "f".repeat(40);
+		const t = tree(
+			repository(FILES, {
+				pullRequests: { totalCount: 0, nodes: [] },
+				refs: {
+					totalCount: 2,
+					nodes: [
+						{
+							name: "m0/a",
+							target: { oid: tip },
+							associatedPullRequests: { nodes: [{ headRefOid: tip }] },
+						},
+						// Pushed to again after its PR merged: its new tip is work that has not landed.
+						{
+							name: "m0/c",
+							target: { oid: "1".repeat(40) },
+							associatedPullRequests: { nodes: [{ headRefOid: tip }] },
+						},
+					],
+				},
+			}),
+		);
+		expect(t.branches).toEqual(["quest/m0/c"]);
+		expect(t.upstream).toBe("moq-dev/quest");
+	});
+
+	test("the earliest open PR across the fork and its upstream holds the claim", () => {
+		const own = {
+			...UPSTREAM_PR,
+			number: 3,
+			url: "https://github.com/steelhead99x/quest/pull/3",
+			createdAt: "2026-11-21T00:00:00Z",
+		};
+		const t = tree(fork({ pullRequests: { totalCount: 1, nodes: [own] } }));
+		const merged = merge(
+			t,
+			claims(
+				{ pullRequests: { totalCount: 1, nodes: [UPSTREAM_PR] }, refs: { totalCount: 0, nodes: [] } },
+				"moq-dev/quest",
+			),
+		);
+		expect(merged.pulls.map((p) => p.number)).toEqual([77, 3]);
 	});
 });

@@ -2,6 +2,7 @@
 // branch's quest tree with every file's text, the open pull requests, and the
 // quest branches. One request keeps any tree within the page's budget.
 
+import { parse as parseYaml } from "yaml";
 import type { GitHub } from "../github/client.ts";
 
 /** How many directories below `quest/` the query reads; deeper files are reported, not dropped silently. */
@@ -24,6 +25,8 @@ export interface Pull {
 	branch: string;
 	/** The head commit, whose checks and workflow runs the quest page shows. */
 	head: string;
+	/** The repository the PR is open against, whose Actions and Checks hold its CI: a fork's board may show its upstream's. */
+	repository: string;
 	author: string;
 	body: string;
 	created: string;
@@ -36,6 +39,8 @@ export interface Workflow {
 	name: string;
 	/** It has a `workflow_dispatch` trigger, so the site can start it. */
 	dispatch: boolean;
+	/** Dispatching it needs an input with no default, which the site's form cannot give; it starts on GitHub. */
+	inputs: boolean;
 }
 
 /** A repository's quest tree and what claims it, at one commit. */
@@ -48,7 +53,9 @@ export interface Tree {
 	committed: string;
 	documents: { path: string; content: string }[];
 	pulls: Pull[];
-	/** Quest branches on the repository, such as `quest/m0/foo`. */
+	/** Where claims live: the nearest fork ancestor keeping the quest tree, or the repository itself. */
+	upstream: string;
+	/** Quest branches holding a claim, such as `quest/m0/foo`, in the repository or its upstream. */
 	branches: string[];
 	workflows: Workflow[];
 	/** What the board could not read in full, said on the page. */
@@ -64,18 +71,39 @@ function entries(depth: number): string {
 	return `entries { name type object { ... on Blob { text isTruncated byteSize }${inner} } }`;
 }
 
+/** How many fork ancestors the query reads for one keeping the quest tree, as `quest start`'s upstream walk does. */
+export const ANCESTORS = 3;
+
+/** A repository's open PRs and quest branches, each branch with its tip and the heads of PRs merged from it. */
+const CLAIMS = `
+		pullRequests(states: OPEN, first: ${MAX_PULLS}, orderBy: { field: CREATED_AT, direction: ASC }) {
+			totalCount nodes { number url title isDraft headRefName headRefOid createdAt body author { login } }
+		}
+		refs(refPrefix: "refs/heads/quest/", first: ${MAX_BRANCHES}) {
+			totalCount nodes { name target { oid } associatedPullRequests(states: MERGED, first: 10) { nodes { headRefOid } } }
+		}`;
+
+/** A repository's parent, and whether its default branch keeps the quest tree, nesting `depth` more. */
+function parents(depth: number): string {
+	if (depth === 0) return "";
+	return `parent { nameWithOwner tree: object(expression: "HEAD:quest/README.md") { id } ${parents(depth - 1)} }`;
+}
+
 /** The board's query. */
 export const QUERY = `query Board($owner: String!, $name: String!) {
 	repository(owner: $owner, name: $name) {
 		nameWithOwner url isPrivate
 		defaultBranchRef { name target { oid ... on Commit { committedDate } } }
 		object(expression: "HEAD:quest") { ... on Tree { ${entries(DEPTH)} } }
-		pullRequests(states: OPEN, first: ${MAX_PULLS}, orderBy: { field: CREATED_AT, direction: ASC }) {
-			totalCount nodes { number url title isDraft headRefName headRefOid createdAt body author { login } }
-		}
 		workflows: object(expression: "HEAD:.github/workflows") { ... on Tree { entries { name type object { ... on Blob { text } } } } }
-		refs(refPrefix: "refs/heads/quest/", first: ${MAX_BRANCHES}) { totalCount nodes { name } }
+		${parents(ANCESTORS)}
+		${CLAIMS}
 	}
+}`;
+
+/** The claims query, for a fork's upstream. */
+export const UPSTREAM = `query Upstream($owner: String!, $name: String!) {
+	repository(owner: $owner, name: $name) { ${CLAIMS} }
 }`;
 
 type Entry = {
@@ -94,7 +122,76 @@ export async function load(github: GitHub, owner: string, name: string): Promise
 	if (answer?.errors?.some((e) => e.type === "NOT_FOUND")) throw new NotFound(`${owner}/${name}`);
 	if (answer?.errors?.length) throw new Error(`GitHub's GraphQL API refused the board: ${answer.errors[0]!.message}`);
 	if (!answer?.data?.repository) throw new NotFound(`${owner}/${name}`);
-	return tree(answer.data.repository);
+	const t = tree(answer.data.repository);
+	if (t.upstream === t.repository) return t;
+	// A fork's claims live upstream as well as in the fork, as `quest start` reads them.
+	const [upOwner, upName] = t.upstream.split("/");
+	const up = await github.post<{ data?: { repository: unknown }; errors?: { message: string }[] }>(
+		"/graphql",
+		{ query: UPSTREAM, variables: { owner: upOwner, name: upName } },
+		MAX_ANSWER,
+	);
+	if (up?.errors?.length || !up?.data?.repository)
+		throw new Error(
+			`GitHub's GraphQL API refused ${t.upstream}'s claims: ${up?.errors?.[0]?.message ?? "no repository"}`,
+		);
+	return merge(t, claims(up.data.repository, t.upstream));
+}
+
+/** The nearest ancestor, up to ANCESTORS, whose default branch keeps the quest tree, walking up from `r`. */
+export function upstreamOf(r: Record<string, any>): string {
+	let up = String(r.nameWithOwner);
+	for (let node = r.parent, depth = 0; node && depth < ANCESTORS; node = node.parent, depth++) {
+		if (!node.tree) break;
+		up = String(node.nameWithOwner);
+	}
+	return up;
+}
+
+/** One repository's claims: its open PRs, and its quest branches whose work has not landed. */
+export function claims(
+	r: Record<string, any>,
+	repository: string,
+): { pulls: Pull[]; branches: string[]; gaps: string[] } {
+	const gaps: string[] = [];
+	const pulls = r?.pullRequests;
+	if (!Array.isArray(pulls?.nodes)) throw new Error(`GitHub's answer has no pull requests for ${repository}`);
+	if (pulls.totalCount > MAX_PULLS)
+		gaps.push(`only ${repository}'s ${MAX_PULLS} oldest open pull requests are read for claims`);
+	const refs = r.refs;
+	if (!Array.isArray(refs?.nodes)) throw new Error(`GitHub's answer has no branches for ${repository}`);
+	if (refs.totalCount > MAX_BRANCHES) gaps.push(`only ${MAX_BRANCHES} of ${repository}'s quest branches are read`);
+	return {
+		pulls: pulls.nodes.map((p: any): Pull => ({
+			number: Number(p.number),
+			url: String(p.url),
+			title: String(p.title),
+			draft: p.isDraft === true,
+			branch: String(p.headRefName),
+			head: String(p.headRefOid),
+			repository,
+			author: String(p.author?.login ?? "ghost"),
+			body: String(p.body ?? ""),
+			created: String(p.createdAt),
+		})),
+		// A branch whose tip is a merged PR's head holds nothing: its work landed.
+		branches: refs.nodes
+			.filter((n: any) => {
+				const tip = n?.target?.oid;
+				const merged: unknown[] = n?.associatedPullRequests?.nodes ?? [];
+				return !merged.some((m: any) => typeof tip === "string" && m?.headRefOid === tip);
+			})
+			.map((n: { name: string }) => `quest/${n.name}`),
+		gaps,
+	};
+}
+
+/** A fork's tree with its upstream's claims added: open PRs from both, earliest first, and either's branches. */
+export function merge(t: Tree, up: { pulls: Pull[]; branches: string[]; gaps: string[] }): Tree {
+	const pulls = [...new Map([...up.pulls, ...t.pulls].map((p) => [p.url, p])).values()].sort(
+		(a, b) => Date.parse(a.created) - Date.parse(b.created) || a.number - b.number,
+	);
+	return { ...t, pulls, branches: [...new Set([...up.branches, ...t.branches])], gaps: [...t.gaps, ...up.gaps] };
 }
 
 /** Read the query's answer, refusing one whose shape is not the query's. */
@@ -131,12 +228,9 @@ export function tree(value: unknown): Tree {
 		}
 	};
 	walk("quest", r.object?.entries, 0);
-	const pulls = r.pullRequests;
-	if (!Array.isArray(pulls?.nodes)) fail("pull requests");
-	if (pulls.totalCount > MAX_PULLS) gaps.push(`only the ${MAX_PULLS} oldest open pull requests are read for claims`);
-	const refs = r.refs;
-	if (!Array.isArray(refs?.nodes)) fail("branches");
-	if (refs.totalCount > MAX_BRANCHES) gaps.push(`only ${MAX_BRANCHES} quest branches are read for claims`);
+	if (!Array.isArray(r.pullRequests?.nodes)) fail("pull requests");
+	if (!Array.isArray(r.refs?.nodes)) fail("branches");
+	const own = claims(r, r.nameWithOwner);
 	return {
 		repository: r.nameWithOwner,
 		url: String(r.url),
@@ -145,34 +239,44 @@ export function tree(value: unknown): Tree {
 		commit: head.target.oid,
 		committed: String(head.target.committedDate ?? ""),
 		documents,
-		pulls: pulls.nodes.map((p: any): Pull => ({
-			number: Number(p.number),
-			url: String(p.url),
-			title: String(p.title),
-			draft: p.isDraft === true,
-			branch: String(p.headRefName),
-			head: String(p.headRefOid),
-			author: String(p.author?.login ?? "ghost"),
-			body: String(p.body ?? ""),
-			created: String(p.createdAt),
-		})),
-		branches: refs.nodes.map((n: { name: string }) => `quest/${n.name}`),
+		upstream: upstreamOf(r),
+		pulls: own.pulls,
+		branches: own.branches,
 		workflows: workflows(r.workflows?.entries),
-		gaps,
+		gaps: [...gaps, ...own.gaps],
 	};
 }
 
-/** The workflow files, read for their names and whether they can be dispatched. */
+/** The workflow files, read for their names, whether they can be dispatched, and whether that needs inputs. */
 export function workflows(list: unknown): Workflow[] {
 	if (!Array.isArray(list)) return [];
 	return list
 		.filter((e) => e?.type === "blob" && /\.ya?ml$/.test(String(e.name)) && typeof e.object?.text === "string")
-		.map((e) => {
-			const text: string = e.object.text;
-			const name = /^name:\s*["']?(.+?)["']?\s*$/m.exec(text)?.[1] ?? String(e.name);
-			// A trigger key outside comments; GitHub answers for anything this misreads, and the page shows it.
-			const dispatch = /^[^#\n]*\bworkflow_dispatch\b/m.test(text);
-			return { file: String(e.name), name, dispatch };
-		})
+		.map((e) => ({ file: String(e.name), ...triggers(e.object.text, String(e.name)) }))
 		.sort((a, b) => a.file.localeCompare(b.file));
+}
+
+/** A workflow's name and dispatch trigger, read from its YAML; a file that does not parse cannot be dispatched. */
+export function triggers(text: string, file: string): Omit<Workflow, "file"> {
+	let doc: Record<string, unknown>;
+	try {
+		const parsed = parseYaml(text, { maxAliasCount: 50 }) as unknown;
+		if (typeof parsed !== "object" || parsed === null) return { name: file, dispatch: false, inputs: false };
+		doc = parsed as Record<string, unknown>;
+	} catch {
+		return { name: file, dispatch: false, inputs: false };
+	}
+	const name = typeof doc.name === "string" && doc.name ? doc.name : file;
+	// YAML 1.1 readers turn the bare key `on` into true; accept either.
+	const on = doc.on ?? doc.true;
+	if (on === "workflow_dispatch") return { name, dispatch: true, inputs: false };
+	if (Array.isArray(on)) return { name, dispatch: on.includes("workflow_dispatch"), inputs: false };
+	if (typeof on !== "object" || on === null || !("workflow_dispatch" in on))
+		return { name, dispatch: false, inputs: false };
+	const spec = (on as Record<string, unknown>).workflow_dispatch as { inputs?: Record<string, unknown> } | null;
+	const inputs = Object.values(spec?.inputs ?? {}).some((input) => {
+		const i = input as { required?: unknown; default?: unknown } | null;
+		return i?.required === true && i.default === undefined;
+	});
+	return { name, dispatch: true, inputs };
 }

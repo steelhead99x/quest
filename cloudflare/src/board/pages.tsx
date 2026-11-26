@@ -282,7 +282,7 @@ export function QuestPage(props: { b: Board; path: string; doc: string; user: Us
 		...parents(b, doc.path).map((p) => ({ label: name(p), href: questHref(repository, p.path) })),
 		{ label: name(doc), href: questHref(repository, doc.path) },
 	];
-	const blocked = quest?.status === "blocked" ? leaves(holdsBack(b, doc.path, props.now)) : [];
+	const blocked = quest?.status === "blocked" ? leaves(holdsBack(b, doc.path, props.now, b.zone)) : [];
 	return (
 		<Layout
 			title={name(doc)}

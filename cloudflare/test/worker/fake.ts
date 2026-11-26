@@ -2,12 +2,16 @@
 // request, and answers 404 for anything a test did not expect.
 
 import { app, type Env } from "../../src/app.tsx";
+import { refreshOnce, revoke } from "../../src/auth.ts";
+import { GitHub } from "../../src/github/client.ts";
+import { type Actions, Coordinator, type State, type Store } from "../../src/rotation.ts";
 
 export const env: Env = {
 	AUTH_SECRET: "test-only-secret-that-is-at-least-32-characters",
 	GITHUB_CLIENT_ID: "Iv23test",
 	GITHUB_CLIENT_SECRET: "test-client-secret",
 	GITHUB_APP_SLUG: "quest-test",
+	SCHEDULE_TIMEZONE: "UTC",
 };
 
 export type Route = (request: Request) => Response | Promise<Response> | undefined;
@@ -16,23 +20,69 @@ export type Route = (request: Request) => Response | Promise<Response> | undefin
 export const json = (body: unknown, status = 200) =>
 	new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
+/**
+ * Coordinators by session id, standing in for the Durable Object namespace:
+ * one object per sign-in, reached from every location. Pass one to two
+ * harnesses to stand for two Cloudflare locations with separate caches.
+ */
+export class Coordinators {
+	readonly objects = new Map<string, Coordinator>();
+	readonly stored = new Map<string, State>();
+	readonly wakes = new Map<string, number | null>();
+	/** Make every storage write fail, as one can. */
+	failWrites = false;
+
+	get(sid: string, act: Actions): Coordinator {
+		let found = this.objects.get(sid);
+		if (!found) {
+			const store: Store = {
+				load: async () => structuredClone(this.stored.get(sid)),
+				save: async (state) => {
+					if (this.failWrites) throw new Error("storage write failed");
+					this.stored.set(sid, structuredClone(state));
+				},
+				wake: async (at) => void this.wakes.set(sid, at),
+			};
+			found = new Coordinator(store, env.AUTH_SECRET, act);
+			this.objects.set(sid, found);
+		}
+		return found;
+	}
+
+	/** Drop every object, as an eviction would, keeping what their storage holds. */
+	evict() {
+		this.objects.clear();
+	}
+}
+
 /** The Worker with a fake GitHub and a clock tests can move. */
-export function harness(routes: Record<string, Route> = {}) {
+export function harness(routes: Record<string, Route> = {}, coordinators = new Coordinators()) {
 	const requests: Request[] = [];
 	let now = Date.UTC(2026, 10, 25, 12);
 	// Each harness gets its own cache, so no test sees another's boards.
 	const store = caches.open(`test-${crypto.randomUUID()}`);
+	const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+		const request = new Request(input, init);
+		requests.push(request.clone());
+		const url = new URL(request.url);
+		const route = routes[`${request.method} ${url.origin}${url.pathname}`];
+		const answer = route ? await route(request) : undefined;
+		return answer ?? json({ message: `unexpected ${request.method} ${request.url}` }, 404);
+	};
+	const actions = (e: Env): Actions => {
+		const config = { clientId: e.GITHUB_CLIENT_ID, clientSecret: e.GITHUB_CLIENT_SECRET, origin: "" };
+		return {
+			refresh: (s) => refreshOnce(new GitHub(fetch, null), config, s, now),
+			revoke: (token) => revoke(new GitHub(fetch, null), config, token),
+			now: () => now,
+		};
+	};
 	const worker = app({
 		now: () => now,
 		cache: () => store,
-		fetch: async (input, init) => {
-			const request = new Request(input, init);
-			requests.push(request.clone());
-			const url = new URL(request.url);
-			const route = routes[`${request.method} ${url.origin}${url.pathname}`];
-			const answer = route ? await route(request) : undefined;
-			return answer ?? json({ message: `unexpected ${request.method} ${request.url}` }, 404);
-		},
+		fetch,
+		rotate: (e, s) => coordinators.get(s.sid, actions(e)).rotate(s),
+		end: (e, s) => coordinators.get(s.sid, actions(e)).end(s),
 	});
 	return {
 		requests,

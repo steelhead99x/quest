@@ -13,16 +13,24 @@ bun run device-bench --url https://quest.example.dev/ --url https://quest.exampl
 
 Each page loads `--runs` times cold (HTTP cache, service worker, and site
 storage cleared; cookies kept, so a signed-in device stays signed in) and
-warm. For each it reports the median and 95th percentile of first
+warm. A load that ends anywhere but the page asked for, such as GitHub's
+sign-in after the session expired, fails the run, and the iPad clears
+storage only on the site's own origin. For each it reports the median and 95th percentile of first
 contentful paint, load, the Worker's own time from `Server-Timing`, and
 bytes transferred, whether it installs to the home screen and opens
 offline, and light and dark screenshots. The page's own Navigation Timing
 is checked against the driver's clock around each load, and loads where the
 two disagree are counted.
 
+Offline checks take the page and each of its service workers offline
+through Chrome's browser endpoint: a page's own offline switch leaves its
+service worker's fetches on the network.
+
 Without `--record`, each device compares with `bench/<kind>-<model>.json`
-and exits 1 on a regression beyond three times the run-to-run spread (and
-a small floor per metric). `--record` writes that file instead. A run
+and exits 1 when a median grew by more than three times the baseline's
+run-to-run spread (and a small floor per metric), or when this run's own
+spread is so wide its median can't be trusted, which needs a rerun.
+`--record` writes that file instead. A run
 refuses a device that is throttling or below 20% battery, and a baseline
 from a different OS or browser version, so results compare like with
 like. Every requested device must be attached; a missing one fails the run.
@@ -40,7 +48,11 @@ Settings, Apps, Safari, Advanced, Web Inspector, and leave Safari open with
 one tab. iPadOS does not let the inspector set text size, cut the network,
 or read thermal state, so the report says so: set Larger Text by hand
 before screenshots; offline is checked as the page being in the service
-worker's cache.
+worker's cache. Dark mode goes through WebKit's
+`Page.overrideUserPreference`; an iPadOS whose inspector lacks it fails the
+screenshot with that reason. A cold load first opens the page so the
+service worker and caches are cleared on its own origin, and waits for
+that before measuring.
 
 Sign each device's browser in to the site once before benching signed-in
 pages.

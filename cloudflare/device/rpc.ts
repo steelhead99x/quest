@@ -49,8 +49,12 @@ export class Rpc {
 		});
 	}
 
-	/** Call `method` and return its result, throwing the protocol's error. */
-	async call(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+	/** Call `method` and return its result, throwing the protocol's error; `session` sends it to an attached target. */
+	async call(
+		method: string,
+		params: Record<string, unknown> = {},
+		session?: string,
+	): Promise<Record<string, unknown>> {
 		if (this.closed) throw this.closed;
 		const id = this.next++;
 		const reply = await new Promise<Message>((resolve, reject) => {
@@ -62,7 +66,9 @@ export class Rpc {
 				resolve: (m) => (clearTimeout(timer), resolve(m)),
 				reject: (e) => (clearTimeout(timer), reject(e)),
 			});
-			this.socket.send(JSON.stringify({ id, method, params }));
+			this.socket.send(
+				JSON.stringify(session ? { id, method, params, sessionId: session } : { id, method, params }),
+			);
 		});
 		if (reply.error) throw new Error(`${method} failed: ${reply.error.message ?? JSON.stringify(reply.error)}`);
 		return reply.result ?? {};

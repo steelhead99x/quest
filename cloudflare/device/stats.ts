@@ -41,19 +41,26 @@ export function summarize(values: readonly number[]): Summary {
 	return { median: median(values), p95: p95(values), spread: spread(values), runs: values.length };
 }
 
-/** A metric that got worse than its baseline by more than both runs' noise. */
+/**
+ * A metric that failed against its baseline: `slower` when its median grew by
+ * more than the baseline allows, `noisy` when its runs scattered so widely that
+ * the median can't be trusted and the bench must be rerun.
+ */
 export interface Regression {
 	metric: string;
+	kind: "slower" | "noisy";
 	baseline: number;
 	current: number;
 	allowed: number;
 }
 
 /**
- * Compare each metric's median with the baseline's, failing one that grew by
- * more than three times the larger spread, and never by less than `floor`
- * (in the metric's own unit), so a perfectly steady baseline does not fail on
- * a single millisecond.
+ * Compare each metric's median with the baseline's. The baseline alone sets
+ * how far the median may grow: three times its spread, never less than `floor`
+ * (in the metric's own unit), so a perfectly steady baseline does not fail on a
+ * single millisecond. A noisy run gets no extra room, since that would let a
+ * slower, scattered run pass; instead a run whose own spread exceeds three
+ * times that tolerance's base fails as noisy.
  */
 export function regressions(
 	baseline: Record<string, Summary>,
@@ -64,9 +71,12 @@ export function regressions(
 	for (const [metric, base] of Object.entries(baseline)) {
 		const now = current[metric];
 		if (!now) throw new Error(`this run has no ${metric}, which the baseline has`);
-		const allowed = Math.max(3 * Math.max(base.spread, now.spread), floor[metric] ?? 0);
+		const steady = Math.max(base.spread, floor[metric] ?? 0);
+		const allowed = Math.max(3 * base.spread, floor[metric] ?? 0);
 		if (now.median - base.median > allowed)
-			out.push({ metric, baseline: base.median, current: now.median, allowed });
+			out.push({ metric, kind: "slower", baseline: base.median, current: now.median, allowed });
+		else if (now.spread > 3 * steady)
+			out.push({ metric, kind: "noisy", baseline: base.spread, current: now.spread, allowed: 3 * steady });
 	}
 	return out;
 }

@@ -93,9 +93,11 @@ export async function run(driver: Driver, options: Options): Promise<DeviceRepor
 	return { device, pages };
 }
 
-/** Refuse a load that did not succeed, since its timings measure an error page. */
-function check(url: string, load: Load): Load {
+/** Refuse a load that did not succeed or ended elsewhere, since its timings measure some other page. */
+export function check(url: string, load: Load): Load {
 	if (load.status !== 200) throw new Error(`${url} answered ${load.status}, not 200`);
+	if (!load.url || new URL(load.url).href !== new URL(url).href)
+		throw new Error(`${url} ended at ${load.url || "an unknown page"}: is the device still signed in?`);
 	return load;
 }
 
@@ -177,9 +179,11 @@ export function markdown(reports: DeviceReport[], failed: { path: string; phase:
 	}
 	if (failed.length) {
 		lines.push("Regressions against the stored baseline:", "");
-		for (const f of failed)
+		for (const { path, phase, regression: r } of failed)
 			lines.push(
-				`- \`${f.path}\` ${f.phase} ${f.regression.metric}: ${Math.round(f.regression.baseline)} to ${Math.round(f.regression.current)} (allowed +${Math.round(f.regression.allowed)})`,
+				r.kind === "slower"
+					? `- \`${path}\` ${phase} ${r.metric}: ${Math.round(r.baseline)} to ${Math.round(r.current)} (allowed +${Math.round(r.allowed)})`
+					: `- \`${path}\` ${phase} ${r.metric}: runs spread ${Math.round(r.current)} against the baseline's ${Math.round(r.baseline)} (allowed ${Math.round(r.allowed)}); too noisy to judge, rerun the bench`,
 			);
 	} else lines.push("No regressions against the stored baselines.");
 	return lines.join("\n") + "\n";

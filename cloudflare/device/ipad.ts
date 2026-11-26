@@ -42,22 +42,54 @@ export function tab(pages: unknown): string {
 	return page.webSocketDebuggerUrl;
 }
 
-/** Calls to a WebKit page target, wrapped in Target messages as iOS requires. */
+/**
+ * Calls to a WebKit page target, wrapped in Target messages as iOS requires.
+ * A navigation to another web process replaces the page's target: Safari
+ * announces a provisional target, then commits it in place of the old one. The
+ * domains enabled so far are enabled on the provisional target as soon as it
+ * appears, and its messages are accepted, so no load event is lost in the swap.
+ */
 export class Target {
 	private next = 1;
+	private id: string;
+	/** Targets whose messages count: the current page and any provisional one replacing it. */
+	private readonly ids = new Set<string>();
+	/** Domain enables to repeat on a target that replaces this one, such as `Page.enable`. */
+	private readonly enabled: string[] = [];
 	private readonly pending = new Map<number, (m: Message) => void>();
 	private readonly events = new Set<(m: Message) => void>();
 
 	constructor(
 		private readonly rpc: Rpc,
-		private readonly id: string,
+		id: string,
 		private readonly timeout: number,
 	) {
+		this.id = id;
+		this.ids.add(id);
 		rpc.listen((m) => {
-			if (m.method !== "Target.dispatchMessageFromTarget" || m.params?.targetId !== id) return;
+			const params = m.params ?? {};
+			if (m.method === "Target.targetCreated") {
+				const info = params.targetInfo as
+					{ targetId?: string; type?: string; isProvisional?: boolean } | undefined;
+				if (info?.isProvisional && info.type === "page" && info.targetId) this.adopt(info.targetId);
+				return;
+			}
+			if (m.method === "Target.didCommitProvisionalTarget") {
+				if (params.oldTargetId === this.id && typeof params.newTargetId === "string") {
+					this.ids.delete(this.id);
+					this.id = params.newTargetId;
+					this.ids.add(this.id);
+				}
+				return;
+			}
+			if (m.method === "Target.targetDestroyed") {
+				if (params.targetId !== this.id) this.ids.delete(String(params.targetId));
+				return;
+			}
+			if (m.method !== "Target.dispatchMessageFromTarget" || !this.ids.has(String(params.targetId))) return;
 			let inner: Message;
 			try {
-				inner = JSON.parse(String(m.params?.message)) as Message;
+				inner = JSON.parse(String(params.message)) as Message;
 			} catch {
 				return;
 			}
@@ -66,6 +98,11 @@ export class Target {
 				this.pending.delete(inner.id);
 			} else for (const listener of [...this.events]) listener(inner);
 		});
+	}
+
+	/** The target's current id, which a cross-process navigation changes. */
+	get current(): string {
+		return this.id;
 	}
 
 	async call(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
@@ -83,6 +120,7 @@ export class Target {
 		});
 		const m = await reply;
 		if (m.error) throw new Error(`${method} failed: ${m.error.message ?? JSON.stringify(m.error)}`);
+		if (method.endsWith(".enable") && !this.enabled.includes(method)) this.enabled.push(method);
 		return m.result ?? {};
 	}
 
@@ -101,6 +139,31 @@ export class Target {
 			this.events.add(listener);
 		});
 	}
+
+	/** Accept a provisional target's messages and enable on it what is enabled here. */
+	private adopt(target: string): void {
+		this.ids.add(target);
+		for (const method of this.enabled)
+			void this.rpc
+				.call("Target.sendMessageToTarget", {
+					targetId: target,
+					message: JSON.stringify({ id: this.next++, method }),
+				})
+				.catch(() => undefined);
+	}
+}
+
+/**
+ * A promise, as script text, that unregisters the page's service workers and
+ * empties its caches, resolving true, but only on `origin`: anywhere else it
+ * resolves to where the page is and touches nothing.
+ */
+export function clearStorage(origin: string): string {
+	return (
+		`(async () => { if (location.origin !== ${JSON.stringify(origin)}) return location.href;` +
+		` for (const r of await (navigator.serviceWorker?.getRegistrations?.() ?? [])) await r.unregister();` +
+		` for (const k of await (self.caches?.keys?.() ?? [])) await caches.delete(k); return true })()`
+	);
 }
 
 /** Safari on the attached iPad. */
@@ -166,12 +229,16 @@ export class Ipad implements Driver {
 
 	async load(url: string, cold: boolean): Promise<Load> {
 		if (cold) {
-			// Safari's inspector has no storage wipe: unregister the site's service worker and
-			// caches from the page itself, then load without the HTTP cache.
-			await this.evaluate(
-				`(async () => { for (const r of await navigator.serviceWorker?.getRegistrations?.() ?? []) await r.unregister();` +
-					` for (const k of await caches?.keys?.() ?? []) await caches.delete(k); return true })()`,
-			).catch(() => undefined);
+			// Safari's inspector has no storage wipe, so clear the site's service worker and caches from a
+			// page on its own origin, wait for that to finish, then load with the HTTP cache off.
+			// The script checks the origin itself: a redirect, such as to GitHub's sign-in, must not
+			// have its storage cleared.
+			await this.navigate(url);
+			const cleared = await this.evaluateAsync(clearStorage(new URL(url).origin));
+			if (cleared !== true)
+				throw new Error(
+					`${url} ended at ${String(cleared)}, so its storage was left alone: is the iPad still signed in?`,
+				);
 			await this.page.call("Network.setResourceCachingDisabled", { disabled: true });
 		}
 		try {
@@ -209,7 +276,12 @@ export class Ipad implements Driver {
 	}
 
 	async screenshot(url: string, dark: boolean): Promise<Uint8Array> {
-		await this.page.call("Page.setForcedAppearance", { appearance: dark ? "Dark" : "Light" });
+		// WebKit's Page domain sets the colour scheme through user preference overrides.
+		await this.page
+			.call("Page.overrideUserPreference", { name: "PrefersColorScheme", value: dark ? "Dark" : "Light" })
+			.catch((error: Error) => {
+				throw new Error(`this iPadOS's Web Inspector cannot set the colour scheme: ${error.message}`);
+			});
 		try {
 			await this.navigate(url);
 			const size = JSON.parse(
@@ -226,7 +298,7 @@ export class Ipad implements Driver {
 			if (!data) throw new Error("Safari returned no screenshot");
 			return Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
 		} finally {
-			await this.page.call("Page.setForcedAppearance", { appearance: "" });
+			await this.page.call("Page.overrideUserPreference", { name: "PrefersColorScheme" });
 		}
 	}
 

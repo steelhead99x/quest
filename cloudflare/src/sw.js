@@ -1,9 +1,13 @@
-// The service worker: the shell from the cache, and pages from the network,
-// falling back to the last copy of each when offline. Signing out sends
-// Clear-Site-Data, which drops every cached page.
+// The service worker: the shell from the cache, and pages from the network.
+// Only pages the Worker marks public are kept for offline reading; a page
+// rendered for a signed-in person is sent `no-store` and never kept, so a
+// private page cannot outlive the session that fetched it. Offline, a page
+// with no public copy shows /offline.
 const VERSION = "__VERSION__";
 const SHELL = `shell-${VERSION}`;
-const PAGES = "pages";
+// Renamed whenever what it may hold changes, so an upgrade drops the old copies.
+const PAGES = "pages-public-1";
+const OFFLINE = "/offline";
 // The most pages kept for offline reading, oldest dropped first.
 const MAX_PAGES = 30;
 const ASSETS = [
@@ -14,6 +18,7 @@ const ASSETS = [
 	"/theme/icon-192.png",
 	"/theme/icon-512.png",
 	"/manifest.webmanifest",
+	OFFLINE,
 ];
 
 self.addEventListener("install", (event) =>
@@ -25,11 +30,12 @@ self.addEventListener("install", (event) =>
 	),
 );
 
+// Every cache but this version's shell and the public pages goes, including
+// the private pages an earlier version kept.
 self.addEventListener("activate", (event) =>
 	event.waitUntil(
 		(async () => {
-			for (const key of await caches.keys())
-				if (key.startsWith("shell-") && key !== SHELL) await caches.delete(key);
+			for (const key of await caches.keys()) if (key !== SHELL && key !== PAGES) await caches.delete(key);
 			await self.clients.claim();
 		})(),
 	),
@@ -48,15 +54,21 @@ self.addEventListener("fetch", (event) => {
 	event.respondWith(page(event));
 });
 
-// Network first, so pages are always fresh online; the copy is kept after the
-// page is handed over, so caching never delays it.
+/** Whether a response may be kept: the Worker sends `private, no-store` for anything rendered with a session. */
+function shareable(response) {
+	const control = response.headers.get("cache-control") || "";
+	return response.ok && !/no-store|private/.test(control);
+}
+
+// Network first, so pages are always fresh online; a public copy is kept after
+// the page is handed over, so caching never delays it.
 async function page(event) {
 	try {
 		const response = await fetch(event.request);
-		if (response.ok) event.waitUntil(keep(event.request, response.clone()));
+		if (shareable(response)) event.waitUntil(keep(event.request, response.clone()));
 		return response;
 	} catch (error) {
-		const hit = await caches.match(event.request, { cacheName: PAGES });
+		const hit = (await caches.match(event.request, { cacheName: PAGES })) || (await caches.match(OFFLINE));
 		if (hit) return hit;
 		throw error;
 	}

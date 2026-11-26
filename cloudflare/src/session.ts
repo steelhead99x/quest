@@ -11,6 +11,11 @@ const MAX_COOKIE = 3800;
 
 /** What the session cookie holds. */
 export interface Session {
+	/**
+	 * This sign-in's id, kept across refreshes, which names its coordinator
+	 * (rotation.ts): refreshing and signing out of one session meet there.
+	 */
+	sid: string;
 	/** GitHub's numeric user id. */
 	id: number;
 	login: string;
@@ -78,6 +83,8 @@ export function session(value: unknown): Session | null {
 	if (typeof value !== "object" || value === null) return null;
 	const v = value as Record<string, unknown>;
 	const ok =
+		typeof v.sid === "string" &&
+		/^[0-9a-f-]{36}$/.test(v.sid) &&
 		Number.isSafeInteger(v.id) &&
 		typeof v.login === "string" &&
 		typeof v.token === "string" &&
@@ -98,7 +105,8 @@ export function pending(value: unknown, now: number): Pending | null {
 /** A path on this site to return to, or `/` for anything else, such as `//evil.example` or a full URL. */
 export function local(next: string | null | undefined): string {
 	if (!next || !next.startsWith("/") || next.startsWith("//") || next.startsWith("/\\")) return "/";
-	return next.length > 512 ? "/" : next;
+	// URL parsers remove tabs and newlines before interpreting the path.
+	return next.length > 512 || /[\u0000-\u001f\u007f]/.test(next) ? "/" : next;
 }
 
 function base64url(bytes: Uint8Array): string {

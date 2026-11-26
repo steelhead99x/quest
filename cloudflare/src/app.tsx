@@ -1,6 +1,6 @@
 import { type Context as HonoContext, Hono } from "hono";
 import { getCookie } from "hono/cookie";
-import { authorizeUrl, type Config, exchange, refreshed, revoke } from "./auth.ts";
+import { authorizeUrl, type Config, exchange, type Refreshed, refreshed, revoke } from "./auth.ts";
 import { CALLBACK } from "./github/app.ts";
 import { type Fetch, GitHub, GitHubError, Spent } from "./github/client.ts";
 import { repositories } from "./github/repos.ts";
@@ -11,7 +11,8 @@ import { load as loadBench, type Window } from "./bench/load.ts";
 import { rollups, row } from "./bench/model.ts";
 import { BenchPage } from "./bench/page.tsx";
 import { cached } from "./cache.ts";
-import { Dispatch, PullCi, RunList } from "./ci.tsx";
+import { Offline } from "./home.tsx";
+import { CiElsewhere, Dispatch, PullCi, RunList } from "./ci.tsx";
 import { checks, dispatch, Refused, rerunFailed, runs } from "./github/ci.ts";
 import { Home, Message } from "./home.tsx";
 import type { User } from "./layout.tsx";
@@ -23,6 +24,8 @@ export interface Env {
 	GITHUB_CLIENT_ID: string;
 	GITHUB_CLIENT_SECRET: string;
 	GITHUB_APP_SLUG: string;
+	/** The IANA timezone whose calendar day decides Scheduled dates, such as America/Los_Angeles. */
+	SCHEDULE_TIMEZONE: string;
 }
 
 /** What the app takes from outside, so tests can fake GitHub and the clock. */
@@ -31,9 +34,21 @@ export interface Deps {
 	now: () => number;
 	/** Where GitHub answers are cached briefly, or null for none. */
 	cache: () => Promise<Cache | null>;
+	/** Rotate an expiring session's refresh token through its coordinator, once for every caller (rotation.ts). */
+	rotate: (env: Env, s: Session) => Promise<Refreshed>;
+	/** End a session at its coordinator: no refresh after this, and every token it made revoked. */
+	end: (env: Env, s: Session) => Promise<void>;
 }
 
-type Vars = { github: GitHub; session: Session | null; config: Config; install: string; cookies: string[] };
+type Vars = {
+	github: GitHub;
+	session: Session | null;
+	/** A session was in play for this request, even if signing out cleared it. */
+	rendered: boolean;
+	config: Config;
+	install: string;
+	cookies: string[];
+};
 type Bindings = { Bindings: Env; Variables: Vars };
 type App = Hono<Bindings>;
 // Any route's context, for the helpers below.
@@ -47,13 +62,18 @@ class Misconfigured extends Error {}
 
 /** Check the environment, naming every missing setting at once. */
 export function configure(env: Env, origin: string): { config: Config; install: string } {
-	const missing = (["AUTH_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "GITHUB_APP_SLUG"] as const).filter(
-		(k) => !env[k],
-	);
+	const missing = (
+		["AUTH_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "GITHUB_APP_SLUG", "SCHEDULE_TIMEZONE"] as const
+	).filter((k) => !env[k]);
 	if (missing.length) throw new Misconfigured(`this deploy is missing ${missing.join(", ")}`);
 	if (env.AUTH_SECRET.length < 32) throw new Misconfigured("AUTH_SECRET must be at least 32 characters");
 	if (!/^[a-z0-9][a-z0-9-]*$/.test(env.GITHUB_APP_SLUG))
 		throw new Misconfigured("GITHUB_APP_SLUG is not an App slug");
+	try {
+		new Intl.DateTimeFormat("en-CA", { timeZone: env.SCHEDULE_TIMEZONE });
+	} catch {
+		throw new Misconfigured(`SCHEDULE_TIMEZONE is not an IANA timezone: ${env.SCHEDULE_TIMEZONE}`);
+	}
 	return {
 		config: { clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET, origin },
 		install: `https://github.com/apps/${env.GITHUB_APP_SLUG}/installations/new`,
@@ -90,7 +110,10 @@ export function app(deps: Deps): App {
 		const { config, install } = configure(c.env, origin);
 		c.set("config", config);
 		c.set("install", install);
-		await loadSession(c, deps);
+		// Signing out must work whatever GitHub's state, so it reads the cookie without refreshing it.
+		const signingOut = c.req.method === "POST" && c.req.path === "/sign-out";
+		await loadSession(c, deps, !signingOut);
+		c.set("rendered", c.get("session") !== null);
 		await next();
 		const github = c.get("github").meter;
 		const total = deps.now() - start;
@@ -102,7 +125,10 @@ export function app(deps: Deps): App {
 		c.header("Content-Security-Policy", CSP);
 		c.header("X-Content-Type-Options", "nosniff");
 		c.header("Referrer-Policy", "same-origin");
-		if (!c.res.headers.has("Cache-Control")) c.header("Cache-Control", "private, no-cache");
+		// A page rendered for a signed-in person is never stored, by the browser or its service worker,
+		// so it cannot outlive the session; a signed-out page may be kept for offline reading.
+		if (!c.res.headers.has("Cache-Control"))
+			c.header("Cache-Control", c.get("session") || c.get("rendered") ? "private, no-store" : "no-cache");
 		for (const set of c.get("cookies")) c.header("Set-Cookie", set, { append: true });
 	});
 
@@ -141,9 +167,12 @@ export function app(deps: Deps): App {
 		if (!s) return c.redirect(`/sign-in?next=${encodeURIComponent(new URL(c.req.url).pathname)}`, 302);
 		const [owner, name] = repository.split("/") as [string, string];
 		const github = c.get("github").withToken(s.token);
-		const merged = await cached<Window>(await deps.cache(), `bench ${s.id} ${repository}`.toLowerCase(), () =>
-			loadBench(github, owner, name, deps.now()),
+		const { value: merged, hit } = await cached<Window>(
+			await deps.cache(),
+			`bench ${s.id} ${repository}`.toLowerCase(),
+			() => loadBench(github, owner, name, deps.now()),
 		);
+		if (hit && merged.private) await readable(github, repository);
 		const rows = merged.pulls.map(row);
 		return c.html(
 			<BenchPage
@@ -169,10 +198,25 @@ export function app(deps: Deps): App {
 		let ci = null;
 		if (pull) {
 			const github = c.get("github").withToken(c.get("session")!.token);
-			const repository = b.tree.repository;
-			const checked = await checks(github, repository, pull.head, deps.now());
-			const ran = await runs(github, repository, { sha: pull.head }, deps.now());
-			ci = <PullCi runs={ran} checks={checked} repository={repository} next={path} link={`${pull.url}/checks`} />;
+			// The PR's own repository: on a fork's board, a claim may be an upstream PR.
+			const repository = pull.repository;
+			try {
+				const checked = await checks(github, repository, pull.head, deps.now());
+				const ran = await runs(github, repository, { sha: pull.head }, deps.now());
+				ci = (
+					<PullCi
+						runs={ran}
+						checks={checked}
+						repository={repository}
+						next={path}
+						link={`${pull.url}/checks`}
+					/>
+				);
+			} catch (error) {
+				// The App may not be installed where the PR lives; the quest still shows, with its CI on GitHub.
+				if (!(error instanceof GitHubError) || error.status === 401) throw error;
+				ci = <CiElsewhere repository={repository} link={`${pull.url}/checks`} />;
+			}
 		}
 		return c.html(
 			<QuestPage b={b} doc={doc.path} user={user(c.get("session"))!} path={path} now={deps.now()}>
@@ -203,9 +247,14 @@ export function app(deps: Deps): App {
 		const b = await boardFor(c, deps);
 		if (b instanceof Response) return b;
 		const file = c.req.param("file") ?? "";
-		const workflow = b.tree.workflows.find((w) => w.file === file && w.dispatch);
+		const workflow = b.tree.workflows.find((w) => w.file === file && w.dispatch && !w.inputs);
 		if (!workflow)
-			return page(c, 409, "Not startable", `${file} has no workflow_dispatch trigger on ${b.tree.branch}.`);
+			return page(
+				c,
+				409,
+				"Not startable",
+				`${file} has no workflow_dispatch trigger on ${b.tree.branch}, or needs inputs this form cannot give.`,
+			);
 		const next = local(String((await c.req.parseBody()).next ?? ""));
 		const ok = await act(c, () =>
 			dispatch(c.get("github").withToken(s.token), b.tree.repository, workflow.file, b.tree.branch),
@@ -218,6 +267,12 @@ export function app(deps: Deps): App {
 			`${b.tree.url}/actions/workflows/${encodeURIComponent(workflow.file)}`,
 			next,
 		);
+	});
+
+	// What the service worker shows offline for a page it may not keep. Public, so it never names the person.
+	web.get("/offline", (c) => {
+		c.header("Cache-Control", "no-cache");
+		return c.html(<Offline />);
 	});
 
 	web.get("/sign-in", async (c) => {
@@ -259,7 +314,13 @@ export function app(deps: Deps): App {
 		c.set("session", null);
 		// Drop the cached pages the service worker kept for this person.
 		c.header("Clear-Site-Data", '"cache", "storage"');
-		if (s) await revoke(c.get("github"), c.get("config"), s.token);
+		// The coordinator refuses any later refresh and revokes the tokens it made, so a refresh still
+		// in flight cannot sign the person back in. The cookie is cleared whether or not it or GitHub answers.
+		if (s)
+			await deps.end(c.env, s).catch(async (error) => {
+				console.error("ending a session at its coordinator failed; revoking its token directly", error);
+				await revoke(c.get("github"), c.get("config"), s.token).catch(() => undefined);
+			});
 		return c.redirect("/", 303);
 	});
 
@@ -273,6 +334,8 @@ export function app(deps: Deps): App {
 			return page(c, 401, "Signed out", "GitHub no longer accepts your sign-in. Sign in again.");
 		}
 		if (error instanceof Misconfigured) return c.text(error.message, 500);
+		if (error instanceof Unavailable)
+			return page(c, 503, "GitHub didn't answer", "Signing you back in failed for now. Reload in a moment.");
 		if (error instanceof NotFound)
 			return page(
 				c,
@@ -345,8 +408,20 @@ async function boardFor(c: Context, deps: Deps) {
 	if (!s) return c.redirect(`/sign-in?next=${encodeURIComponent(new URL(c.req.url).pathname)}`, 302);
 	const github = c.get("github").withToken(s.token);
 	const key = `board ${s.id} ${owner}/${name}`.toLowerCase();
-	const tree = await cached<Tree>(await deps.cache(), key, () => load(github, owner, name));
-	return board(tree, deps.now());
+	const { value: tree, hit } = await cached<Tree>(await deps.cache(), key, () => load(github, owner, name));
+	if (hit && tree.private) await readable(github, tree.repository);
+	return board(tree, deps.now(), c.env.SCHEDULE_TIMEZONE);
+}
+
+/** Confirm the person can still read a private repository before showing a cached copy of it. */
+async function readable(github: GitHub, repository: string): Promise<void> {
+	try {
+		await github.get(`/repos/${repository}`);
+	} catch (error) {
+		if (error instanceof GitHubError && (error.status === 403 || error.status === 404))
+			throw new NotFound(repository);
+		throw error;
+	}
 }
 
 /** Refuse a form post from another site, or from a browser that hides where it came from. */
@@ -356,7 +431,7 @@ export function sameOrigin(request: Request): string | null {
 	return origin === new URL(request.url).origin ? null : "This form was sent from another site.";
 }
 
-async function loadSession(c: Context, deps: Deps) {
+async function loadSession(c: Context, deps: Deps, refresh: boolean) {
 	const raw = getCookie(c, SESSION);
 	const was = session(await open(c.env.AUTH_SECRET, "session", raw));
 	if (!was) {
@@ -364,15 +439,24 @@ async function loadSession(c: Context, deps: Deps) {
 		c.set("session", null);
 		return;
 	}
-	const now = await refreshed(c.get("github"), c.get("config"), was, deps.now());
-	if (!now) {
+	if (!refresh) return c.set("session", was);
+	const result = await refreshed(was, deps.now(), (s) => deps.rotate(c.env, s));
+	if (result.kind === "revoked") {
 		c.get("cookies").push(cookie(SESSION, null, 0));
 		c.set("session", null);
 		return;
 	}
-	if (now !== was) await setSession(c, now, deps);
-	else c.set("session", now);
+	if (result.kind === "unavailable") {
+		// Keep the cookie: GitHub may answer on the next page. Use the token while it is still valid.
+		if (was.expires > deps.now()) return c.set("session", was);
+		throw new Unavailable();
+	}
+	if (result.changed) await setSession(c, result.session, deps);
+	else c.set("session", result.session);
 }
+
+/** GitHub's token endpoint failed and the current token has expired; the session is kept for a retry. */
+class Unavailable extends Error {}
 
 async function setSession(c: Context, s: Session, deps: Deps) {
 	c.set("session", s);

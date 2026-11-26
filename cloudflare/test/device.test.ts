@@ -13,7 +13,7 @@ import {
 	unfit,
 } from "../device/bench.ts";
 import { type DeviceInfo, type Driver, type Load, pageTiming } from "../device/driver.ts";
-import { tab, Target, udid } from "../device/ipad.ts";
+import { clearStorage, tab, Target, udid } from "../device/ipad.ts";
 import { Rpc } from "../device/rpc.ts";
 import { median, p95, quantile, regressions, spread, summarize } from "../device/stats.ts";
 
@@ -24,6 +24,8 @@ const load = (overrides: Partial<Load> = {}): Load => ({
 	bytes: 20_000,
 	worker: 12,
 	status: 200,
+	// Empty: the fake driver fills in the page it was asked for.
+	url: "",
 	wall: 340,
 	...overrides,
 });
@@ -48,7 +50,8 @@ function fake(info: DeviceInfo, loads: Load[]): Driver & { calls: string[] } {
 		info: async () => info,
 		load: async (url, cold) => {
 			calls.push(`${cold ? "cold" : "warm"} ${url}`);
-			return loads[i++ % loads.length]!;
+			const l = loads[i++ % loads.length]!;
+			return { ...l, url: l.url || url };
 		},
 		installable: async () => ({ manifest: true, serviceWorker: true, offline: true, errors: [] }),
 		screenshot: async (_, dark) => new Uint8Array([dark ? 1 : 0]),
@@ -77,11 +80,20 @@ describe("stats", () => {
 		const base = { load: summarize([300, 310, 290, 300, 305]) };
 		expect(regressions(base, { load: summarize([320, 330, 310, 320, 325]) }, { load: 30 })).toEqual([]);
 		expect(regressions(base, { load: summarize([400, 410, 390, 400, 405]) }, { load: 30 })).toEqual([
-			{ metric: "load", baseline: 300, current: 400, allowed: 30 },
+			{ metric: "load", kind: "slower", baseline: 300, current: 400, allowed: 30 },
 		]);
-		// A noisy run widens what is allowed.
-		const noisy = summarize([300, 500, 200, 450, 380]);
-		expect(regressions(base, { load: noisy }, { load: 30 })).toEqual([]);
+	});
+
+	test("a noisy run gets no extra room: it fails as slower, or as too noisy to judge", () => {
+		// The review's case: a steady 100 ms baseline against a scattered run whose median is 250 ms.
+		const steady = { load: summarize([100, 101, 99, 100, 100]) };
+		const slower = regressions(steady, { load: summarize([100, 400, 250, 120, 380]) }, { load: 30 });
+		expect(slower).toEqual([{ metric: "load", kind: "slower", baseline: 100, current: 250, allowed: 30 }]);
+		// Same median as the baseline, but the runs scatter too widely to trust it.
+		const noisy = regressions(steady, { load: summarize([100, 300, 0, 260, 50]) }, { load: 30 });
+		expect(noisy).toEqual([{ metric: "load", kind: "noisy", baseline: 0, current: 100, allowed: 90 }]);
+		// Ordinary jitter within the floor passes.
+		expect(regressions(steady, { load: summarize([100, 120, 95, 110, 105]) }, { load: 30 })).toEqual([]);
 	});
 
 	test("refuses a run missing a metric the baseline has", () => {
@@ -119,7 +131,7 @@ describe("parsers", () => {
 	});
 
 	test("reads the page's timing and refuses a malformed one", () => {
-		const t = { response: 1, paint: null, load: 3, bytes: 4, worker: null, status: 200 };
+		const t = { response: 1, paint: null, load: 3, bytes: 4, worker: null, status: 200, url: "https://q.dev/" };
 		expect(pageTiming(JSON.stringify(t))).toEqual(t);
 		expect(() => pageTiming(JSON.stringify({ ...t, load: -1 }))).toThrow("load");
 		expect(() => pageTiming(JSON.stringify({ ...t, bytes: "x" }))).toThrow("bytes");
@@ -128,6 +140,36 @@ describe("parsers", () => {
 });
 
 describe("bench", () => {
+	test("refuses a load that ended on another page, such as GitHub's sign-in", async () => {
+		const redirected = fake(device(), [load({ url: "https://github.com/login" })]);
+		await expect(
+			run(redirected, { urls: ["https://q.dev/repos/x"], runs: 3, save: async (n) => n }),
+		).rejects.toThrow("ended at https://github.com/login");
+	});
+
+	test("the iPad's storage wipe runs only on the site's own origin", async () => {
+		const wipe = async (href: string) => {
+			const done: string[] = [];
+			const scope = {
+				location: new URL(href),
+				navigator: {
+					serviceWorker: { getRegistrations: async () => [{ unregister: async () => done.push("sw") }] },
+				},
+				caches: { keys: async () => ["pages"], delete: async (k: string) => done.push(k) },
+			};
+			const value = await new Function(...Object.keys(scope), "self", `return ${clearStorage("https://q.dev")}`)(
+				...Object.values(scope),
+				scope,
+			);
+			return { value, done };
+		};
+		expect(await wipe("https://q.dev/repos/x")).toEqual({ value: true, done: ["sw", "pages"] });
+		expect(await wipe("https://github.com/login?return_to=x")).toEqual({
+			value: "https://github.com/login?return_to=x",
+			done: [],
+		});
+	});
+
 	test("loads each page cold then warm, and saves light and dark screenshots", async () => {
 		const driver = fake(device(), [load()]);
 		const saved: string[] = [];
@@ -345,6 +387,45 @@ describe("rpc", () => {
 		const loaded = page.event("Page.loadEventFired");
 		expect(await page.call("Runtime.evaluate", { expression: "1" })).toEqual({ method: "Runtime.evaluate" });
 		await loaded;
+		rpc.close();
+	});
+
+	test("follows a WebKit page target across a cross-process navigation", async () => {
+		const sentTo: string[] = [];
+		const url = serve((m, send) => {
+			send({ id: m.id, result: {} });
+			const target = String(m.params.targetId);
+			const inner = JSON.parse(String(m.params.message)) as { id: number; method: string };
+			sentTo.push(`${target} ${inner.method}`);
+			const reply = (from: string, message: unknown) =>
+				send({
+					method: "Target.dispatchMessageFromTarget",
+					params: { targetId: from, message: JSON.stringify(message) },
+				});
+			if (inner.method === "Page.navigate") {
+				reply(target, { id: inner.id, result: {} });
+				send({
+					method: "Target.targetCreated",
+					params: { targetInfo: { targetId: "page-2", type: "page", isProvisional: true } },
+				});
+				setTimeout(() => {
+					send({
+						method: "Target.didCommitProvisionalTarget",
+						params: { oldTargetId: "page-1", newTargetId: "page-2" },
+					});
+					reply("page-2", { method: "Page.loadEventFired", params: {} });
+				}, 30);
+			} else reply(target, { id: inner.id, result: { at: target } });
+		});
+		const rpc = await Rpc.connect(url, 2_000);
+		const page = new Target(rpc, "page-1", 2_000);
+		await page.call("Page.enable");
+		const loaded = page.event("Page.loadEventFired");
+		await page.call("Page.navigate", { url: "https://q.dev/" });
+		await loaded;
+		expect(page.current).toBe("page-2");
+		expect(sentTo).toContain("page-2 Page.enable");
+		expect(await page.call("Runtime.evaluate")).toEqual({ at: "page-2" });
 		rpc.close();
 	});
 });
