@@ -52,8 +52,8 @@ describe("signed out", () => {
 		expect(csp).toContain("font-src 'self'");
 		expect(csp).toContain("style-src 'self';");
 		expect(html).not.toContain("googleapis");
-		expect(html).toContain('href="/fonts/bricolage-grotesque-latin-wght-normal.woff2" as="font"');
-		expect(html).toContain('<meta property="og:image" content="https://quest.test/theme/og.png"/>');
+		expect(html).toContain('href="/fonts/atkinson-hyperlegible-next-latin-wght-normal.woff2" as="font"');
+		expect(html).toContain('<meta property="og:image" content="https://quest.test/og.png"/>');
 		// The sample rows pair each marker with its label, as design/theme.md requires.
 		for (const label of ["Ready", "In review", "Blocked"]) expect(html).toContain(`">${label}</span>`);
 	});

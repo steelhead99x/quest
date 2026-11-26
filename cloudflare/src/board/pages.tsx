@@ -98,7 +98,7 @@ function Milestones(props: { b: Board }) {
 					<li>
 						<a class="milestone-row" href={`#${id}`}>
 							<span class="milestone-name">
-								<span class="ql-eyebrow">{id}</span>
+								<code class="ident">{id}</code>
 								{m.title}
 							</span>
 							<span class="milestone-counts">
@@ -162,9 +162,16 @@ export function BoardPage(props: { b: Board; user: User; path: string; children?
 			<section class="wrap board">
 				<RepoHeading repository={repository}>
 					<p class="as-of muted">
-						{b.tree.branch}{" "}
-						<a href={`${b.tree.url}/commit/${b.tree.commit}`}>{b.tree.commit.slice(0, 7)}</a> ·{" "}
-						<a href={`${boardHref(repository)}/bench`}>Bench</a>
+						Read from <code class="ident">{b.tree.branch}</code> at{" "}
+						<a href={`${b.tree.url}/commit/${b.tree.commit}`}>
+							<code class="ident">{b.tree.commit.slice(0, 7)}</code>
+						</a>
+						.
+					</p>
+					<p class="head-actions">
+						<a class="button quiet small" href={`${boardHref(repository)}/bench`}>
+							How quests merged
+						</a>
 					</p>
 				</RepoHeading>
 				{b.tree.documents.length === 0 && <p>No quest tree on {b.tree.branch}.</p>}
@@ -198,7 +205,7 @@ export function BoardPage(props: { b: Board; user: User; path: string; children?
 				<div class="columns">
 					{b.ranked.length > 0 && (
 						<section class="block">
-							<Heading eyebrow="Up next" title="Ready to start" count={b.ranked.length} />
+							<Heading title="Ready to start" count={b.ranked.length} />
 							<ol class="log">
 								{b.ranked.slice(0, READY_SHOWN).map((r) => (
 									<Row
@@ -215,7 +222,7 @@ export function BoardPage(props: { b: Board; user: User; path: string; children?
 					)}
 					{b.waiting.length > 0 && (
 						<section class="block">
-							<Heading eyebrow="Needs a person" title="Waiting" count={b.waiting.length} />
+							<Heading title="Waiting" count={b.waiting.length} />
 							<ul class="log">
 								{b.waiting.slice(0, WAITING_SHOWN).map((w) => (
 									<Entry
@@ -247,7 +254,7 @@ export function BoardPage(props: { b: Board; user: User; path: string; children?
 					return (
 						<details class="fold milestone" id={m.path.split("/")[1]}>
 							<summary>
-								<span class="ql-eyebrow">{m.path.split("/")[1]}</span>
+								<code class="ident">{m.path.split("/")[1]}</code>
 								<span class="fold-title">{m.title}</span>
 								<span class="count">{mine.length}</span>
 							</summary>

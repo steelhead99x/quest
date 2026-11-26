@@ -62,13 +62,13 @@ export function BenchPage(props: {
 	const { repository } = props;
 	return (
 		<Layout
-			title={`Bench · ${repository}`}
+			title={`How quests merged in ${repository}`}
 			description={`How ${repository}'s quests performed.`}
 			path={props.path}
 			user={props.user}
 			crumbs={[
 				{ label: repository, href: boardHref(repository) },
-				{ label: "Bench", href: `${boardHref(repository)}/bench` },
+				{ label: "How quests merged", href: `${boardHref(repository)}/bench` },
 			]}
 		>
 			<section class="wrap board">

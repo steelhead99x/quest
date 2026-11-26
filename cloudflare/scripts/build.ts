@@ -1,5 +1,5 @@
 // Build the Worker's static assets into build/public (ignored by Git): the theme
-// from design/theme/, moq-dev's three open-licensed fonts, the site CSS, the page script, the web app manifest, and
+// from design/theme/, the site's open-licensed fonts, the site CSS, the page script, the web app manifest, and
 // the service worker stamped with this build's commit, so a deploy replaces the
 // cached shell. Wrangler runs this before dev and deploy; check and test run it first.
 import { execFileSync } from "node:child_process";
@@ -7,13 +7,16 @@ import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path";
 
 /**
- * The font files each @fontsource package gives the site, moq-dev's three faces
- * (moq-dev/moq.dev's src/layouts/global.css); src/site.css declares them.
+ * The font files each @fontsource package gives the site; src/site.css declares them.
+ * Atkinson Hyperlegible Next and Mono, one family chosen for reading on a phone: it
+ * tells I, l, and 1 and 0 and O apart, which matters in PR numbers, hashes, and paths.
  */
 export const FONTS: Record<string, string[]> = {
-	"@fontsource-variable/bricolage-grotesque": ["bricolage-grotesque-latin-wght-normal.woff2"],
-	"@fontsource-variable/dm-sans": ["dm-sans-latin-wght-normal.woff2"],
-	"@fontsource/dm-mono": ["dm-mono-latin-400-normal.woff2", "dm-mono-latin-500-normal.woff2"],
+	"@fontsource-variable/atkinson-hyperlegible-next": [
+		"atkinson-hyperlegible-next-latin-wght-normal.woff2",
+		"atkinson-hyperlegible-next-latin-wght-italic.woff2",
+	],
+	"@fontsource-variable/atkinson-hyperlegible-mono": ["atkinson-hyperlegible-mono-latin-wght-normal.woff2"],
 };
 
 const worker = join(import.meta.dirname, "..");
@@ -37,6 +40,8 @@ for (const [pkg, files] of Object.entries(FONTS)) {
 	for (const file of files) cpSync(join(dir, "files", file), join(fonts, file));
 	cpSync(join(dir, "LICENSE"), join(fonts, `${pkg.split("/")[1]}-OFL.txt`));
 }
+// The site's social image (brand/README.md).
+cpSync(join(worker, "brand", "og.png"), join(out, "og.png"));
 for (const file of ["site.css", "app.js", "manifest.webmanifest"]) cpSync(join(worker, "src", file), join(out, file));
 const sw = readFileSync(join(worker, "src", "sw.js"), "utf8");
 if (!sw.includes("__VERSION__")) throw new Error("src/sw.js lost its __VERSION__ placeholder");

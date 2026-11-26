@@ -39,7 +39,8 @@ export function manifest(origin: string, redirect: string, name: string): Manife
 	return {
 		name,
 		url: site.origin,
-		description: "Quest log: quest stats, PR CI, and re-runs, on any phone.",
+		description:
+			"A quest log for your repo and your agents, on your phone: what is ready to start, what is in review, and each pull request's checks.",
 		// Installable on any account, so the maintainer's organization can install a contributor's App.
 		public: true,
 		redirect_url: redirect,
