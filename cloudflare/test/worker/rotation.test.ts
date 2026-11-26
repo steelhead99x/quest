@@ -24,6 +24,7 @@ const next: Session = { ...old, token: "ghu_two", refresh: "ghr_two", expires: D
 function coordinator() {
 	let now = Date.UTC(2026, 10, 25, 12);
 	let stored: State | undefined;
+	let unreadable = 0;
 	const calls = { refresh: 0, revoked: [] as string[] };
 	let release: (() => void) | null = null;
 	const act: Actions = {
@@ -37,7 +38,13 @@ function coordinator() {
 	};
 	const c = new Coordinator(
 		{
-			load: async () => structuredClone(stored),
+			load: async () => {
+				if (unreadable > 0) {
+					unreadable--;
+					throw new Error("storage read failed");
+				}
+				return structuredClone(stored);
+			},
 			save: async (s) => void (stored = structuredClone(s)),
 			wake: async () => undefined,
 		},
@@ -48,6 +55,8 @@ function coordinator() {
 		c,
 		calls,
 		stored: () => stored,
+		/** Fail the next `n` storage reads. */
+		failReads: (n: number) => (unreadable = n),
 		advance: (ms: number) => (now += ms),
 		/** Let GitHub answer the refresh that is waiting, and every later one at once. */
 		answer: () => {
@@ -70,6 +79,41 @@ describe("the coordinator", () => {
 		// And any later refresh of the ended session is refused without asking GitHub.
 		expect(await k.c.rotate(next)).toEqual({ kind: "revoked" });
 		expect(k.calls.refresh).toBe(1);
+	});
+
+	test("a sign-out while a new rotation is being sealed revokes the new token and refuses the refresh", async () => {
+		const k = coordinator();
+		const refreshing = k.c.rotate(old);
+		await new Promise((r) => setTimeout(r, 0));
+		// GitHub answers, and the sign-out arrives while the coordinator seals the new session.
+		k.answer();
+		// Let the refresh pass its first check and start sealing, then sign out.
+		for (let i = 0; i < 4; i++) await Promise.resolve();
+		const ending = k.c.end(old);
+		const [result] = await Promise.all([refreshing, ending]);
+		expect(result).toEqual({ kind: "revoked" });
+		expect(k.calls.revoked.sort()).toEqual(["ghu_one", "ghu_two"]);
+		expect(k.stored()?.rotations).toEqual({});
+	});
+
+	test("an unreadable store refuses to refresh, without asking GitHub, and reads again next time", async () => {
+		const k = coordinator();
+		k.answer();
+		k.failReads(1);
+		await expect(k.c.rotate(old)).rejects.toThrow("can't read");
+		expect(k.calls.refresh).toBe(0);
+		expect((await k.c.rotate(old)).kind).toBe("fresh");
+		expect(k.calls.refresh).toBe(1);
+	});
+
+	test("an unreadable store still records a sign-out, so the session can't refresh afterwards", async () => {
+		const k = coordinator();
+		k.answer();
+		k.failReads(1);
+		await k.c.end(old);
+		expect(k.stored()?.ended).toBeGreaterThan(0);
+		expect(await k.c.rotate(old)).toEqual({ kind: "revoked" });
+		expect(k.calls.refresh).toBe(0);
 	});
 
 	test("ending revokes a rotation that finished just before", async () => {
