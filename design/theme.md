@@ -53,6 +53,13 @@ Terminal colours are named ANSI SGR codes, so they follow the user's terminal
 palette and work on any colour terminal. The 16-colour palette has no orange,
 so XL uses yellow `33`, which many palettes render orange-brown.
 
+## Site tokens
+
+[`theme/theme.css`](theme/theme.css) carries this page's palette, type, and
+marker and size classes for the quest log site in `cloudflare/`, and
+`theme/icon-192.png` and `theme/icon-512.png` are its home-screen icons.
+Change this page first, then that file.
+
 ## Mark
 
 [`theme/logo.svg`](theme/logo.svg) is a flat dark `!` on an amber rounded

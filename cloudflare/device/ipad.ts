@@ -3,7 +3,15 @@
 // WebKit inspector. Current iOS routes inspector calls through a page target.
 
 import type { Subprocess } from "bun";
-import { type DeviceInfo, type Driver, type Installable, type Load, pageTiming, TIMING_SCRIPT } from "./driver.ts";
+import {
+	type DeviceInfo,
+	type Driver,
+	type Installable,
+	type Load,
+	CONTROLLED_SCRIPT,
+	pageTiming,
+	TIMING_SCRIPT,
+} from "./driver.ts";
 import { type Message, Rpc } from "./rpc.ts";
 import { type Shell, sleep } from "./shell.ts";
 
@@ -187,7 +195,7 @@ export class Ipad implements Driver {
 				if (!["standalone", "fullscreen", "minimal-ui"].includes(m.display)) errors.push("manifest display is not standalone");
 				manifest = errors.length === 0;
 			}
-			const sw = navigator.serviceWorker && navigator.serviceWorker.controller !== null;
+			const sw = await ${CONTROLLED_SCRIPT};
 			const cached = Boolean(await caches.match(location.href));
 			return JSON.stringify({ manifest, serviceWorker: sw, offline: cached, errors });
 		})()`);
