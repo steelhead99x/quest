@@ -5,7 +5,7 @@ import type { Child } from "hono/jsx";
 // surfaces, ink, and accent are moq-dev's, and the type is Atkinson Hyperlegible
 // (src/site.css), served from /fonts.
 
-export const repo = "https://github.com/steelhead99x/quest";
+export const repo = "https://github.com/moq-dev/quest";
 
 /** The signed-in person, as the header shows them. */
 export type User = { login: string };

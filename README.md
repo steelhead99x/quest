@@ -1,4 +1,4 @@
-<p align="center"><img src="design/theme/og.png" alt="Quest — Find your next quest. A shared quest log for you and your coding agents." width="960"></p>
+<p align="center"><img src="design/theme/og.png" alt="Quest: find your next quest. A shared quest log for you and your coding agents." width="960"></p>
 
 # Quest
 
