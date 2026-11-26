@@ -174,12 +174,17 @@ function sender(
 		interval: 60_000,
 		fetch: (async (input: string | URL | Request, init?: RequestInit) => {
 			expect(String(input)).toBe(ENDPOINT);
+			// A redirect must reach the sender, never be followed into a GET.
+			expect(init?.redirect).toBe("manual");
 			uploads.push({
 				token: String((init?.headers as Record<string, string>).authorization),
 				body: JSON.parse(String(init?.body)),
 			});
 			during();
-			return new Response("", { status: typeof status === "number" ? status : status() });
+			const code = typeof status === "number" ? status : status();
+			return code >= 300 && code < 400
+				? new Response(null, { status: code, headers: { location: "https://records.example/login" } })
+				: new Response("", { status: code });
 		}) as typeof fetch,
 	};
 	return { deps, uploads, windows, slept, clock };
@@ -297,6 +302,25 @@ test("a failed upload stays queued and is said once; a refused token stops sendi
 	// A new token is tried again.
 	writeFileSync(tokensPath(env), JSON.stringify({ [ENDPOINT]: "fresh" }));
 	expect(queue(stopped(root), env).queued).toBe(true);
+});
+
+test("a redirected upload keeps the queue and its cursor, since the endpoint received nothing", async () => {
+	const env = home();
+	const root = checkout(ENDPOINT);
+	queue(stopped(root), env);
+	for (const code of [301, 302, 307]) {
+		const moved = sender(env, code, [session("s1", "quest/m0/a")]);
+		await expect(sendPass(moved.deps)).rejects.toThrow(
+			`answered a redirect (${code} to https://records.example/login), so nothing was sent`,
+		);
+		moved.clock.now += 24 * 3_600_000;
+		expect(pending(env)).toHaveLength(1);
+	}
+	const ok = sender(env, 200, [session("s1", "quest/m0/a")]);
+	expect(await sendPass(ok.deps)).toEqual([
+		{ endpoint: ENDPOINT, repository: "acme/proj", records: 1, breakages: 0, refused: false },
+	]);
+	expect(pending(env)).toEqual([]);
 });
 
 test("the sender fails loud without token-max, keeping the queue", async () => {
