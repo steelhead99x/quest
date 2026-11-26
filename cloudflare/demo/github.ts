@@ -89,6 +89,7 @@ export function github(snapshot: Snapshot, now: () => number) {
 		name,
 		head_sha: head,
 		head_branch: branch,
+		head_repository: { full_name: REPOSITORY },
 		status: conclusion === null ? "in_progress" : "completed",
 		conclusion,
 		html_url: `${WEB}/actions/runs/${nextRun - 1}`,

@@ -229,6 +229,7 @@ const run = (id: number, extra: Record<string, unknown> = {}) => ({
 	status: "completed",
 	conclusion: "failure",
 	html_url: `https://github.com/moq-dev/quest/actions/runs/${id}`,
+	head_repository: { full_name: "moq-dev/quest" },
 	run_started_at: "2026-11-25T11:00:00Z",
 	updated_at: "2026-11-25T11:03:05Z",
 	...extra,
@@ -267,11 +268,12 @@ describe("CI", () => {
 			[RUNS]: (r) => {
 				expect(new URL(r.url).searchParams.get("head_sha")).toBe("d".repeat(40));
 				return json({
-					total_count: 3,
+					total_count: 4,
 					workflow_runs: [
 						run(10),
 						run(11, { conclusion: "success" }),
 						run(12, { conclusion: "action_required" }),
+						run(13, { head_repository: { full_name: "mallory/quest" } }),
 					],
 				});
 			},
@@ -282,6 +284,7 @@ describe("CI", () => {
 		expect(html).toContain("42s");
 		expect(html).toContain("3m 05s");
 		expect(html.match(/Re-run failed jobs/g)).toHaveLength(1);
+		expect(html).toContain("From a fork: re-run it on GitHub");
 		expect(html).toContain('action="/repos/moq-dev/quest/runs/10/rerun"');
 		expect(html).toContain("Approve it on GitHub");
 		// 31 check runs exist and 30 are read.
@@ -339,6 +342,8 @@ describe("CI", () => {
 		["a run awaiting approval", run(10, { conclusion: "action_required" }), "waiting for a maintainer"],
 		["a run that passed", run(10, { conclusion: "success" }), "no failed jobs"],
 		["a run still going", run(10, { status: "in_progress", conclusion: null }), "no failed jobs"],
+		["a fork's finished failure", run(10, { head_repository: { full_name: "mallory/quest" } }), "ran from a fork"],
+		["a run whose source is unknown", run(10, { head_repository: null }), "ran from a fork"],
 	])("refuses to re-run %s", async (_, value, message) => {
 		const h = harness({ "GET https://api.github.com/repos/moq-dev/quest/actions/runs/10": () => json(value) });
 		const response = await h.request("/repos/moq-dev/quest/runs/10/rerun", {
