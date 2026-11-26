@@ -146,7 +146,8 @@ export function BoardPage(props: { b: Board; user: User; path: string; children?
 					<p class="as-of muted">
 						{b.tree.branch} at{" "}
 						<a href={`${b.tree.url}/commit/${b.tree.commit}`}>{b.tree.commit.slice(0, 7)}</a>
-						{b.tree.committed && `, ${b.tree.committed.slice(0, 10)}`}
+						{b.tree.committed && `, ${b.tree.committed.slice(0, 10)}`} ·{" "}
+						<a href={`${boardHref(repository)}/bench`}>Bench</a>
 					</p>
 				</header>
 				{b.tree.documents.length === 0 && <p>This repository has no quest tree on {b.tree.branch}.</p>}

@@ -7,6 +7,9 @@ import { repositories } from "./github/repos.ts";
 import { load, NotFound, type Tree } from "./board/load.ts";
 import { board, lookup } from "./board/model.ts";
 import { BoardPage, QuestPage } from "./board/pages.tsx";
+import { load as loadBench, type Window } from "./bench/load.ts";
+import { rollups, row } from "./bench/model.ts";
+import { BenchPage } from "./bench/page.tsx";
 import { cached } from "./cache.ts";
 import { Dispatch, RunList } from "./ci.tsx";
 import { checks, dispatch, Refused, rerunFailed, runs } from "./github/ci.ts";
@@ -127,6 +130,29 @@ export function app(deps: Deps): App {
 				/>
 				<Dispatch workflows={b.tree.workflows} repository={repository} branch={b.tree.branch} next={path} />
 			</BoardPage>,
+		);
+	});
+
+	web.get("/repos/:owner/:name/bench", async (c) => {
+		const repository = repoParam(c);
+		if (!repository) return page404(c);
+		const s = c.get("session");
+		if (!s) return c.redirect(`/sign-in?next=${encodeURIComponent(new URL(c.req.url).pathname)}`, 302);
+		const [owner, name] = repository.split("/") as [string, string];
+		const github = c.get("github").withToken(s.token);
+		const merged = await cached<Window>(await deps.cache(), `bench ${s.id} ${repository}`.toLowerCase(), () =>
+			loadBench(github, owner, name, deps.now()),
+		);
+		const rows = merged.pulls.map(row);
+		return c.html(
+			<BenchPage
+				repository={repository}
+				user={user(s)!}
+				path={new URL(c.req.url).pathname}
+				rows={rows}
+				{...rollups(rows)}
+				cut={merged.cut}
+			/>,
 		);
 	});
 

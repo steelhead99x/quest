@@ -4,7 +4,11 @@
 // (quest/m1/model-check.md) audits these lists each milestone.
 import { createHash } from "node:crypto";
 import { type Doc, SIZES, type Size, onMaintainer, size, waits } from "../core";
-import type { HarnessName } from "./agent";
+
+/** The agent CLIs `quest` runs. */
+export const HARNESSES = ["claude", "codex"] as const;
+/** One of HARNESSES. */
+export type HarnessName = (typeof HARNESSES)[number];
 
 /** One harness running one model at one effort. */
 export interface Model {

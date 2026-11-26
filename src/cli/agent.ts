@@ -32,8 +32,10 @@ import { alive, programCommand, programEnvironment, requireProgram, signalProces
 import { systemdScopes } from "./supervise";
 import { Worktrees, save } from "./worktree";
 
-export const HARNESSES = ["claude", "codex"] as const;
-export type HarnessName = (typeof HARNESSES)[number];
+// The harness names live with the model tables, which the Worker reads without this module's process code.
+import { HARNESSES, type HarnessName } from "./models";
+
+export { HARNESSES, type HarnessName };
 
 /** Everything a launch names on its command line. */
 export interface Launch {

@@ -35,7 +35,15 @@ export {
 } from "./doc";
 export { AUDIT, AUDITS, type Audit, SKIPPED, auditOf, covered, skippedOf } from "./audit";
 export { type ClosedPull, handBackWaits, handedBack, landed, withoutHandBack } from "./claim";
-export { reviewSection } from "./review";
+export {
+	type Counts,
+	type Findings,
+	parseReview,
+	REVIEW_MARK,
+	type ReviewSummary,
+	reviewSection,
+	SEVERITIES,
+} from "./review";
 export {
 	ALWAYS_HIGH,
 	DEFAULT,

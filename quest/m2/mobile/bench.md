@@ -1,26 +1,29 @@
-# [M] Quest bench page
+# [S] Bench page from stored records
 
 ## Goal
 
-The Worker (`cloudflare/DEPLOY.md`) shows, per repository, how quests
-performed: for each quest PR merged in the last 30 days, its size,
-implementers, review score and rounds, time from claim to merge, and CI
-wall time, with rollups by size and implementing model and the latest
-`quest eval run` scores. It shows which sizes and models land cleanly and
-where review rounds or CI time pile up.
+The bench page (`cloudflare/src/bench/`) reads merged quest PRs' records
+from the benchmark epic's records store instead of parsing PR bodies, and
+shows each repository's latest `quest eval run` scores beside its review
+rollups.
 
 ## Plan
 
-- Read only records that already exist: each PR body's `## Models` and
-  `## Review` sections, parsed with the CLI's own parser
-  (`src/core/record.ts`) rather than a copy, and check-run timings from
-  GitHub. Token cost stays out: it lives in host transcripts, and the
-  benchmark epic keeps private cost out of public repositories.
-- Once the benchmark epic's
-  [records endpoint](/quest/m0/benchmark/records-endpoint.md) serves
-  records, read from it instead and delete the PR-body parsing.
-- Compute rollups at request time with a fixed read budget, cached with
-  the Cache API, and say when the window was cut short.
-- Cross-check a sample of rows against `quest status <pr>` and the PR
-  pages, and benchmark the page on
-  the device bench (`cloudflare/DEVICES.md`).
+- The page today parses each merged PR's `## Models` and `## Review`
+  sections with the CLI's own readers (`src/cli/models-record.ts` and
+  `parseReview` in `src/core/review.ts`), reads the head commit's check
+  runs for CI wall time, and says on the page that eval scores are not
+  shown.
+- Once the records endpoint serves records, read the same rows from it,
+  delete the PR-body parsing in `cloudflare/src/bench/load.ts`, and keep
+  token cost off public repositories' pages, as the benchmark epic keeps
+  private cost out of them.
+- `quest eval run` prints its scores and puts them in its PR's
+  `## Validation` prose; nothing stores them. Have the records endpoint
+  keep the latest run per repository, or plan where it should live, before
+  this page shows them.
+
+## Required
+
+- [Records endpoint](/quest/m0/benchmark/records-endpoint.md) - the store
+  the page reads instead of PR bodies
