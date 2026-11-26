@@ -77,11 +77,20 @@ describe("stats", () => {
 		const base = { load: summarize([300, 310, 290, 300, 305]) };
 		expect(regressions(base, { load: summarize([320, 330, 310, 320, 325]) }, { load: 30 })).toEqual([]);
 		expect(regressions(base, { load: summarize([400, 410, 390, 400, 405]) }, { load: 30 })).toEqual([
-			{ metric: "load", baseline: 300, current: 400, allowed: 30 },
+			{ metric: "load", kind: "slower", baseline: 300, current: 400, allowed: 30 },
 		]);
-		// A noisy run widens what is allowed.
-		const noisy = summarize([300, 500, 200, 450, 380]);
-		expect(regressions(base, { load: noisy }, { load: 30 })).toEqual([]);
+	});
+
+	test("a noisy run gets no extra room: it fails as slower, or as too noisy to judge", () => {
+		// The review's case: a steady 100 ms baseline against a scattered run whose median is 250 ms.
+		const steady = { load: summarize([100, 101, 99, 100, 100]) };
+		const slower = regressions(steady, { load: summarize([100, 400, 250, 120, 380]) }, { load: 30 });
+		expect(slower).toEqual([{ metric: "load", kind: "slower", baseline: 100, current: 250, allowed: 30 }]);
+		// Same median as the baseline, but the runs scatter too widely to trust it.
+		const noisy = regressions(steady, { load: summarize([100, 300, 0, 260, 50]) }, { load: 30 });
+		expect(noisy).toEqual([{ metric: "load", kind: "noisy", baseline: 0, current: 100, allowed: 90 }]);
+		// Ordinary jitter within the floor passes.
+		expect(regressions(steady, { load: summarize([100, 120, 95, 110, 105]) }, { load: 30 })).toEqual([]);
 	});
 
 	test("refuses a run missing a metric the baseline has", () => {

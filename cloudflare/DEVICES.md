@@ -25,8 +25,10 @@ through Chrome's browser endpoint: a page's own offline switch leaves its
 service worker's fetches on the network.
 
 Without `--record`, each device compares with `bench/<kind>-<model>.json`
-and exits 1 on a regression beyond three times the run-to-run spread (and
-a small floor per metric). `--record` writes that file instead. A run
+and exits 1 when a median grew by more than three times the baseline's
+run-to-run spread (and a small floor per metric), or when this run's own
+spread is so wide its median can't be trusted, which needs a rerun.
+`--record` writes that file instead. A run
 refuses a device that is throttling or below 20% battery, and a baseline
 from a different OS or browser version, so results compare like with
 like. Every requested device must be attached; a missing one fails the run.
