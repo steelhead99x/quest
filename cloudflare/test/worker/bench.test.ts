@@ -158,6 +158,7 @@ describe("bench window", () => {
 describe("bench page", () => {
 	test("renders rollups and rows for a signed-in person, from one GraphQL request", async () => {
 		const cookie = `${SESSION}=${await seal(env.AUTH_SECRET, "session", {
+			sid: "00000000-0000-4000-8000-000000000007",
 			id: 7,
 			login: "octo",
 			token: "ghu_7",

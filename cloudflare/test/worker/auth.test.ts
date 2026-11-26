@@ -283,6 +283,7 @@ describe("signed in", () => {
 
 	test("treats a tampered or foreign cookie as signed out and clears it", async () => {
 		const forged = await seal("another-secret-that-is-at-least-32-characters", "session", {
+			sid: "00000000-0000-4000-8000-000000000001",
 			id: 1,
 			login: "mallory",
 			token: "t",
@@ -361,6 +362,40 @@ describe("sign-out", () => {
 		expect(cookies(response).get(SESSION)!.attributes).toContain("Max-Age=0");
 		expect(revoked!.headers.get("authorization")).toBe(`Basic ${btoa("Iv23test:test-client-secret")}`);
 		expect(await revoked!.json()).toEqual({ access_token: "ghu_one" });
+	});
+
+	test("a refresh still at GitHub when the person signs out does not sign them back in", async () => {
+		const h = harness(signedInRoutes);
+		const { session } = await signIn(h);
+		let answer = () => {};
+		const revoked: string[] = [];
+		const later = harness({
+			...signedInRoutes,
+			[TOKEN]: async () => {
+				await new Promise<void>((r) => (answer = r));
+				return json(issued("ghu_two", "ghr_two"));
+			},
+			"DELETE https://api.github.com/applications/Iv23test/token": async (r) => (
+				revoked.push(((await r.json()) as { access_token: string }).access_token),
+				new Response(null, { status: 204 })
+			),
+		});
+		later.advance(8 * 3_600_000);
+		const cookie = [`${SESSION}=${session!.value}`];
+		const refreshing = later.request("/", { cookies: cookie });
+		while (!later.requests.some((r) => r.url.includes("/login/oauth/access_token")))
+			await new Promise((r) => setTimeout(r, 1));
+		const out = await later.request("/sign-out", {
+			method: "POST",
+			headers: { origin: "https://quest.test" },
+			cookies: cookie,
+		});
+		expect(cookies(out).get(SESSION)!.attributes).toContain("Max-Age=0");
+		answer();
+		const late = await refreshing;
+		expect(await late.text()).toContain("Sign in with GitHub");
+		expect(cookies(late).get(SESSION)!.attributes).toContain("Max-Age=0");
+		expect(revoked.sort()).toEqual(["ghu_one", "ghu_two"]);
 	});
 
 	test("signs out with an expired token while GitHub is down", async () => {

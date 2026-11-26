@@ -60,7 +60,7 @@ export async function exchange(github: GitHub, config: Config, code: string, now
 	);
 	const user = await github.withToken(issued.token).get<{ id: number; login: string }>("/user");
 	if (!Number.isSafeInteger(user.id) || typeof user.login !== "string") throw new Error("GitHub returned no user");
-	return { id: user.id, login: user.login, ...issued };
+	return { sid: crypto.randomUUID(), id: user.id, login: user.login, ...issued };
 }
 
 /** What refreshing a session came to. */

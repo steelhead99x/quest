@@ -36,6 +36,8 @@ export interface Deps {
 	cache: () => Promise<Cache | null>;
 	/** Rotate an expiring session's refresh token through its coordinator, once for every caller (rotation.ts). */
 	rotate: (env: Env, s: Session) => Promise<Refreshed>;
+	/** End a session at its coordinator: no refresh after this, and every token it made revoked. */
+	end: (env: Env, s: Session) => Promise<void>;
 }
 
 type Vars = {
@@ -312,11 +314,13 @@ export function app(deps: Deps): App {
 		c.set("session", null);
 		// Drop the cached pages the service worker kept for this person.
 		c.header("Clear-Site-Data", '"cache", "storage"');
-		// Revoking is a courtesy to GitHub: the session ends here whether or not GitHub answers.
+		// The coordinator refuses any later refresh and revokes the tokens it made, so a refresh still
+		// in flight cannot sign the person back in. The cookie is cleared whether or not it or GitHub answers.
 		if (s)
-			await revoke(c.get("github"), c.get("config"), s.token).catch((error) =>
-				console.error("revoking a signed-out token failed", error),
-			);
+			await deps.end(c.env, s).catch(async (error) => {
+				console.error("ending a session at its coordinator failed; revoking its token directly", error);
+				await revoke(c.get("github"), c.get("config"), s.token).catch(() => undefined);
+			});
 		return c.redirect("/", 303);
 	});
 

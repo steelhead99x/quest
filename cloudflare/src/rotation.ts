@@ -1,69 +1,150 @@
-// Rotating a session's refresh token exactly once. GitHub's refresh tokens are
-// single-use, so two requests refreshing the same session at once, from two
-// tabs or two Cloudflare locations, race: the loser's token is refused, and
-// signing it out would sign out a valid person. Every refresh of one token goes
-// through one coordinator (a Durable Object named after the token), which asks
-// GitHub once and hands the same result to every caller.
+// One coordinator per sign-in, where its refreshes and its sign-out meet.
+//
+// GitHub's refresh tokens are single-use, so two requests refreshing one
+// session at once, from two tabs or two Cloudflare locations, race: the
+// loser's token is refused, and signing it out would sign out a valid person.
+// And a refresh still in flight when the person signs out would hand them a
+// new session afterwards. Every refresh and the sign-out of one session go
+// through one coordinator (a Durable Object named by the session's id), which
+// asks GitHub once per refresh token, hands every caller the same result, and
+// once the session has ended refuses to refresh it and revokes what it made.
 
 import { DurableObject } from "cloudflare:workers";
-import { refreshOnce, type Refreshed } from "./auth.ts";
+import { type Config, refreshOnce, type Refreshed, revoke } from "./auth.ts";
 import { GitHub, type Fetch } from "./github/client.ts";
 import { open, seal, session, type Session } from "./session.ts";
 
-/** Where a coordinator keeps a rotation after it is made, across restarts. */
-export interface Ledger {
-	get(): Promise<string | undefined>;
-	put(sealed: string): Promise<void>;
-}
-
-/** How long a rotation is kept for requests still carrying the old token. */
+/** How long a rotation is kept for requests still carrying the old refresh token. */
 export const KEEP = 10 * 60_000;
 
-/**
- * One refresh token's coordinator logic. Callers that arrive while GitHub is
- * being asked share that answer; callers that arrive later get the kept
- * rotation. A rotation GitHub made is returned even if keeping it fails,
- * since GitHub has already spent the old token.
- */
-export class Rotator {
-	#pending: Promise<Refreshed> | null = null;
-	#made: Refreshed | null = null;
-
-	constructor(
-		private readonly ledger: Ledger,
-		private readonly secret: string,
-		private readonly perform: (s: Session) => Promise<Refreshed>,
-	) {}
-
-	rotate(s: Session): Promise<Refreshed> {
-		if (this.#made) return Promise.resolve(this.#made);
-		this.#pending ??= this.#ask(s).finally(() => (this.#pending = null));
-		return this.#pending;
-	}
-
-	async #ask(s: Session): Promise<Refreshed> {
-		const kept = await this.ledger.get().catch(() => undefined);
-		const was = kept ? session(await open(this.secret, "rotation", kept)) : null;
-		// Only a rotation of this very session counts; the name could collide only by a hash collision.
-		if (was && was.id === s.id) return (this.#made = { kind: "fresh", session: was, changed: true });
-		const result = await this.perform(s);
-		// An outage may clear up, so only a definite answer is remembered.
-		if (result.kind === "unavailable") return result;
-		this.#made = result;
-		if (result.kind === "fresh")
-			try {
-				await this.ledger.put(await seal(this.secret, "rotation", result.session));
-			} catch (error) {
-				console.error("keeping a rotation failed; this instance still serves it", error);
-			}
-		return result;
-	}
+/** What a coordinator keeps, each entry until its deadline (ms since the epoch). */
+export interface State {
+	/** The session was signed out; refreshes are refused until its refresh token would have expired. */
+	ended: number | null;
+	/** Rotations by the SHA-256 of the refresh token they replaced, sealed. */
+	rotations: Record<string, { sealed: string; until: number }>;
 }
 
-/** The coordinator's name for a refresh token: its SHA-256, so the token itself never names an object. */
+/** Where a coordinator keeps its state across restarts, and when to wake to sweep it. */
+export interface Store {
+	load(): Promise<State | undefined>;
+	save(state: State): Promise<void>;
+	/** Wake at `at` to sweep, or never for null. */
+	wake(at: number | null): Promise<void>;
+}
+
+/** What a coordinator does with GitHub, and its clock. */
+export interface Actions {
+	refresh(s: Session): Promise<Refreshed>;
+	revoke(token: string): Promise<void>;
+	now(): number;
+}
+
+/** A refresh token's name in the state: its SHA-256, so no token is ever a key. */
 export async function rotationName(refresh: string): Promise<string> {
 	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(refresh));
 	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** One session's coordinator logic, apart from the Durable Object around it. */
+export class Coordinator {
+	/** The state, held in memory once loaded: a failed save still leaves this instance serving it. */
+	#state: State | null = null;
+	readonly #pending = new Map<string, Promise<Refreshed>>();
+
+	constructor(
+		private readonly store: Store,
+		private readonly secret: string,
+		private readonly act: Actions,
+	) {}
+
+	/** Refresh `s`, once for every caller carrying the same refresh token, and never after `end`. */
+	async rotate(s: Session): Promise<Refreshed> {
+		const key = await rotationName(s.refresh);
+		let pending = this.#pending.get(key);
+		if (!pending) {
+			pending = this.#rotate(s, key).finally(() => this.#pending.delete(key));
+			this.#pending.set(key, pending);
+		}
+		return pending;
+	}
+
+	async #rotate(s: Session, key: string): Promise<Refreshed> {
+		const state = await this.#load();
+		if (this.#ended(state)) return { kind: "revoked" };
+		const kept = state.rotations[key];
+		if (kept && kept.until > this.act.now()) {
+			const was = session(await open(this.secret, "rotation", kept.sealed));
+			if (was && was.sid === s.sid) return { kind: "fresh", session: was, changed: true };
+		}
+		const result = await this.act.refresh(s);
+		// Signed out while GitHub was answering: the new token must not outlive the session.
+		if (this.#ended(state)) {
+			if (result.kind === "fresh") await this.#revoke(result.session.token);
+			return { kind: "revoked" };
+		}
+		if (result.kind !== "fresh") return result;
+		state.rotations[key] = {
+			sealed: await seal(this.secret, "rotation", result.session),
+			until: this.act.now() + KEEP,
+		};
+		await this.#save(state, "keeping a rotation");
+		return result;
+	}
+
+	/**
+	 * End the session: refuse every later refresh, and revoke the token signing
+	 * out carried and every token this coordinator rotated into, so a refresh
+	 * that finished just before cannot keep the person signed in.
+	 */
+	async end(s: Session): Promise<void> {
+		const state = await this.#load();
+		state.ended = Math.max(state.ended ?? 0, s.refreshExpires, this.act.now() + KEEP);
+		const tokens = new Set([s.token]);
+		for (const { sealed } of Object.values(state.rotations)) {
+			const made = session(await open(this.secret, "rotation", sealed));
+			if (made) tokens.add(made.token);
+		}
+		state.rotations = {};
+		await this.#save(state, "ending a session");
+		await Promise.all([...tokens].map((t) => this.#revoke(t)));
+	}
+
+	/** Drop what has passed its deadline, here and in storage, and wake for the next. */
+	async sweep(): Promise<void> {
+		const state = await this.#load();
+		const now = this.act.now();
+		for (const [key, kept] of Object.entries(state.rotations)) if (kept.until <= now) delete state.rotations[key];
+		if (state.ended !== null && state.ended <= now) state.ended = null;
+		await this.#save(state, "sweeping");
+	}
+
+	#ended(state: State): boolean {
+		return state.ended !== null && state.ended > this.act.now();
+	}
+
+	async #load(): Promise<State> {
+		if (!this.#state) {
+			const stored = await this.store.load().catch(() => undefined);
+			this.#state = this.#state ?? stored ?? { ended: null, rotations: {} };
+		}
+		return this.#state;
+	}
+
+	async #save(state: State, doing: string): Promise<void> {
+		const deadlines = [...Object.values(state.rotations).map((r) => r.until), state.ended ?? Infinity];
+		const next = Math.min(...deadlines);
+		try {
+			await this.store.save(state);
+			await this.store.wake(Number.isFinite(next) ? next : null);
+		} catch (error) {
+			console.error(`${doing} failed to reach storage; this instance still holds it`, error);
+		}
+	}
+
+	async #revoke(token: string): Promise<void> {
+		await this.act.revoke(token).catch((error) => console.error("revoking a token failed", error));
+	}
 }
 
 /** What a coordinator reads from the deploy. */
@@ -79,34 +160,41 @@ export interface RotationEnv {
  */
 export function rotationsClass(fetch: () => Fetch) {
 	return class Rotations extends DurableObject<RotationEnv> {
-		readonly #rotator: Rotator;
+		readonly #coordinator: Coordinator;
 
 		constructor(ctx: DurableObjectState, env: RotationEnv) {
 			super(ctx, env);
-			const ledger: Ledger = {
-				get: () => ctx.storage.get<string>("rotation"),
-				put: async (sealed) => {
-					await ctx.storage.put("rotation", sealed);
-					await ctx.storage.setAlarm(Date.now() + KEEP);
-				},
+			const config: Config = {
+				clientId: env.GITHUB_CLIENT_ID,
+				clientSecret: env.GITHUB_CLIENT_SECRET,
+				origin: "",
 			};
-			this.#rotator = new Rotator(ledger, env.AUTH_SECRET, (s) =>
-				refreshOnce(
-					new GitHub(fetch(), null),
-					{ clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET },
-					s,
-					Date.now(),
-				),
+			const github = () => new GitHub(fetch(), null);
+			this.#coordinator = new Coordinator(
+				{
+					load: () => ctx.storage.get<State>("state"),
+					save: (state) => ctx.storage.put("state", state),
+					wake: (at) => (at === null ? ctx.storage.deleteAlarm() : ctx.storage.setAlarm(at)),
+				},
+				env.AUTH_SECRET,
+				{
+					refresh: (s) => refreshOnce(github(), config, s, Date.now()),
+					revoke: (token) => revoke(github(), config, token),
+					now: () => Date.now(),
+				},
 			);
 		}
 
 		rotate(s: Session): Promise<Refreshed> {
-			return this.#rotator.rotate(s);
+			return this.#coordinator.rotate(s);
 		}
 
-		/** The old token's callers are long gone: forget the rotation. */
+		end(s: Session): Promise<void> {
+			return this.#coordinator.end(s);
+		}
+
 		async alarm() {
-			await this.ctx.storage.deleteAll();
+			await this.#coordinator.sweep();
 		}
 	};
 }

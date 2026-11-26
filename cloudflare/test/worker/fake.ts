@@ -2,9 +2,9 @@
 // request, and answers 404 for anything a test did not expect.
 
 import { app, type Env } from "../../src/app.tsx";
-import { refreshOnce } from "../../src/auth.ts";
+import { refreshOnce, revoke } from "../../src/auth.ts";
 import { GitHub } from "../../src/github/client.ts";
-import { type Ledger, rotationName, Rotator } from "../../src/rotation.ts";
+import { type Actions, Coordinator, type State, type Store } from "../../src/rotation.ts";
 
 export const env: Env = {
 	AUTH_SECRET: "test-only-secret-that-is-at-least-32-characters",
@@ -21,30 +21,32 @@ export const json = (body: unknown, status = 200) =>
 	new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 /**
- * Coordinators by name, standing in for the Durable Object namespace: one
- * object per refresh token, reached from every location. Pass one to two
+ * Coordinators by session id, standing in for the Durable Object namespace:
+ * one object per sign-in, reached from every location. Pass one to two
  * harnesses to stand for two Cloudflare locations with separate caches.
  */
 export class Coordinators {
-	readonly objects = new Map<string, Rotator>();
-	readonly ledgers = new Map<string, string>();
-	/** Make keeping a rotation fail, as a storage write can. */
+	readonly objects = new Map<string, Coordinator>();
+	readonly stored = new Map<string, State>();
+	readonly wakes = new Map<string, number | null>();
+	/** Make every storage write fail, as one can. */
 	failWrites = false;
 
-	get(name: string, perform: ConstructorParameters<typeof Rotator>[2]): Rotator {
-		let rotator = this.objects.get(name);
-		if (!rotator) {
-			const ledger: Ledger = {
-				get: async () => this.ledgers.get(name),
-				put: async (sealed) => {
+	get(sid: string, act: Actions): Coordinator {
+		let found = this.objects.get(sid);
+		if (!found) {
+			const store: Store = {
+				load: async () => structuredClone(this.stored.get(sid)),
+				save: async (state) => {
 					if (this.failWrites) throw new Error("storage write failed");
-					this.ledgers.set(name, sealed);
+					this.stored.set(sid, structuredClone(state));
 				},
+				wake: async (at) => void this.wakes.set(sid, at),
 			};
-			rotator = new Rotator(ledger, env.AUTH_SECRET, perform);
-			this.objects.set(name, rotator);
+			found = new Coordinator(store, env.AUTH_SECRET, act);
+			this.objects.set(sid, found);
 		}
-		return rotator;
+		return found;
 	}
 
 	/** Drop every object, as an eviction would, keeping what their storage holds. */
@@ -67,21 +69,20 @@ export function harness(routes: Record<string, Route> = {}, coordinators = new C
 		const answer = route ? await route(request) : undefined;
 		return answer ?? json({ message: `unexpected ${request.method} ${request.url}` }, 404);
 	};
+	const actions = (e: Env): Actions => {
+		const config = { clientId: e.GITHUB_CLIENT_ID, clientSecret: e.GITHUB_CLIENT_SECRET, origin: "" };
+		return {
+			refresh: (s) => refreshOnce(new GitHub(fetch, null), config, s, now),
+			revoke: (token) => revoke(new GitHub(fetch, null), config, token),
+			now: () => now,
+		};
+	};
 	const worker = app({
 		now: () => now,
 		cache: () => store,
 		fetch,
-		rotate: async (e, s) =>
-			coordinators
-				.get(await rotationName(s.refresh), (t) =>
-					refreshOnce(
-						new GitHub(fetch, null),
-						{ clientId: e.GITHUB_CLIENT_ID, clientSecret: e.GITHUB_CLIENT_SECRET },
-						t,
-						now,
-					),
-				)
-				.rotate(s),
+		rotate: (e, s) => coordinators.get(s.sid, actions(e)).rotate(s),
+		end: (e, s) => coordinators.get(s.sid, actions(e)).end(s),
 	});
 	return {
 		requests,

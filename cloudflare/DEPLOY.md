@@ -48,9 +48,11 @@ plans in; it defaults to `UTC`, and a name Intl doesn't know fails every page
 with a 500 that says so.
 
 The deploy also creates the `Rotations` Durable Object (SQLite-backed, on
-Workers Free or Paid): one per refresh token, so a session refreshed from two
-Cloudflare locations at once spends its single-use GitHub token once. Each
-keeps the rotation for ten minutes, then forgets it.
+Workers Free or Paid): one per sign-in, where its refreshes and its sign-out
+meet. A session refreshed from two Cloudflare locations at once spends its
+single-use GitHub token once, and a refresh that finishes after sign-out is
+refused and its token revoked. Each keeps a rotation for ten minutes and a
+sign-out until the session's refresh token would have expired.
 
 `--domain` attaches the custom domain; leave it out to serve from
 `workers.dev`. Nothing in `wrangler.jsonc` names an account, hostname, or

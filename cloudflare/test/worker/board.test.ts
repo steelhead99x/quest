@@ -8,6 +8,7 @@ const GRAPHQL = "POST https://api.github.com/graphql";
 /** A signed-in session cookie for `id`, valid well past the test clock. */
 async function signedIn(id = 7) {
 	const value = await seal(env.AUTH_SECRET, "session", {
+		sid: crypto.randomUUID(),
 		id,
 		login: "octo",
 		token: `ghu_${id}`,

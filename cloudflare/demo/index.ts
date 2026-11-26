@@ -5,7 +5,8 @@
 
 import snapshot from "./snapshot.gen.js";
 import { app, type Env } from "../src/app.tsx";
-import { rotationName, rotationsClass } from "../src/rotation.ts";
+import { rotationsClass } from "../src/rotation.ts";
+import type { Session } from "../src/session.ts";
 import { github } from "./github.ts";
 
 const AUTHORIZE = "https://github.com/login/oauth/authorize";
@@ -18,6 +19,10 @@ const standIn = () => (stand ??= github(snapshot, () => Date.now()));
 /** The real coordinator, reaching the stand-in GitHub. */
 export const Rotations = rotationsClass(() => standIn().fetch);
 type Deployed = Env & { ROTATIONS: DurableObjectNamespace<InstanceType<typeof Rotations>> };
+const coordinator = (env: Env, s: Session) => {
+	const ns = (env as Deployed).ROTATIONS;
+	return ns.get(ns.idFromName(s.sid));
+};
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -32,10 +37,8 @@ export default {
 			fetch: standIn().fetch,
 			now: () => Date.now(),
 			cache: async () => null,
-			rotate: async (env, s) => {
-				const ns = (env as Deployed).ROTATIONS;
-				return ns.get(ns.idFromName(await rotationName(s.refresh))).rotate(s);
-			},
+			rotate: (env, s) => coordinator(env, s).rotate(s),
+			end: (env, s) => coordinator(env, s).end(s),
 		});
 		const response = await real.fetch(request, env, ctx);
 		const location = response.headers.get("location");

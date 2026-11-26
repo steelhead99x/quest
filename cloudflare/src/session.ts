@@ -11,6 +11,11 @@ const MAX_COOKIE = 3800;
 
 /** What the session cookie holds. */
 export interface Session {
+	/**
+	 * This sign-in's id, kept across refreshes, which names its coordinator
+	 * (rotation.ts): refreshing and signing out of one session meet there.
+	 */
+	sid: string;
 	/** GitHub's numeric user id. */
 	id: number;
 	login: string;
@@ -78,6 +83,8 @@ export function session(value: unknown): Session | null {
 	if (typeof value !== "object" || value === null) return null;
 	const v = value as Record<string, unknown>;
 	const ok =
+		typeof v.sid === "string" &&
+		/^[0-9a-f-]{36}$/.test(v.sid) &&
 		Number.isSafeInteger(v.id) &&
 		typeof v.login === "string" &&
 		typeof v.token === "string" &&
