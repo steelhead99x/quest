@@ -25,7 +25,7 @@ cat >"$work/bin/mise" <<'MOCK'
 set -euo pipefail
 case "$1" in
   use)
-    [[ $2 == --pin && $3 == github:kixel-ai/quest@v0.1.0 ]]
+    [[ $2 == --pin && $3 == "github:$RELEASE_REPOSITORY@v0.1.0" ]]
     [[ ! -e $MISE_DATA_DIR && ! -e $MISE_CACHE_DIR && ! -e $MISE_CONFIG_DIR ]]
     [[ $PWD == "$RUNNER_TEMP"/quest-install.*/project ]]
     printf '%s\n' "mise $3" >> "$INSTALL_TEST_LOG"
@@ -52,7 +52,7 @@ cat >"$work/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ $1 == --proto && $2 == =https && $3 == --tlsv1.2 && $4 == -fLsS ]]
-[[ $5 == https://github.com/kixel-ai/quest/releases/download/v0.1.0/quest-installer.sh && $6 == -o ]]
+[[ $5 == "https://github.com/$RELEASE_REPOSITORY/releases/download/v0.1.0/quest-installer.sh" && $6 == -o ]]
 printf '%s\n' "shell $5" >> "$INSTALL_TEST_LOG"
 if [[ ${INSTALL_TEST_DOWNLOAD_FAIL:-0} == 1 ]]; then exit 22; fi
 cat > "$7" <<'INSTALLER'
@@ -104,11 +104,17 @@ reject() {
     [[ -z $(ls -A "$work/tmp") ]]
 }
 
-# Each installer installs the requested tag.
+# Each installer installs the requested tag, from the repository that published it, a fork's included.
 export RELEASE_TAG=v0.1.0
+export RELEASE_REPOSITORY=steelhead99x/quest
 check mise x86_64-unknown-linux-gnu
 check shell x86_64-unknown-linux-gnu
-(($(wc -l <"$work/log") == 2))
+grep -qxF 'mise github:steelhead99x/quest@v0.1.0' "$work/log"
+grep -qxF 'shell https://github.com/steelhead99x/quest/releases/download/v0.1.0/quest-installer.sh' "$work/log"
+export RELEASE_REPOSITORY=kixel-ai/quest
+check mise x86_64-unknown-linux-gnu
+check shell x86_64-unknown-linux-gnu
+(($(wc -l <"$work/log") == 4))
 
 # Incorrect/missing output and failed downloads must turn the job red.
 export INSTALL_TEST_VERSION='quest 0.0.9'
@@ -136,6 +142,11 @@ for tag in '' '../v0.1.0' 'v0.1' 'latest'; do
     reject shell x86_64-unknown-linux-gnu
 done
 export RELEASE_TAG=v0.1.0
+for repository in '' 'kixel-ai' 'kixel-ai/quest/x' 'kixel-ai/quest;rm'; do
+    export RELEASE_REPOSITORY="$repository"
+    reject shell x86_64-unknown-linux-gnu
+done
+export RELEASE_REPOSITORY=kixel-ai/quest
 reject unknown x86_64-unknown-linux-gnu
 reject shell aarch64-unknown-linux-gnu
 (($(wc -l <"$work/log") == log_lines))

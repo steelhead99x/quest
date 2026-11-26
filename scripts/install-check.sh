@@ -6,6 +6,12 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 method=${1:?usage: install-check.sh mise|shell target-triple}
 target=${2:?usage: install-check.sh mise|shell target-triple}
 tag=${RELEASE_TAG:-}
+# The repository that published the release: a fork checks its own assets, never upstream's.
+repository=${RELEASE_REPOSITORY:-}
+if [[ ! $repository =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    printf 'Invalid release repository: %s\n' "$repository" >&2
+    exit 1
+fi
 if [[ ! $tag =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
     printf 'Invalid release tag: %s\n' "$tag" >&2
     exit 1
@@ -40,7 +46,7 @@ case "$method" in
         export MISE_CACHE_DIR="$work/cache"
         mkdir -p "$work/project"
         cd "$work/project"
-        mise use --pin "github:kixel-ai/quest@$tag"
+        mise use --pin "github:$repository@$tag"
         binary=$(mise which quest)
         case "$binary" in
             "$MISE_DATA_DIR"/*) ;;
@@ -52,7 +58,7 @@ case "$method" in
         ;;
     shell)
         curl --proto '=https' --tlsv1.2 -fLsS \
-            "https://github.com/kixel-ai/quest/releases/download/$tag/quest-installer.sh" \
+            "https://github.com/$repository/releases/download/$tag/quest-installer.sh" \
             -o "$work/quest-installer.sh"
         QUEST_INSTALL_DIR="$work/shell" sh "$work/quest-installer.sh"
         binary="$work/shell/quest"

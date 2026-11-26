@@ -3,9 +3,12 @@ param(
     [Parameter(Mandatory = $true)][ValidateSet('mise', 'archive')][string]$Method,
     [Parameter(Mandatory = $true)][ValidateSet('x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc')][string]$Target,
     [Parameter(Mandatory = $true)][string]$Tag,
+    # The repository that published the release: a fork checks its own assets, never upstream's.
+    [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ReleaseDirectory
 )
 $ErrorActionPreference = 'Stop'
+if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "Invalid release repository: $Repository" }
 if ($Tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$') { throw "Invalid release tag: $Tag" }
 $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 $expectedArchitecture = if ($Target -eq 'aarch64-pc-windows-msvc') { 'Arm64' } else { 'X64' }
@@ -25,7 +28,7 @@ try {
         $env:MISE_CACHE_DIR = Join-Path $work 'cache'
         $project = New-Item -ItemType Directory -Path (Join-Path $work 'project')
         Set-Location $project.FullName
-        mise use --pin "github:kixel-ai/quest@$Tag"
+        mise use --pin "github:$Repository@$Tag"
         if ($LASTEXITCODE -ne 0) { throw 'mise installation failed' }
         $binary = mise which quest
         if ($LASTEXITCODE -ne 0) { throw 'mise could not find the installed Quest' }
@@ -36,7 +39,7 @@ try {
         foreach ($file in @($archive, 'SHA256SUMS')) {
             $destination = Join-Path $work $file
             if ($ReleaseDirectory) { Copy-Item -LiteralPath (Join-Path $ReleaseDirectory $file) -Destination $destination }
-            else { Invoke-WebRequest -Uri "https://github.com/kixel-ai/quest/releases/download/$Tag/$file" -OutFile $destination }
+            else { Invoke-WebRequest -Uri "https://github.com/$Repository/releases/download/$Tag/$file" -OutFile $destination }
         }
         $entries = @(Get-Content -LiteralPath (Join-Path $work 'SHA256SUMS') | ForEach-Object {
             $fields = $_ -split '\s+', 2
