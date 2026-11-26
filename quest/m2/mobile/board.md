@@ -23,12 +23,10 @@ read well on a phone and an iPad in both orientations.
   make a page hold.
 - Size colours always sit beside their labels and markers beside their
   states, as the theme requires.
-- Benchmark and validate with [device bench](/quest/m2/mobile/devices.md)
+- Benchmark and validate with the device bench (`cloudflare/DEVICES.md`)
   on the largest quest tree available (this repository's own).
 
 ## Required
 
 - [Worker foundation](/quest/m2/mobile/worker.md) - the site, layout, and
   sign-in these pages live in
-- [Device bench](/quest/m2/mobile/devices.md) - validation on the
-  physical Android phone and iPad

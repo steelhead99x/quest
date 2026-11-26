@@ -19,7 +19,7 @@ recent workflow runs on the default branch.
 - Keep each page within Workers Free's 50 subrequests, the limit kix
   designed its reads around: page through runs with a fixed budget and say
   when more exist rather than reading them all.
-- Validate on [device bench](/quest/m2/mobile/devices.md): re-run a real
+- Validate on the device bench (`cloudflare/DEVICES.md`): re-run a real
   failed run in the contributor's fork from each device and watch it
   start on github.com.
 
@@ -27,5 +27,3 @@ recent workflow runs on the default branch.
 
 - [Quest board](/quest/m2/mobile/board.md) - the quest pages this adds
   CI to
-- [Device bench](/quest/m2/mobile/devices.md) - validation on the
-  physical Android phone and iPad
