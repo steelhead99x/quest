@@ -63,24 +63,70 @@ export async function exchange(github: GitHub, config: Config, code: string, now
 	return { id: user.id, login: user.login, ...issued };
 }
 
-/** The session with a fresh token if it is about to expire, or null once it cannot be refreshed. */
-export async function refreshed(github: GitHub, config: Config, s: Session, now: number): Promise<Session | null> {
-	if (s.expires - EARLY > now) return s;
-	if (s.refreshExpires <= now) return null;
+/** Where a rotation is shared between requests carrying the same old refresh token. */
+export interface Rotations {
+	/** The session another request rotated `refresh` into, if any. */
+	find(refresh: string): Promise<Session | null>;
+	/** Share the session `refresh` was rotated into, briefly. */
+	keep(refresh: string, session: Session): Promise<void>;
+}
+
+/** What refreshing a session came to. */
+export type Refreshed =
+	/** The token is current, or was just rotated, here or by a concurrent request. */
+	| { kind: "fresh"; session: Session; changed: boolean }
+	/** GitHub refused the refresh token: it was revoked, expired, or used without a rotation to share. */
+	| { kind: "revoked" }
+	/** GitHub could not be asked or answered oddly: the session stays, and its token is used while valid. */
+	| { kind: "unavailable" };
+
+/** GitHub's answer for a refresh token that will never work again. */
+const REVOKED = "bad_refresh_token";
+/** How long a request that lost a rotation race waits for the winner to share it. */
+const WAIT = 3_000;
+const POLL = 250;
+
+/** A refresh GitHub refused outright, as opposed to one it could not answer. */
+class Refused extends Error {}
+
+/**
+ * The session with a fresh token if it is about to expire. GitHub's refresh
+ * tokens are single-use, so two tabs refreshing at once race: the winner shares
+ * its rotation through `rotations`, and the loser waits briefly for it rather
+ * than signing a valid person out.
+ */
+export async function refreshed(
+	github: GitHub,
+	config: Config,
+	s: Session,
+	now: number,
+	rotations: Rotations,
+	sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)),
+): Promise<Refreshed> {
+	if (s.expires - EARLY > now) return { kind: "fresh", session: s, changed: false };
+	if (s.refreshExpires <= now) return { kind: "revoked" };
+	const shared = await rotations.find(s.refresh);
+	if (shared) return { kind: "fresh", session: shared, changed: true };
 	try {
-		const issued = tokens(
-			await post(github, {
-				client_id: config.clientId,
-				client_secret: config.clientSecret,
-				grant_type: "refresh_token",
-				refresh_token: s.refresh,
-			}),
-			now,
-		);
-		return { ...s, ...issued };
-	} catch {
-		// A revoked or reused refresh token: sign out rather than retry.
-		return null;
+		const answer = (await post(github, {
+			client_id: config.clientId,
+			client_secret: config.clientSecret,
+			grant_type: "refresh_token",
+			refresh_token: s.refresh,
+		})) as Record<string, unknown>;
+		if (answer?.error === REVOKED) throw new Refused();
+		const session = { ...s, ...tokens(answer, now) };
+		await rotations.keep(s.refresh, session);
+		return { kind: "fresh", session, changed: true };
+	} catch (error) {
+		if (!(error instanceof Refused)) return { kind: "unavailable" };
+		// Refused: if a concurrent request rotated this token, its result arrives shortly.
+		for (let waited = 0; waited < WAIT; waited += POLL) {
+			await sleep(POLL);
+			const later = await rotations.find(s.refresh);
+			if (later) return { kind: "fresh", session: later, changed: true };
+		}
+		return { kind: "revoked" };
 	}
 }
 

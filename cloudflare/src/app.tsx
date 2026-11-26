@@ -1,6 +1,6 @@
 import { type Context as HonoContext, Hono } from "hono";
 import { getCookie } from "hono/cookie";
-import { authorizeUrl, type Config, exchange, refreshed, revoke } from "./auth.ts";
+import { authorizeUrl, type Config, exchange, type Rotations, refreshed, revoke } from "./auth.ts";
 import { CALLBACK } from "./github/app.ts";
 import { type Fetch, GitHub, GitHubError, Spent } from "./github/client.ts";
 import { repositories } from "./github/repos.ts";
@@ -295,6 +295,8 @@ export function app(deps: Deps): App {
 			return page(c, 401, "Signed out", "GitHub no longer accepts your sign-in. Sign in again.");
 		}
 		if (error instanceof Misconfigured) return c.text(error.message, 500);
+		if (error instanceof Unavailable)
+			return page(c, 503, "GitHub didn't answer", "Signing you back in failed for now. Reload in a moment.");
 		if (error instanceof NotFound)
 			return page(
 				c,
@@ -398,14 +400,45 @@ async function loadSession(c: Context, deps: Deps) {
 		c.set("session", null);
 		return;
 	}
-	const now = await refreshed(c.get("github"), c.get("config"), was, deps.now());
-	if (!now) {
+	const result = await refreshed(c.get("github"), c.get("config"), was, deps.now(), await rotations(c, deps));
+	if (result.kind === "revoked") {
 		c.get("cookies").push(cookie(SESSION, null, 0));
 		c.set("session", null);
 		return;
 	}
-	if (now !== was) await setSession(c, now, deps);
-	else c.set("session", now);
+	if (result.kind === "unavailable") {
+		// Keep the cookie: GitHub may answer on the next page. Use the token while it is still valid.
+		if (was.expires > deps.now()) return c.set("session", was);
+		throw new Unavailable();
+	}
+	if (result.changed) await setSession(c, result.session, deps);
+	else c.set("session", result.session);
+}
+
+/** GitHub's token endpoint failed and the current token has expired; the session is kept for a retry. */
+class Unavailable extends Error {}
+
+/** Rotations shared through the Cache API for two minutes, sealed, under a hash of the old refresh token. */
+async function rotations(c: Context, deps: Deps): Promise<Rotations> {
+	const store = await deps.cache();
+	const secret = c.env.AUTH_SECRET;
+	const url = async (refresh: string) => {
+		const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(refresh));
+		const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+		return `https://cache.quest.internal/rotation/${hex}`;
+	};
+	return {
+		find: async (refresh) => {
+			const hit = await store?.match(await url(refresh));
+			return hit ? session(await open(secret, "rotation", await hit.text())) : null;
+		},
+		keep: async (refresh, next) => {
+			await store?.put(
+				await url(refresh),
+				new Response(await seal(secret, "rotation", next), { headers: { "cache-control": "max-age=120" } }),
+			);
+		},
+	};
 }
 
 async function setSession(c: Context, s: Session, deps: Deps) {

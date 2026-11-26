@@ -190,6 +190,56 @@ describe("signed in", () => {
 		expect(cookies(response).get(SESSION)!.attributes).toContain("Max-Age=0");
 	});
 
+	test("two tabs refreshing the same token at once both stay signed in", async () => {
+		const h = harness(signedInRoutes);
+		const { session } = await signIn(h);
+		let calls = 0;
+		const later = harness({
+			...signedInRoutes,
+			// GitHub's refresh tokens are single-use: the first request rotates it, the second is refused.
+			[TOKEN]: async () => {
+				calls++;
+				if (calls > 1) return json({ error: "bad_refresh_token" });
+				await new Promise((r) => setTimeout(r, 50));
+				return json(issued("ghu_two", "ghr_two"));
+			},
+		});
+		later.advance(8 * 3_600_000);
+		const cookie = [`${SESSION}=${session!.value}`];
+		const [a, b] = await Promise.all([
+			later.request("/", { cookies: cookie }),
+			later.request("/", { cookies: cookie }),
+		]);
+		for (const response of [a, b]) {
+			expect(response.status).toBe(200);
+			expect(await response.text()).toContain('<span class="muted">octo</span>');
+			const renewed = cookies(response).get(SESSION)!;
+			expect(renewed.attributes).not.toContain("Max-Age=0");
+			expect(((await open(env.AUTH_SECRET, "session", renewed.value)) as { token: string }).token).toBe(
+				"ghu_two",
+			);
+		}
+		expect(calls).toBe(2);
+	});
+
+	test("a GitHub outage keeps the session, using the token while it is valid", async () => {
+		const h = harness(signedInRoutes);
+		const { session } = await signIn(h);
+		const down = harness({ ...signedInRoutes, [TOKEN]: () => new Response("Bad gateway", { status: 502 }) });
+		// Inside the early-refresh window, the token still works.
+		down.advance(8 * 3_600_000 - 30_000);
+		const ok = await down.request("/", { cookies: [`${SESSION}=${session!.value}`] });
+		expect(ok.status).toBe(200);
+		expect(await ok.text()).toContain('<span class="muted">octo</span>');
+		expect(cookies(ok).has(SESSION)).toBe(false);
+		// Past expiry, the page asks for a retry and still keeps the cookie.
+		down.advance(60_000);
+		const retry = await down.request("/", { cookies: [`${SESSION}=${session!.value}`] });
+		expect(retry.status).toBe(503);
+		expect(await retry.text()).toContain("Reload in a moment");
+		expect(cookies(retry).has(SESSION)).toBe(false);
+	});
+
 	test("treats a tampered or foreign cookie as signed out and clears it", async () => {
 		const forged = await seal("another-secret-that-is-at-least-32-characters", "session", {
 			id: 1,
