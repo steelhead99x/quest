@@ -1,85 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="title">
-	<title id="title">Quest: a quest log for your repo and your agents</title>
-	<!-- Hand-written social image. Colours and fonts follow design/theme.md; export steps are there too. -->
-	<style>
-		@import url("https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&amp;family=Inter:wght@400;600&amp;display=block");
-		.display { font-family: "Barlow Condensed", "Arial Narrow", sans-serif; font-weight: 700; text-transform: uppercase; }
-		.body { font-family: Inter, "Liberation Sans", sans-serif; }
-		.strong { font-weight: 600; }
-	</style>
-	<defs>
-		<radialGradient id="glow-amber" cx="0.12" cy="0" r="0.6">
-			<stop offset="0" stop-color="#ffc53d" stop-opacity="0.16"/>
-			<stop offset="1" stop-color="#ffc53d" stop-opacity="0"/>
-		</radialGradient>
-		<radialGradient id="glow-blue" cx="0.92" cy="0.05" r="0.55">
-			<stop offset="0" stop-color="#4da3ff" stop-opacity="0.12"/>
-			<stop offset="1" stop-color="#4da3ff" stop-opacity="0"/>
-		</radialGradient>
-		<pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
-			<path d="M48 0 H0 V48" fill="none" stroke="#ffffff" stroke-opacity="0.04" stroke-width="1"/>
-		</pattern>
-		<linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
-			<stop offset="0" stop-color="#fff"/>
-			<stop offset="1" stop-color="#fff" stop-opacity="0"/>
-		</linearGradient>
-		<mask id="grid-fade"><rect width="1280" height="640" fill="url(#fade)"/></mask>
-		<!-- Status markers, coloured with the color attribute on each use. -->
-		<g id="bang" fill="currentColor" stroke="#0a0c11" stroke-width="2.4" stroke-linejoin="round" paint-order="stroke">
-			<path d="M-7 -19 H7 L3.5 4 H-3.5 Z"/>
-			<rect x="-5" y="8.5" width="10" height="10" rx="2"/>
-		</g>
-		<g id="query" stroke-linecap="round" stroke-linejoin="round">
-			<path d="M-8 -9 C-8 -21 8 -21 8 -9 C8 -1 0 -1 0 5" fill="none" stroke="#0a0c11" stroke-width="9.5"/>
-			<path d="M-8 -9 C-8 -21 8 -21 8 -9 C8 -1 0 -1 0 5" fill="none" stroke="currentColor" stroke-width="5"/>
-			<rect x="-5" y="8.5" width="10" height="10" rx="2" fill="currentColor" stroke="#0a0c11" stroke-width="2.4" paint-order="stroke"/>
-		</g>
-	</defs>
-
-	<rect width="1280" height="640" fill="#0a0c11"/>
-	<rect width="1280" height="640" fill="url(#grid)" mask="url(#grid-fade)"/>
-	<rect width="1280" height="640" fill="url(#glow-amber)"/>
-	<rect width="1280" height="640" fill="url(#glow-blue)"/>
-
-	<!-- Mark: a copy of design/theme/logo.svg -->
-	<g transform="translate(80 72) scale(1.5)">
-		<rect x="2" y="2" width="60" height="60" rx="15" fill="#ffc53d"/>
-		<path d="M25.5 13.5 a3 3 0 0 1 3 -3 h7 a3 3 0 0 1 3 3 L35.6 37 a2 2 0 0 1 -2 1.8 h-3.2 a2 2 0 0 1 -2 -1.8 Z" fill="#0a0c11"/>
-		<circle cx="32" cy="48" r="5.5" fill="none" stroke="#0a0c11" stroke-width="4.5"/>
-	</g>
-	<text x="196" y="146" class="display" font-size="64" letter-spacing="4" fill="#e8ecf3">Quest</text>
-
-	<!-- Hook, then substance -->
-	<text x="80" y="268" class="display" font-size="88" letter-spacing="1" fill="#e8ecf3">A quest log for your repo</text>
-	<text x="80" y="352" class="display" font-size="88" letter-spacing="1" fill="#e8ecf3">and your agents</text>
-	<text x="82" y="408" class="body" font-size="28" fill="#97a2b4">Readable plans. Explicit dependencies. Reviewable Git changes.</text>
-
-	<!-- Sample entries, edged in their size colour, using the format terms: ready, in review, and blocked -->
-	<g transform="translate(80 452)">
-		<rect width="360" height="108" rx="6" fill="#11151d" stroke="#262e3b"/>
-		<rect width="3" height="108" fill="#4ade80"/>
-		<use href="#bang" x="34" y="44" color="#ffc53d"/>
-		<text x="58" y="48" class="body strong" font-size="24" fill="#e8ecf3">Add the CSV endpoint</text>
-		<rect x="58" y="66" width="40" height="26" rx="3" fill="#4ade80" fill-opacity="0.14" stroke="#4ade80" stroke-opacity="0.55"/>
-		<text x="78" y="86" class="display" font-size="19" text-anchor="middle" fill="#4ade80">S</text>
-		<text x="112" y="86" class="body strong" font-size="20" fill="#ffc53d">Ready</text>
-	</g>
-	<g transform="translate(460 452)">
-		<rect width="360" height="108" rx="6" fill="#11151d" stroke="#262e3b"/>
-		<rect width="3" height="108" fill="#b98cff"/>
-		<use href="#query" x="34" y="44" color="#ffc53d"/>
-		<text x="58" y="48" class="body strong" font-size="24" fill="#e8ecf3">Build the quest board</text>
-		<rect x="58" y="66" width="40" height="26" rx="3" fill="#b98cff" fill-opacity="0.14" stroke="#b98cff" stroke-opacity="0.55"/>
-		<text x="78" y="86" class="display" font-size="19" text-anchor="middle" fill="#b98cff">L</text>
-		<text x="112" y="86" class="body strong" font-size="20" fill="#ffc53d">In review</text>
-	</g>
-	<g transform="translate(840 452)">
-		<rect width="360" height="108" rx="6" fill="#11151d" stroke="#262e3b"/>
-		<rect width="3" height="108" fill="#4da3ff"/>
-		<use href="#bang" x="34" y="44" color="#9ba5b4"/>
-		<text x="58" y="48" class="body strong" font-size="24" fill="#97a2b4">Add a download button</text>
-		<rect x="58" y="66" width="40" height="26" rx="3" fill="#4da3ff" fill-opacity="0.14" stroke="#4da3ff" stroke-opacity="0.55"/>
-		<text x="78" y="86" class="display" font-size="19" text-anchor="middle" fill="#4da3ff">M</text>
-		<text x="112" y="86" class="body" font-size="20" fill="#9ba5b4">Blocked</text>
-	</g>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <title>Quest · Find your next quest</title>
+  <style>
+    @font-face {font-family:Atkinson; font-weight:200 800; src:url("../../node_modules/@fontsource-variable/atkinson-hyperlegible-next/files/atkinson-hyperlegible-next-latin-wght-normal.woff2")}
+    text {font-family:Atkinson,sans-serif; fill:#eef2f8}
+  </style>
+  <rect width="1280" height="640" fill="#0f172a"/>
+  <image href="logo.svg" x="64" y="74" width="58" height="58"/>
+  <text x="138" y="119" font-size="44" font-weight="700">Quest</text>
+  <text x="62" y="290" font-size="88" font-weight="800">Find your</text>
+  <text x="62" y="380" font-size="88" font-weight="800">next quest.</text>
+  <text x="66" y="478" font-size="32">A shared quest log for you</text>
+  <text x="66" y="518" font-size="32">and your coding agents.</text>
+  <image href="route.svg" x="612" y="98" width="620" height="444"/>
 </svg>

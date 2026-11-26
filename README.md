@@ -1,8 +1,8 @@
-<p align="center"><img src="design/theme/logo.svg" alt="" width="96" height="96"></p>
+<p align="center"><img src="design/theme/og.png" alt="Quest: find your next quest. A shared quest log for you and your coding agents." width="960"></p>
 
 # Quest
 
-**A quest log for your repo and your agents.**
+**Find the change that unblocks the most work.**
 
 Readable plans, explicit dependencies, and reviewable Git changes. Quest keeps
 your plans in your repository, so you and your agents read, claim, and finish

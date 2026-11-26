@@ -15,6 +15,7 @@ const ASSETS = [
 	"/app.js",
 	"/theme/theme.css",
 	"/theme/logo.svg",
+	"/theme/route.svg",
 	"/theme/icon-192.png",
 	"/theme/icon-512.png",
 	"/theme/icon-180.png",
