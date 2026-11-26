@@ -12,10 +12,12 @@ later PRs compare against it.
 - The bench was built and tested against fake devices and a fake
   inspector, in a session that could not reach the contributor's devices.
   Its Chrome DevTools path has run against desktop headless Chrome with
-  adb faked, which found and fixed two bugs. The adb commands and the
-  whole ios-webkit-debug-proxy path have not met a real device: expect
-  protocol differences, especially in Safari's target wrapping and
-  `Page.snapshotRect`.
+  adb faked. The adb commands and the whole ios-webkit-debug-proxy path
+  have not met a real device. On the iPad, confirm before recording a
+  baseline that a cross-process navigation keeps the page target (the
+  driver follows `Target.didCommitProvisionalTarget`), that
+  `Page.overrideUserPreference` sets dark mode, and that
+  `Page.snapshotRect` returns a screenshot.
 - Record baselines from `/` and a repository's board once the Worker
   deploys, with both devices charged and cool.
 - From each device, re-run a real failed workflow run and dispatch a

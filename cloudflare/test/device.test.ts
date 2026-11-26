@@ -347,4 +347,43 @@ describe("rpc", () => {
 		await loaded;
 		rpc.close();
 	});
+
+	test("follows a WebKit page target across a cross-process navigation", async () => {
+		const sentTo: string[] = [];
+		const url = serve((m, send) => {
+			send({ id: m.id, result: {} });
+			const target = String(m.params.targetId);
+			const inner = JSON.parse(String(m.params.message)) as { id: number; method: string };
+			sentTo.push(`${target} ${inner.method}`);
+			const reply = (from: string, message: unknown) =>
+				send({
+					method: "Target.dispatchMessageFromTarget",
+					params: { targetId: from, message: JSON.stringify(message) },
+				});
+			if (inner.method === "Page.navigate") {
+				reply(target, { id: inner.id, result: {} });
+				send({
+					method: "Target.targetCreated",
+					params: { targetInfo: { targetId: "page-2", type: "page", isProvisional: true } },
+				});
+				setTimeout(() => {
+					send({
+						method: "Target.didCommitProvisionalTarget",
+						params: { oldTargetId: "page-1", newTargetId: "page-2" },
+					});
+					reply("page-2", { method: "Page.loadEventFired", params: {} });
+				}, 30);
+			} else reply(target, { id: inner.id, result: { at: target } });
+		});
+		const rpc = await Rpc.connect(url, 2_000);
+		const page = new Target(rpc, "page-1", 2_000);
+		await page.call("Page.enable");
+		const loaded = page.event("Page.loadEventFired");
+		await page.call("Page.navigate", { url: "https://q.dev/" });
+		await loaded;
+		expect(page.current).toBe("page-2");
+		expect(sentTo).toContain("page-2 Page.enable");
+		expect(await page.call("Runtime.evaluate")).toEqual({ at: "page-2" });
+		rpc.close();
+	});
 });

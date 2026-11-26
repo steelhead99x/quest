@@ -20,6 +20,10 @@ offline, and light and dark screenshots. The page's own Navigation Timing
 is checked against the driver's clock around each load, and loads where the
 two disagree are counted.
 
+Offline checks take the page and each of its service workers offline
+through Chrome's browser endpoint: a page's own offline switch leaves its
+service worker's fetches on the network.
+
 Without `--record`, each device compares with `bench/<kind>-<model>.json`
 and exits 1 on a regression beyond three times the run-to-run spread (and
 a small floor per metric). `--record` writes that file instead. A run
@@ -40,7 +44,11 @@ Settings, Apps, Safari, Advanced, Web Inspector, and leave Safari open with
 one tab. iPadOS does not let the inspector set text size, cut the network,
 or read thermal state, so the report says so: set Larger Text by hand
 before screenshots; offline is checked as the page being in the service
-worker's cache.
+worker's cache. Dark mode goes through WebKit's
+`Page.overrideUserPreference`; an iPadOS whose inspector lacks it fails the
+screenshot with that reason. A cold load first opens the page so the
+service worker and caches are cleared on its own origin, and waits for
+that before measuring.
 
 Sign each device's browser in to the site once before benching signed-in
 pages.
