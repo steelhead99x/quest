@@ -258,7 +258,7 @@ jobs:
             while read -r id tag; do
               if [[ $tag == v[0-9]* ]]; then gh api -X DELETE "repos/$GH_REPO/releases/$id"; fi
             done
-          sed "s/@TAG@/$TAG/" scripts/installer.sh > release/quest-installer.sh
+          bash scripts/installer-release.sh "$GH_REPO" "$TAG" > release/quest-installer.sh
           cd release
           sha256sum quest-*.tar.gz quest-*.zip quest-installer.sh > SHA256SUMS
           notes=(--generate-notes)
