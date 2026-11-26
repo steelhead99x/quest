@@ -4,8 +4,8 @@
  * design/theme.md is canonical. Change it first, then this file.
  *
  * Fonts are open-licensed (SIL Open Font License 1.1): Barlow Condensed 600 and
- * 700, Inter 400 and 600. The quest log site serves them itself from @fontsource
- * (cloudflare/scripts/build.ts, cloudflare/src/site.css).
+ * 700, Inter 400 and 600. The quest log site replaces the surfaces, text, accent,
+ * and type with moq-dev's (design/theme.md, On moq-dev's sites; cloudflare/src/site.css).
  */
 
 :root {

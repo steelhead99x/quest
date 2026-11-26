@@ -1,15 +1,19 @@
 // Build the Worker's static assets into build/public (ignored by Git): the theme
-// from design/theme/, the theme's two open-licensed fonts, the site CSS, the page script, the web app manifest, and
+// from design/theme/, moq-dev's three open-licensed fonts, the site CSS, the page script, the web app manifest, and
 // the service worker stamped with this build's commit, so a deploy replaces the
 // cached shell. Wrangler runs this before dev and deploy; check and test run it first.
 import { execFileSync } from "node:child_process";
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** The font files each @fontsource package gives the site; src/site.css declares them. */
+/**
+ * The font files each @fontsource package gives the site, moq-dev's three faces
+ * (moq-dev/moq.dev's src/layouts/global.css); src/site.css declares them.
+ */
 export const FONTS: Record<string, string[]> = {
-	"barlow-condensed": ["barlow-condensed-latin-600-normal.woff2", "barlow-condensed-latin-700-normal.woff2"],
-	inter: ["inter-latin-400-normal.woff2", "inter-latin-600-normal.woff2"],
+	"@fontsource-variable/bricolage-grotesque": ["bricolage-grotesque-latin-wght-normal.woff2"],
+	"@fontsource-variable/dm-sans": ["dm-sans-latin-wght-normal.woff2"],
+	"@fontsource/dm-mono": ["dm-mono-latin-400-normal.woff2", "dm-mono-latin-500-normal.woff2"],
 };
 
 const worker = join(import.meta.dirname, "..");
@@ -24,14 +28,14 @@ const version = dirty ? `${commit}-${Date.now()}` : commit;
 rmSync(join(worker, "build"), { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 cpSync(join(root, "design", "theme"), join(out, "theme"), { recursive: true });
-// design/theme.md's fonts, served from this site so pages render in them offline and
-// without asking a third party: the Latin subset of each weight the theme uses, with its licence.
+// The site's fonts, served from this site so pages render in them offline and without
+// asking a third party: the Latin subset of each face, with its licence.
 const fonts = join(out, "fonts");
 mkdirSync(fonts);
 for (const [pkg, files] of Object.entries(FONTS)) {
-	const dir = join(root, "node_modules", "@fontsource", pkg);
+	const dir = join(root, "node_modules", pkg);
 	for (const file of files) cpSync(join(dir, "files", file), join(fonts, file));
-	cpSync(join(dir, "LICENSE"), join(fonts, `${pkg}-OFL.txt`));
+	cpSync(join(dir, "LICENSE"), join(fonts, `${pkg.split("/")[1]}-OFL.txt`));
 }
 for (const file of ["site.css", "app.js", "manifest.webmanifest"]) cpSync(join(worker, "src", file), join(out, file));
 const sw = readFileSync(join(worker, "src", "sw.js"), "utf8");
