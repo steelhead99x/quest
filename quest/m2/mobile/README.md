@@ -32,8 +32,12 @@ remaining choices, marked "agent's choice" below):
     notifications, which needs VAPID keys and more D1 state; restoring
     all of kix, which reverses most of
     [moq-dev/quest#575](https://github.com/moq-dev/quest/pull/575)
-- Style? ✅ `design/theme.md` as written, as kix's layout followed it
-  (rejected: an 8-bit look, which the theme forbids with "no pixel art").
+- Style? ✅ `design/theme.md`, which records the site's look: Quest's
+  amber markers, size colours, and mark on moq-dev's slate and Signal
+  Green, in Atkinson Hyperlegible Next (decided 2026-11-26, contributor,
+  over three design passes; rejected: an 8-bit look, which the theme
+  forbids with "no pixel art"; Barlow Condensed and Inter, then Bricolage
+  Grotesque and DM Sans, both judged generic).
 - Start from kix's code or from scratch? ✅ Restore kix's pieces this
   Goal needs from
   [its last tree](https://github.com/moq-dev/quest/tree/19c6602e4a137e96b974126c65b5e66e04def3c7/cloudflare),
@@ -44,7 +48,13 @@ remaining choices, marked "agent's choice" below):
   in an HttpOnly cookie, with no database (agent's choice, on building the
   Worker: kix needed Better Auth and D1 for several sign-in methods,
   passkeys, and jobs, all cut here; rejected: restoring Better Auth on D1,
-  which adds a dependency, migrations, and a database to deploy).
+  which adds a dependency, migrations, and a database to deploy). GitHub's
+  refresh tokens are single-use, so each sign-in has one `Rotations`
+  Durable Object where its refreshes and its sign-out meet (decided in
+  review, 2026-11-26: two Cloudflare locations refreshing at once, or a
+  refresh finishing after sign-out, otherwise sign a person out or back
+  in; rejected: sharing rotations through the Cache API, which stays in
+  one data center).
 - Milestone? ✅ m2 (agent's choice: it gates nothing in m0 or m1, and m2
   is where kix's mobile app was noted as dropped).
 - How is it validated? ✅ On the contributor's physical Android phone and
@@ -67,6 +77,15 @@ remaining choices, marked "agent's choice" below):
   not serve there yet, and [deploy](/quest/m2/mobile/deploy.md) is done
   when it does. An agent cannot take this step: it needs the account
   owner's credentials and DNS.
+- Maintainer: approve or reject the brand changes made in the fork for
+  this site, before any reaches upstream. They reach past the site: the
+  mark's dot redrawn as a commit node (`design/theme/logo.svg` and the app
+  icons), the README's banner and lead line ("Find your next quest." and
+  "Find the change that unblocks the most work."), the route-map art, and
+  `design/theme.md`'s Voice and type. Options: take them all; take the
+  site's look but keep the original mark and README (the fork can keep a
+  site-only copy of the mark); or keep upstream's theme unchanged. An
+  agent cannot settle this: the theme says to use the mark as is.
 - Maintainer: register the upstream GitHub App with
   `bun run register-app` in `cloudflare/` (`cloudflare/GITHUB.md`), as the
   owner that installs it, and set its secrets on the upstream Worker. Check
