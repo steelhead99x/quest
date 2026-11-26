@@ -28,10 +28,13 @@ export interface Merged {
 export interface Window {
 	pulls: Merged[];
 	cut: boolean;
+	/** The repository is private, so a cached copy is rechecked before it is shown. */
+	private: boolean;
 }
 
 export const QUERY = `query Bench($owner: String!, $name: String!) {
 	repository(owner: $owner, name: $name) {
+		isPrivate
 		pullRequests(states: MERGED, first: ${MAX_MERGED}, orderBy: { field: UPDATED_AT, direction: DESC }) {
 			pageInfo { hasNextPage }
 			nodes {
@@ -57,8 +60,11 @@ export async function load(github: GitHub, owner: string, name: string, now: num
 
 /** Read the answer, keeping quest PRs merged inside the window. */
 export function window(value: unknown, now: number): Window {
-	const pulls = (value as { pullRequests?: { nodes?: unknown; pageInfo?: { hasNextPage?: unknown } } } | null)
-		?.pullRequests;
+	const repository = value as {
+		isPrivate?: unknown;
+		pullRequests?: { nodes?: unknown; pageInfo?: { hasNextPage?: unknown } };
+	} | null;
+	const pulls = repository?.pullRequests;
 	if (!Array.isArray(pulls?.nodes)) throw new Error("GitHub's bench answer has no pull requests");
 	const { nodes } = pulls;
 	const hasNextPage = pulls.pageInfo?.hasNextPage;
@@ -92,5 +98,7 @@ export function window(value: unknown, now: number): Window {
 			.filter((p) => p.branch.startsWith("quest/") && Date.parse(p.merged) >= since)
 			.sort((a, b) => Date.parse(b.merged) - Date.parse(a.merged)),
 		cut,
+		// Unknown counts as private, so a cached copy is always rechecked.
+		private: repository?.isPrivate !== false,
 	};
 }

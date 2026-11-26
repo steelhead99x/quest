@@ -408,3 +408,44 @@ describe("CI", () => {
 		expect((await post("release.yml")).status).toBe(409);
 	});
 });
+
+describe("private data", () => {
+	test("a page rendered for a signed-in person is never stored; a signed-out one may be", async () => {
+		const h = harness(routes());
+		const signed = await h.request("/repos/moq-dev/quest", { cookies: [await signedIn()] });
+		expect(signed.headers.get("cache-control")).toBe("private, no-store");
+		const out = await h.request("/");
+		expect(out.headers.get("cache-control")).toBe("no-cache");
+	});
+
+	test("the offline page is public and names no one", async () => {
+		const response = await harness().request("/offline", { cookies: [await signedIn()] });
+		const html = await response.text();
+		expect(response.headers.get("cache-control")).toBe("no-cache");
+		expect(html).toContain("You&#39;re offline");
+		expect(html).not.toContain("octo");
+	});
+
+	test("a cached private board is rechecked with GitHub, and revoked access ends at once", async () => {
+		let allowed = true;
+		const h = harness({
+			...routes(repository(FILES, { isPrivate: true })),
+			"GET https://api.github.com/repos/moq-dev/quest": () =>
+				allowed ? json({ full_name: "moq-dev/quest" }) : json({ message: "Not Found" }, 404),
+		});
+		const cookie = await signedIn();
+		expect((await h.request("/repos/moq-dev/quest", { cookies: [cookie] })).status).toBe(200);
+		expect((await h.request("/repos/moq-dev/quest", { cookies: [cookie] })).status).toBe(200);
+		expect(h.requests.filter((r) => r.url.endsWith("/repos/moq-dev/quest"))).toHaveLength(1);
+		allowed = false;
+		expect((await h.request("/repos/moq-dev/quest", { cookies: [cookie] })).status).toBe(404);
+	});
+
+	test("a cached public board is not rechecked", async () => {
+		const h = harness(routes());
+		const cookie = await signedIn();
+		await h.request("/repos/moq-dev/quest", { cookies: [cookie] });
+		await h.request("/repos/moq-dev/quest", { cookies: [cookie] });
+		expect(h.requests.filter((r) => r.url.endsWith("/repos/moq-dev/quest"))).toHaveLength(0);
+	});
+});

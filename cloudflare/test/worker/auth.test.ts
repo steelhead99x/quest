@@ -154,7 +154,7 @@ describe("signed in", () => {
 		expect(html).toContain("Private");
 		expect(h.requests.length - before).toBe(2);
 		expect(response.headers.get("server-timing")).toMatch(/github;dur=\d+;desc="2 requests"/);
-		expect(response.headers.get("cache-control")).toBe("private, no-cache");
+		expect(response.headers.get("cache-control")).toBe("private, no-store");
 	});
 
 	test("refreshes an expiring token and reissues the cookie", async () => {

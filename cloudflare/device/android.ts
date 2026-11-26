@@ -9,6 +9,7 @@ import {
 	pageTiming,
 	TIMING_SCRIPT,
 } from "./driver.ts";
+import { Offline } from "./offline.ts";
 import { Rpc } from "./rpc.ts";
 import { type Shell, sleep } from "./shell.ts";
 
@@ -104,25 +105,25 @@ export class Android implements Driver {
 			installabilityErrors?: { errorId: string }[];
 		};
 		const controlled = await this.evaluate(page, CONTROLLED_SCRIPT, true);
-		await page.call("Network.emulateNetworkConditions", {
-			offline: true,
+		// Both the page and its service worker go offline: the page's switch alone leaves the worker online.
+		const workers = await Offline.attach(this.port, this.timeout);
+		const conditions = (offline: boolean) => ({
+			offline,
 			latency: 0,
 			downloadThroughput: -1,
 			uploadThroughput: -1,
 		});
 		let offline = false;
 		try {
-			const timing = await this.navigate(page, url);
-			offline = timing.status === 200;
+			await page.call("Network.emulateNetworkConditions", conditions(true));
+			await workers.set(true);
+			if (workers.workers > 0) offline = (await this.navigate(page, url)).status === 200;
 		} catch {
 			offline = false;
 		} finally {
-			await page.call("Network.emulateNetworkConditions", {
-				offline: false,
-				latency: 0,
-				downloadThroughput: -1,
-				uploadThroughput: -1,
-			});
+			await workers.set(false);
+			workers.close();
+			await page.call("Network.emulateNetworkConditions", conditions(false));
 		}
 		return {
 			manifest: Boolean(manifest.url) && (manifest.errors ?? []).length === 0,

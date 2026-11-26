@@ -11,6 +11,7 @@ import { load as loadBench, type Window } from "./bench/load.ts";
 import { rollups, row } from "./bench/model.ts";
 import { BenchPage } from "./bench/page.tsx";
 import { cached } from "./cache.ts";
+import { Offline } from "./home.tsx";
 import { Dispatch, PullCi, RunList } from "./ci.tsx";
 import { checks, dispatch, Refused, rerunFailed, runs } from "./github/ci.ts";
 import { Home, Message } from "./home.tsx";
@@ -33,7 +34,15 @@ export interface Deps {
 	cache: () => Promise<Cache | null>;
 }
 
-type Vars = { github: GitHub; session: Session | null; config: Config; install: string; cookies: string[] };
+type Vars = {
+	github: GitHub;
+	session: Session | null;
+	/** A session was in play for this request, even if signing out cleared it. */
+	rendered: boolean;
+	config: Config;
+	install: string;
+	cookies: string[];
+};
 type Bindings = { Bindings: Env; Variables: Vars };
 type App = Hono<Bindings>;
 // Any route's context, for the helpers below.
@@ -91,6 +100,7 @@ export function app(deps: Deps): App {
 		c.set("config", config);
 		c.set("install", install);
 		await loadSession(c, deps);
+		c.set("rendered", c.get("session") !== null);
 		await next();
 		const github = c.get("github").meter;
 		const total = deps.now() - start;
@@ -102,7 +112,10 @@ export function app(deps: Deps): App {
 		c.header("Content-Security-Policy", CSP);
 		c.header("X-Content-Type-Options", "nosniff");
 		c.header("Referrer-Policy", "same-origin");
-		if (!c.res.headers.has("Cache-Control")) c.header("Cache-Control", "private, no-cache");
+		// A page rendered for a signed-in person is never stored, by the browser or its service worker,
+		// so it cannot outlive the session; a signed-out page may be kept for offline reading.
+		if (!c.res.headers.has("Cache-Control"))
+			c.header("Cache-Control", c.get("session") || c.get("rendered") ? "private, no-store" : "no-cache");
 		for (const set of c.get("cookies")) c.header("Set-Cookie", set, { append: true });
 	});
 
@@ -141,9 +154,12 @@ export function app(deps: Deps): App {
 		if (!s) return c.redirect(`/sign-in?next=${encodeURIComponent(new URL(c.req.url).pathname)}`, 302);
 		const [owner, name] = repository.split("/") as [string, string];
 		const github = c.get("github").withToken(s.token);
-		const merged = await cached<Window>(await deps.cache(), `bench ${s.id} ${repository}`.toLowerCase(), () =>
-			loadBench(github, owner, name, deps.now()),
+		const { value: merged, hit } = await cached<Window>(
+			await deps.cache(),
+			`bench ${s.id} ${repository}`.toLowerCase(),
+			() => loadBench(github, owner, name, deps.now()),
 		);
+		if (hit && merged.private) await readable(github, repository);
 		const rows = merged.pulls.map(row);
 		return c.html(
 			<BenchPage
@@ -218,6 +234,12 @@ export function app(deps: Deps): App {
 			`${b.tree.url}/actions/workflows/${encodeURIComponent(workflow.file)}`,
 			next,
 		);
+	});
+
+	// What the service worker shows offline for a page it may not keep. Public, so it never names the person.
+	web.get("/offline", (c) => {
+		c.header("Cache-Control", "no-cache");
+		return c.html(<Offline />);
 	});
 
 	web.get("/sign-in", async (c) => {
@@ -345,8 +367,20 @@ async function boardFor(c: Context, deps: Deps) {
 	if (!s) return c.redirect(`/sign-in?next=${encodeURIComponent(new URL(c.req.url).pathname)}`, 302);
 	const github = c.get("github").withToken(s.token);
 	const key = `board ${s.id} ${owner}/${name}`.toLowerCase();
-	const tree = await cached<Tree>(await deps.cache(), key, () => load(github, owner, name));
+	const { value: tree, hit } = await cached<Tree>(await deps.cache(), key, () => load(github, owner, name));
+	if (hit && tree.private) await readable(github, tree.repository);
 	return board(tree, deps.now());
+}
+
+/** Confirm the person can still read a private repository before showing a cached copy of it. */
+async function readable(github: GitHub, repository: string): Promise<void> {
+	try {
+		await github.get(`/repos/${repository}`);
+	} catch (error) {
+		if (error instanceof GitHubError && (error.status === 403 || error.status === 404))
+			throw new NotFound(repository);
+		throw error;
+	}
 }
 
 /** Refuse a form post from another site, or from a browser that hides where it came from. */

@@ -171,6 +171,7 @@ export function github(snapshot: Snapshot, now: () => number) {
 				token_type: "bearer",
 			});
 		if (route === "GET https://api.github.com/user") return json({ id: 1, login: "demo" });
+		if (route === `GET ${repo}`) return json({ full_name: REPOSITORY, private: false });
 		if (route === "GET https://api.github.com/user/installations")
 			return json({ total_count: 1, installations: [{ id: 1, account: { login: OWNER } }] });
 		if (route === "GET https://api.github.com/user/installations/1/repositories")
@@ -180,7 +181,12 @@ export function github(snapshot: Snapshot, now: () => number) {
 			if (query.includes("query Board")) return json({ data: { repository: repository() } });
 			if (query.includes("query Bench"))
 				return json({
-					data: { repository: { pullRequests: { nodes: merged, pageInfo: { hasNextPage: false } } } },
+					data: {
+						repository: {
+							isPrivate: false,
+							pullRequests: { nodes: merged, pageInfo: { hasNextPage: false } },
+						},
+					},
 				});
 			return json({ errors: [{ message: "the demo answers only the board and bench queries" }] });
 		}
