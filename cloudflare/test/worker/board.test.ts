@@ -537,6 +537,52 @@ describe("claims, as the CLI reads them", () => {
 		expect(html).toContain('href="https://github.com/moq-dev/quest/pull/77">#77</a>');
 	});
 
+	/** A fork board whose quest m0/a is claimed by moq-dev/quest#77, with `ci` answering the upstream's CI. */
+	function forkClaimed(ci: Record<string, Route>) {
+		return harness({
+			...routes(),
+			[GRAPHQL]: async (r) => {
+				const { query } = (await r.json()) as { query: string };
+				if (query.includes("query Upstream"))
+					return json({
+						data: {
+							repository: {
+								pullRequests: { totalCount: 1, nodes: [UPSTREAM_PR] },
+								refs: { totalCount: 0, nodes: [] },
+							},
+						},
+					});
+				return json({ data: { repository: fork() } });
+			},
+			...ci,
+		});
+	}
+
+	test("a fork's quest page reads an upstream claim's CI from the upstream", async () => {
+		const sha = "e".repeat(40);
+		const h = forkClaimed({
+			[`GET https://api.github.com/repos/moq-dev/quest/commits/${sha}/check-runs`]: () =>
+				json({ total_count: 0, check_runs: [] }),
+			"GET https://api.github.com/repos/moq-dev/quest/actions/runs": (r) => {
+				expect(new URL(r.url).searchParams.get("head_sha")).toBe(sha);
+				return json({ total_count: 1, workflow_runs: [run(40, { conclusion: "success", head_sha: sha })] });
+			},
+		});
+		const response = await h.request("/repos/steelhead99x/quest/quest/m0/a", { cookies: [await signedIn()] });
+		expect(response.status).toBe(200);
+		expect(await response.text()).toContain("Check 40");
+		expect(h.requests.some((r) => r.url.includes("/repos/steelhead99x/quest/actions"))).toBe(false);
+	});
+
+	test("a quest page whose PR's CI can't be read still shows, linking to the checks", async () => {
+		const h = forkClaimed({});
+		const response = await h.request("/repos/steelhead99x/quest/quest/m0/a", { cookies: [await signedIn()] });
+		expect(response.status).toBe(200);
+		const html = await response.text();
+		expect(html).toContain("can&#39;t read moq-dev/quest&#39;s CI");
+		expect(html).toContain('href="https://github.com/moq-dev/quest/pull/77/checks"');
+	});
+
 	test("a parent without a quest tree is not an upstream", () => {
 		expect(upstreamOf(fork({ parent: { nameWithOwner: "someone/quest", tree: null, parent: null } }))).toBe(
 			"steelhead99x/quest",

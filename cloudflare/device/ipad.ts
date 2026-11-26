@@ -153,6 +153,19 @@ export class Target {
 	}
 }
 
+/**
+ * A promise, as script text, that unregisters the page's service workers and
+ * empties its caches, resolving true, but only on `origin`: anywhere else it
+ * resolves to where the page is and touches nothing.
+ */
+export function clearStorage(origin: string): string {
+	return (
+		`(async () => { if (location.origin !== ${JSON.stringify(origin)}) return location.href;` +
+		` for (const r of await (navigator.serviceWorker?.getRegistrations?.() ?? [])) await r.unregister();` +
+		` for (const k of await (self.caches?.keys?.() ?? [])) await caches.delete(k); return true })()`
+	);
+}
+
 /** Safari on the attached iPad. */
 export class Ipad implements Driver {
 	private constructor(
@@ -218,11 +231,14 @@ export class Ipad implements Driver {
 		if (cold) {
 			// Safari's inspector has no storage wipe, so clear the site's service worker and caches from a
 			// page on its own origin, wait for that to finish, then load with the HTTP cache off.
+			// The script checks the origin itself: a redirect, such as to GitHub's sign-in, must not
+			// have its storage cleared.
 			await this.navigate(url);
-			await this.evaluateAsync(
-				`(async () => { for (const r of await (navigator.serviceWorker?.getRegistrations?.() ?? [])) await r.unregister();` +
-					` for (const k of await (self.caches?.keys?.() ?? [])) await caches.delete(k); return true })()`,
-			);
+			const cleared = await this.evaluateAsync(clearStorage(new URL(url).origin));
+			if (cleared !== true)
+				throw new Error(
+					`${url} ended at ${String(cleared)}, so its storage was left alone: is the iPad still signed in?`,
+				);
 			await this.page.call("Network.setResourceCachingDisabled", { disabled: true });
 		}
 		try {

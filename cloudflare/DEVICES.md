@@ -13,7 +13,9 @@ bun run device-bench --url https://quest.example.dev/ --url https://quest.exampl
 
 Each page loads `--runs` times cold (HTTP cache, service worker, and site
 storage cleared; cookies kept, so a signed-in device stays signed in) and
-warm. For each it reports the median and 95th percentile of first
+warm. A load that ends anywhere but the page asked for, such as GitHub's
+sign-in after the session expired, fails the run, and the iPad clears
+storage only on the site's own origin. For each it reports the median and 95th percentile of first
 contentful paint, load, the Worker's own time from `Server-Timing`, and
 bytes transferred, whether it installs to the home screen and opens
 offline, and light and dark screenshots. The page's own Navigation Timing

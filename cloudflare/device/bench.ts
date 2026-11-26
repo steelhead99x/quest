@@ -93,9 +93,11 @@ export async function run(driver: Driver, options: Options): Promise<DeviceRepor
 	return { device, pages };
 }
 
-/** Refuse a load that did not succeed, since its timings measure an error page. */
-function check(url: string, load: Load): Load {
+/** Refuse a load that did not succeed or ended elsewhere, since its timings measure some other page. */
+export function check(url: string, load: Load): Load {
 	if (load.status !== 200) throw new Error(`${url} answered ${load.status}, not 200`);
+	if (!load.url || new URL(load.url).href !== new URL(url).href)
+		throw new Error(`${url} ended at ${load.url || "an unknown page"}: is the device still signed in?`);
 	return load;
 }
 

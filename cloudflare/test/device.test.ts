@@ -13,7 +13,7 @@ import {
 	unfit,
 } from "../device/bench.ts";
 import { type DeviceInfo, type Driver, type Load, pageTiming } from "../device/driver.ts";
-import { tab, Target, udid } from "../device/ipad.ts";
+import { clearStorage, tab, Target, udid } from "../device/ipad.ts";
 import { Rpc } from "../device/rpc.ts";
 import { median, p95, quantile, regressions, spread, summarize } from "../device/stats.ts";
 
@@ -48,7 +48,7 @@ function fake(info: DeviceInfo, loads: Load[]): Driver & { calls: string[] } {
 		info: async () => info,
 		load: async (url, cold) => {
 			calls.push(`${cold ? "cold" : "warm"} ${url}`);
-			return loads[i++ % loads.length]!;
+			return { url, ...loads[i++ % loads.length]! };
 		},
 		installable: async () => ({ manifest: true, serviceWorker: true, offline: true, errors: [] }),
 		screenshot: async (_, dark) => new Uint8Array([dark ? 1 : 0]),
@@ -128,7 +128,7 @@ describe("parsers", () => {
 	});
 
 	test("reads the page's timing and refuses a malformed one", () => {
-		const t = { response: 1, paint: null, load: 3, bytes: 4, worker: null, status: 200 };
+		const t = { response: 1, paint: null, load: 3, bytes: 4, worker: null, status: 200, url: "https://q.dev/" };
 		expect(pageTiming(JSON.stringify(t))).toEqual(t);
 		expect(() => pageTiming(JSON.stringify({ ...t, load: -1 }))).toThrow("load");
 		expect(() => pageTiming(JSON.stringify({ ...t, bytes: "x" }))).toThrow("bytes");
@@ -137,6 +137,36 @@ describe("parsers", () => {
 });
 
 describe("bench", () => {
+	test("refuses a load that ended on another page, such as GitHub's sign-in", async () => {
+		const redirected = fake(device(), [load({ url: "https://github.com/login" })]);
+		await expect(
+			run(redirected, { urls: ["https://q.dev/repos/x"], runs: 3, save: async (n) => n }),
+		).rejects.toThrow("ended at https://github.com/login");
+	});
+
+	test("the iPad's storage wipe runs only on the site's own origin", async () => {
+		const wipe = async (href: string) => {
+			const done: string[] = [];
+			const scope = {
+				location: new URL(href),
+				navigator: {
+					serviceWorker: { getRegistrations: async () => [{ unregister: async () => done.push("sw") }] },
+				},
+				caches: { keys: async () => ["pages"], delete: async (k: string) => done.push(k) },
+			};
+			const value = await new Function(...Object.keys(scope), "self", `return ${clearStorage("https://q.dev")}`)(
+				...Object.values(scope),
+				scope,
+			);
+			return { value, done };
+		};
+		expect(await wipe("https://q.dev/repos/x")).toEqual({ value: true, done: ["sw", "pages"] });
+		expect(await wipe("https://github.com/login?return_to=x")).toEqual({
+			value: "https://github.com/login?return_to=x",
+			done: [],
+		});
+	});
+
 	test("loads each page cold then warm, and saves light and dark screenshots", async () => {
 		const driver = fake(device(), [load()]);
 		const saved: string[] = [];

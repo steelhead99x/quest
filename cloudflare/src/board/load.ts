@@ -25,6 +25,8 @@ export interface Pull {
 	branch: string;
 	/** The head commit, whose checks and workflow runs the quest page shows. */
 	head: string;
+	/** The repository the PR is open against, whose Actions and Checks hold its CI: a fork's board may show its upstream's. */
+	repository: string;
 	author: string;
 	body: string;
 	created: string;
@@ -167,6 +169,7 @@ export function claims(
 			draft: p.isDraft === true,
 			branch: String(p.headRefName),
 			head: String(p.headRefOid),
+			repository,
 			author: String(p.author?.login ?? "ghost"),
 			body: String(p.body ?? ""),
 			created: String(p.createdAt),

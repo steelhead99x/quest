@@ -29,6 +29,8 @@ export interface PageTiming {
 	worker: number | null;
 	/** The HTTP status of the page. */
 	status: number;
+	/** Where the page ended up, after any redirect, such as to GitHub's sign-in. */
+	url: string;
 }
 
 /** One measured load: the page's timings and the driver's own clock around it. */
@@ -74,6 +76,7 @@ export const TIMING_SCRIPT = `JSON.stringify((() => {
 		bytes: (n.transferSize || 0) + resources.reduce((sum, r) => sum + (r.transferSize || 0), 0),
 		worker: (n.serverTiming || []).length ? worker : null,
 		status: n.responseStatus || 0,
+		url: location.href,
 	};
 })())`;
 
@@ -106,5 +109,6 @@ export function pageTiming(json: unknown): PageTiming {
 		bytes: num("bytes")!,
 		worker: num("worker", true),
 		status: num("status")!,
+		url: typeof v.url === "string" ? v.url : "",
 	};
 }

@@ -103,6 +103,18 @@ export function PullCi(props: { runs: Runs; checks: Runs; repository: string; ne
 	);
 }
 
+/** A PR's CI that this site cannot read, such as an upstream PR where the App is not installed. */
+export function CiElsewhere(props: { repository: string; link: string }) {
+	return (
+		<section class="ql-panel ci">
+			<h2>CI</h2>
+			<p class="muted">
+				This site can't read {props.repository}'s CI. <a href={props.link}>See the checks on GitHub</a>
+			</p>
+		</section>
+	);
+}
+
 /** The workflows a signed-in person can start on the default branch, folded away. */
 export function Dispatch(props: { workflows: Workflow[]; repository: string; branch: string; next: string }) {
 	const startable = props.workflows.filter((w) => w.dispatch);

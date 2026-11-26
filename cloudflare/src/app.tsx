@@ -12,7 +12,7 @@ import { rollups, row } from "./bench/model.ts";
 import { BenchPage } from "./bench/page.tsx";
 import { cached } from "./cache.ts";
 import { Offline } from "./home.tsx";
-import { Dispatch, PullCi, RunList } from "./ci.tsx";
+import { CiElsewhere, Dispatch, PullCi, RunList } from "./ci.tsx";
 import { checks, dispatch, Refused, rerunFailed, runs } from "./github/ci.ts";
 import { Home, Message } from "./home.tsx";
 import type { User } from "./layout.tsx";
@@ -196,10 +196,25 @@ export function app(deps: Deps): App {
 		let ci = null;
 		if (pull) {
 			const github = c.get("github").withToken(c.get("session")!.token);
-			const repository = b.tree.repository;
-			const checked = await checks(github, repository, pull.head, deps.now());
-			const ran = await runs(github, repository, { sha: pull.head }, deps.now());
-			ci = <PullCi runs={ran} checks={checked} repository={repository} next={path} link={`${pull.url}/checks`} />;
+			// The PR's own repository: on a fork's board, a claim may be an upstream PR.
+			const repository = pull.repository;
+			try {
+				const checked = await checks(github, repository, pull.head, deps.now());
+				const ran = await runs(github, repository, { sha: pull.head }, deps.now());
+				ci = (
+					<PullCi
+						runs={ran}
+						checks={checked}
+						repository={repository}
+						next={path}
+						link={`${pull.url}/checks`}
+					/>
+				);
+			} catch (error) {
+				// The App may not be installed where the PR lives; the quest still shows, with its CI on GitHub.
+				if (!(error instanceof GitHubError) || error.status === 401) throw error;
+				ci = <CiElsewhere repository={repository} link={`${pull.url}/checks`} />;
+			}
 		}
 		return c.html(
 			<QuestPage b={b} doc={doc.path} user={user(c.get("session"))!} path={path} now={deps.now()}>
