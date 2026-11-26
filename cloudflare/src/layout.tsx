@@ -2,7 +2,8 @@ import type { Child } from "hono/jsx";
 
 // The site shell: every HTML page the Worker serves renders inside Layout.
 // Quest's markers, sizes, and mark follow design/theme.md (/theme/theme.css); the
-// surfaces, ink, accent, and type are moq-dev's (src/site.css), served from /fonts.
+// surfaces, ink, and accent are moq-dev's, and the type is Atkinson Hyperlegible
+// (src/site.css), served from /fonts.
 
 export const repo = "https://github.com/moq-dev/quest";
 
@@ -38,18 +39,11 @@ export function Layout(props: Page & { children: Child }) {
 				<meta name="theme-color" content="#0f172a" />
 				<link rel="icon" href="/theme/logo.svg" type="image/svg+xml" />
 				<link rel="manifest" href="/manifest.webmanifest" />
-				<link rel="apple-touch-icon" href="/theme/icon-192.png" />
-				{/* The body and display faces draw the first screen, so fetch them before the stylesheet asks. */}
+				<link rel="apple-touch-icon" href="/theme/icon-180.png" />
+				{/* The text face draws the first screen, so fetch it before the stylesheet asks. */}
 				<link
 					rel="preload"
-					href="/fonts/dm-sans-latin-wght-normal.woff2"
-					as="font"
-					type="font/woff2"
-					crossorigin=""
-				/>
-				<link
-					rel="preload"
-					href="/fonts/bricolage-grotesque-latin-wght-normal.woff2"
+					href="/fonts/atkinson-hyperlegible-next-latin-wght-normal.woff2"
 					as="font"
 					type="font/woff2"
 					crossorigin=""
@@ -63,12 +57,12 @@ export function Layout(props: Page & { children: Child }) {
 						<meta property="og:title" content={title} />
 						<meta property="og:description" content={props.description} />
 						<meta property="og:url" content={new URL(props.path, props.origin).href} />
-						<meta property="og:image" content={new URL("/theme/og.png", props.origin).href} />
+						<meta property="og:image" content={new URL("/og.png", props.origin).href} />
 						<meta property="og:image:width" content="1280" />
 						<meta property="og:image:height" content="640" />
 						<meta
 							property="og:image:alt"
-							content="Quest: a quest log for your repo and your agents. Readable plans, explicit dependencies, reviewable Git changes."
+							content="Quest's mark beside two quests, the first unblocking the second: a quest log for your repo and your agents."
 						/>
 						<meta name="twitter:card" content="summary_large_image" />
 					</>
@@ -77,9 +71,9 @@ export function Layout(props: Page & { children: Child }) {
 			<body>
 				<header class="site-header">
 					<nav class="wrap nav" aria-label="Site">
-						<a class="brand" href="/">
-							<img src="/theme/logo.svg" alt="" width="32" height="32" />
-							Quest
+						<a class="brand" href="/" aria-label="Quest, home">
+							<img src="/theme/logo.svg" alt="" width="30" height="30" />
+							<span class="wordmark">Quest</span>
 						</a>
 						<span class="account">
 							{props.user ? (
@@ -101,7 +95,7 @@ export function Layout(props: Page & { children: Child }) {
 				<main>{props.children}</main>
 				<footer class="wrap site-footer">
 					<p>
-						<a href={repo}>Source</a> · MIT or Apache-2.0
+						Quest is open source, under MIT or Apache-2.0. <a href={repo}>Read the source on GitHub</a>.
 					</p>
 				</footer>
 			</body>
@@ -214,11 +208,10 @@ export function Entry(props: {
 	);
 }
 
-/** A section's heading: a small label in the accent over the title, and an optional count. */
-export function Heading(props: { eyebrow?: string; title: string; count?: number; id?: string }) {
+/** A section's heading, with an optional count beside it. */
+export function Heading(props: { title: string; count?: number; id?: string }) {
 	return (
 		<header class="block-head">
-			{props.eyebrow && <p class="ql-eyebrow">{props.eyebrow}</p>}
 			<h2 id={props.id}>
 				{props.title}
 				{props.count !== undefined && <span class="count">{props.count}</span>}

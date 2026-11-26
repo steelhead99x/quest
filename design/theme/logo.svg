@@ -1,9 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="title">
 	<title id="title">Quest</title>
-	<!-- Hand-written mark: a flat exclamation point on an amber rounded square. See design/theme.md. -->
-	<rect x="2" y="2" width="60" height="60" rx="14" fill="#ffc53d"/>
-	<g fill="#0a0c11">
-		<path d="M25 11 H39 L35.5 39 H28.5 Z"/>
-		<rect x="27" y="44" width="10" height="10" rx="2"/>
-	</g>
+	<!-- Hand-written mark: an exclamation point on an amber rounded square, its dot drawn as a
+	     commit node, so it reads as a quest ready to start and as Git history. See design/theme.md. -->
+	<rect x="2" y="2" width="60" height="60" rx="15" fill="#ffc53d"/>
+	<path d="M25.5 13.5 a3 3 0 0 1 3 -3 h7 a3 3 0 0 1 3 3 L35.6 37 a2 2 0 0 1 -2 1.8 h-3.2 a2 2 0 0 1 -2 -1.8 Z" fill="#0f172a"/>
+	<circle cx="32" cy="48" r="5.5" fill="none" stroke="#0f172a" stroke-width="4.5"/>
 </svg>

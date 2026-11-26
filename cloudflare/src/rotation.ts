@@ -78,16 +78,16 @@ export class Coordinator {
 			if (was && was.sid === s.sid) return { kind: "fresh", session: was, changed: true };
 		}
 		const result = await this.act.refresh(s);
-		// Signed out while GitHub was answering: the new token must not outlive the session.
+		if (result.kind !== "fresh") return this.#ended(state) ? { kind: "revoked" } : result;
+		const sealed = await seal(this.secret, "rotation", result.session);
+		// Signed out while GitHub answered or while sealing: the new token must not outlive the
+		// session. Nothing is awaited between this check and publishing the rotation, so a
+		// sign-out either sees the rotation (and revokes it) or is seen here.
 		if (this.#ended(state)) {
-			if (result.kind === "fresh") await this.#revoke(result.session.token);
+			await this.#revoke(result.session.token);
 			return { kind: "revoked" };
 		}
-		if (result.kind !== "fresh") return result;
-		state.rotations[key] = {
-			sealed: await seal(this.secret, "rotation", result.session),
-			until: this.act.now() + KEEP,
-		};
+		state.rotations[key] = { sealed, until: this.act.now() + KEEP };
 		await this.#save(state, "keeping a rotation");
 		return result;
 	}
@@ -98,14 +98,25 @@ export class Coordinator {
 	 * that finished just before cannot keep the person signed in.
 	 */
 	async end(s: Session): Promise<void> {
-		const state = await this.#load();
-		state.ended = Math.max(state.ended ?? 0, s.refreshExpires, this.act.now() + KEEP);
+		const until = Math.max(s.refreshExpires, this.act.now() + KEEP);
+		let state: State;
+		try {
+			state = await this.#load();
+		} catch {
+			// The stored state can't be read, so its rotations can't be revoked; still record the
+			// sign-out, which is what keeps the session from refreshing again.
+			state = this.#state = this.#state ?? { ended: null, rotations: {} };
+		}
+		// Mark the session ended and take its rotations in one step, with nothing awaited between,
+		// so a refresh publishing a rotation either lands before (and is revoked here) or sees this.
+		state.ended = Math.max(state.ended ?? 0, until);
+		const kept = Object.values(state.rotations);
+		state.rotations = {};
 		const tokens = new Set([s.token]);
-		for (const { sealed } of Object.values(state.rotations)) {
+		for (const { sealed } of kept) {
 			const made = session(await open(this.secret, "rotation", sealed));
 			if (made) tokens.add(made.token);
 		}
-		state.rotations = {};
 		await this.#save(state, "ending a session");
 		await Promise.all([...tokens].map((t) => this.#revoke(t)));
 	}
@@ -123,9 +134,18 @@ export class Coordinator {
 		return state.ended !== null && state.ended > this.act.now();
 	}
 
+	/**
+	 * The state, read from storage once. A read that fails is not taken as empty: that would
+	 * forget a sign-out. It throws, so the caller answers "unavailable", and the next call reads again.
+	 */
 	async #load(): Promise<State> {
 		if (!this.#state) {
-			const stored = await this.store.load().catch(() => undefined);
+			let stored: State | undefined;
+			try {
+				stored = await this.store.load();
+			} catch (error) {
+				throw new Error("the coordinator can't read its storage", { cause: error });
+			}
 			this.#state = this.#state ?? stored ?? { ended: null, rotations: {} };
 		}
 		return this.#state;

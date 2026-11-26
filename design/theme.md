@@ -57,15 +57,20 @@ so XL uses yellow `33`, which many palettes render orange-brown.
 
 [`theme/theme.css`](theme/theme.css) carries this page's palette, type, and
 marker and size classes for the quest log site in `cloudflare/`, and
-`theme/icon-192.png` and `theme/icon-512.png` are its home-screen icons.
+`theme/icon.svg` is its app icon, the mark on a full-bleed square for home
+screens to mask, exported as `theme/icon-180.png`, `theme/icon-192.png`, and
+`theme/icon-512.png` (`rsvg-convert -w 512 -h 512 icon.svg -o icon-512.png`).
 Change this page first, then that file.
 
 ## Mark
 
-[`theme/logo.svg`](theme/logo.svg) is a flat dark `!` on an amber rounded
-square. It carries its own fill, so it reads on light and dark pages, and it
-stays legible at 16 px. Use it as is: do not recolour it, add text inside it,
-or pair it with game art.
+[`theme/logo.svg`](theme/logo.svg) is a flat slate `!` on an amber rounded
+square, its dot drawn as a ring: a commit node, so the mark reads both as a
+quest ready to start and as Git history. It carries its own fill, so it reads
+on light and dark pages. From 32 px up the ring shows; at 16 px it closes into
+a plain dot and the mark is still a `!`. Use it as is: do not recolour it, add
+text inside it, or pair it with game art. Beside it, the name is set as
+"Quest" in the page's heading face, never inside the square.
 
 ## On moq-dev's sites
 
@@ -86,9 +91,12 @@ Signal Green accent, and type of moq-dev/moq.dev's `src/layouts/global.css`.
 | accent | `#22c55e` | Primary buttons, focus |
 | accent-ink | `#4ade80` | Links and labels |
 
-Headings use Bricolage Grotesque, bold, in sentence case; body text uses DM
-Sans; labels and figures use DM Mono. All three are open-licensed and served by
-the site. Quest's markers, size colours, and mark stay as above: the amber `!`
+Type is one family, Atkinson Hyperlegible Next, with Atkinson Hyperlegible
+Mono for identifiers such as branches, commits, and paths. It was drawn for
+legibility and tells `I`, `l`, `1` and `0`, `O` apart, which a log of PR
+numbers and hashes read on a phone needs. Hierarchy comes from size and weight,
+in sentence case: no capitals or tracking for labels. Both faces are
+open-licensed and served by the site. Quest's markers, size colours, and mark stay as above: the amber `!`
 and `?`, the rarity ladder with its labels, and the amber square.
 
 ## Social image

@@ -119,8 +119,9 @@ export function Dispatch(props: { workflows: Workflow[]; repository: string; bra
 	return (
 		<details class="fold ci">
 			<summary>
-				<span class="ql-eyebrow">Actions</span>
-				<span class="fold-title">Run a workflow on {props.branch}</span>
+				<span class="fold-title">
+					Run a workflow on <code class="ident">{props.branch}</code>
+				</span>
 				<span class="count">{startable.length}</span>
 			</summary>
 			<ul class="log">

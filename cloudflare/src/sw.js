@@ -17,11 +17,12 @@ const ASSETS = [
 	"/theme/logo.svg",
 	"/theme/icon-192.png",
 	"/theme/icon-512.png",
+	"/theme/icon-180.png",
 	"/manifest.webmanifest",
-	"/fonts/bricolage-grotesque-latin-wght-normal.woff2",
-	"/fonts/dm-sans-latin-wght-normal.woff2",
-	"/fonts/dm-mono-latin-400-normal.woff2",
-	"/fonts/dm-mono-latin-500-normal.woff2",
+	"/fonts/atkinson-hyperlegible-next-latin-wght-normal.woff2",
+	"/fonts/atkinson-hyperlegible-next-latin-wght-italic.woff2",
+	"/fonts/atkinson-hyperlegible-mono-latin-wght-normal.woff2",
+	"/og.png",
 	OFFLINE,
 ];
 
