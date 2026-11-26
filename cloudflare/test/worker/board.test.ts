@@ -96,15 +96,17 @@ describe("board", () => {
 		const response = await h.request("/repos/moq-dev/quest", { cookies: [await signedIn()] });
 		expect(response.status).toBe(200);
 		const html = await response.text();
-		expect(html).toContain("Ready <strong>2</strong>");
-		expect(html).toContain("In review <strong>1</strong>");
-		expect(html).toContain("Blocked <strong>1</strong>");
+		expect(html).toContain('<li class="stat stat-ready"><strong class="stat-value">2</strong>');
+		expect(html).toContain('<li class="stat stat-review"><strong class="stat-value">1</strong>');
+		expect(html).toContain('<li class="stat stat-blocked"><strong class="stat-value">1</strong>');
 		// Ready to start: Alpha unblocks Beta, so it ranks first.
 		const ready = html.slice(html.indexOf("Ready to start"), html.indexOf("<h2>Waiting"));
 		expect(ready.indexOf("Alpha")).toBeLessThan(ready.indexOf("Gamma"));
 		expect(ready).toContain("unblocks 1");
 		expect(ready).not.toContain("Delta");
-		expect(html).toContain("<strong>Maintainer:</strong> pick a name");
+		expect(html).toContain('<span class="tag">Maintainer</span> pick a name');
+		// Every ready row says so in words beside its marker.
+		expect(ready).toContain('<span class="entry-status ql-ready">Ready</span>');
 		expect(html).toContain('href="https://github.com/moq-dev/quest/pull/12">#12</a>');
 		expect(html).toContain('<span class="ql-size ql-l">L</span>');
 		const graphql = h.requests.find((r) => r.url === "https://api.github.com/graphql")!;

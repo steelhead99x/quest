@@ -18,6 +18,10 @@ const ASSETS = [
 	"/theme/icon-192.png",
 	"/theme/icon-512.png",
 	"/manifest.webmanifest",
+	"/fonts/barlow-condensed-latin-600-normal.woff2",
+	"/fonts/barlow-condensed-latin-700-normal.woff2",
+	"/fonts/inter-latin-400-normal.woff2",
+	"/fonts/inter-latin-600-normal.woff2",
 	OFFLINE,
 ];
 

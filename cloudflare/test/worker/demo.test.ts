@@ -32,7 +32,7 @@ test("the demo signs in through its stand-in GitHub and serves every page and ac
 	const board = await browse("/sign-in?next=%2Frepos%2Fsteelhead99x%2Fquest", jar);
 	const html = await board.text();
 	expect(html).toContain('<span class="muted">demo</span>');
-	expect(html).toContain("In review <strong>1</strong>");
+	expect(html).toContain('<li class="stat stat-review"><strong class="stat-value">1</strong>');
 	expect(html).toContain("CI on main");
 	const quest =
 		/href="(\/repos\/steelhead99x\/quest\/quest\/[^"]+)"><\/a>|class="entry-title" href="([^"]+)">[^<]*<\/a><span class="entry-meta">(?:<span class="ql-size[^>]*>[^<]*<\/span>)?<span class="entry-status ql-review">/.exec(

@@ -1,4 +1,50 @@
-/* Site layout for the quest log site. Identity tokens and components come from /theme/theme.css. */
+/*
+ * The quest log site's layout. Identity tokens and components come from
+ * /theme/theme.css; design/theme.md is canonical and design/theme/og.svg is the
+ * reference drawing: flat panels on a near-black backdrop, edged in a size
+ * colour, display type in Barlow Condensed, body in Inter.
+ */
+
+/* design/theme.md's fonts, served from this site (scripts/build.ts). SIL Open Font License 1.1. */
+@font-face {
+	font-family: "Barlow Condensed";
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url("/fonts/barlow-condensed-latin-600-normal.woff2") format("woff2");
+}
+
+@font-face {
+	font-family: "Barlow Condensed";
+	font-style: normal;
+	font-weight: 700;
+	font-display: swap;
+	src: url("/fonts/barlow-condensed-latin-700-normal.woff2") format("woff2");
+}
+
+@font-face {
+	font-family: "Inter";
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url("/fonts/inter-latin-400-normal.woff2") format("woff2");
+}
+
+@font-face {
+	font-family: "Inter";
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url("/fonts/inter-latin-600-normal.woff2") format("woff2");
+}
+
+:root {
+	--radius: 6px;
+	--gap: 0.625rem;
+	/* The status hues a CI row or a waiting item takes as its edge. */
+	--ql-running: var(--ql-blue);
+	--ql-wait: var(--ql-accent);
+}
 
 *,
 *::before,
@@ -8,35 +54,36 @@
 
 html {
 	background: var(--ql-bg);
+	-webkit-text-size-adjust: 100%;
 }
 
-/* A faint grid and two soft glows behind the top of every page, like a game menu's backdrop. */
+/* og.svg's backdrop: a faint grid fading down, an amber glow top left and a blue one top right. */
 body {
 	margin: 0;
 	min-height: 100vh;
 	display: flex;
 	flex-direction: column;
 	background:
-		radial-gradient(ellipse 60% 40% at 15% 0%, rgb(255 197 61 / 0.09), transparent 70%),
-		radial-gradient(ellipse 50% 40% at 90% 5%, rgb(77 163 255 / 0.08), transparent 70%), var(--ql-bg);
+		radial-gradient(ellipse 70% 45% at 10% 0%, rgb(255 197 61 / 0.1), transparent 70%),
+		radial-gradient(ellipse 55% 40% at 95% 3%, rgb(77 163 255 / 0.08), transparent 70%), var(--ql-bg);
 	color: var(--ql-text);
 	font-family: var(--ql-font-body);
-	font-size: 1.0625rem;
-	line-height: 1.65;
+	font-size: 1rem;
+	line-height: 1.6;
 	/* A stacking context, so the grid below paints above this background. */
 	isolation: isolate;
 }
 
 body::before {
 	content: "";
-	position: fixed;
+	position: absolute;
 	inset: 0 0 auto;
-	height: 40rem;
+	height: 36rem;
 	z-index: -1;
 	pointer-events: none;
 	background-image:
-		linear-gradient(rgb(255 255 255 / 0.035) 1px, transparent 1px),
-		linear-gradient(90deg, rgb(255 255 255 / 0.035) 1px, transparent 1px);
+		linear-gradient(rgb(255 255 255 / 0.04) 1px, transparent 1px),
+		linear-gradient(90deg, rgb(255 255 255 / 0.04) 1px, transparent 1px);
 	background-size: 48px 48px;
 	mask-image: linear-gradient(180deg, #000, transparent);
 }
@@ -45,6 +92,8 @@ main {
 	flex: 1;
 }
 
+/* Type */
+
 h1,
 h2,
 h3,
@@ -52,38 +101,52 @@ h4 {
 	font-family: var(--ql-font-display);
 	font-weight: 700;
 	color: var(--ql-text);
-	line-height: 1.05;
-	letter-spacing: 0.005em;
+	line-height: 1;
+	letter-spacing: 0.01em;
 	margin: 1.5em 0 0.5em;
+	text-wrap: balance;
 }
 
 h1 {
-	font-size: clamp(2.8rem, 6vw, 4.5rem);
+	font-size: clamp(2.5rem, 8vw, 4.25rem);
 	text-transform: uppercase;
 }
 
 h2 {
-	font-size: clamp(2rem, 3.5vw, 2.75rem);
+	font-size: clamp(1.6rem, 4vw, 2rem);
 	text-transform: uppercase;
 }
 
 h3 {
-	font-size: 1.5rem;
+	font-size: 1.4rem;
 }
 
 h4 {
-	font-size: 1.2rem;
+	font-size: 1.15rem;
+}
+
+p {
+	margin: 0.75rem 0;
 }
 
 a {
 	color: var(--ql-link);
-	text-underline-offset: 0.18em;
+	text-decoration-thickness: 1px;
+	text-underline-offset: 0.2em;
+}
+
+a:hover {
+	color: #a8d8ff;
+}
+
+strong {
+	font-weight: 600;
 }
 
 code,
 pre {
 	font-family: var(--ql-font-mono);
-	font-size: 0.88em;
+	font-size: 0.875em;
 }
 
 :not(pre) > code {
@@ -91,21 +154,27 @@ pre {
 	border: 1px solid var(--ql-rule);
 	border-radius: 4px;
 	padding: 0.05em 0.35em;
+	overflow-wrap: anywhere;
 }
 
 pre {
-	margin: 0;
+	margin: 0.75rem 0;
+	padding: 0.85rem 1rem;
 	overflow-x: auto;
 	line-height: 1.55;
+	background: var(--ql-panel);
+	border: 1px solid var(--ql-rule);
+	border-radius: var(--radius);
 }
 
 :focus-visible {
 	outline: 2px solid var(--ql-accent);
 	outline-offset: 2px;
+	border-radius: 2px;
 }
 
 .wrap {
-	width: min(72rem, 100% - 2rem);
+	width: min(68rem, 100% - 2.5rem);
 	margin-inline: auto;
 }
 
@@ -113,70 +182,113 @@ pre {
 	color: var(--ql-muted);
 }
 
+/* Glyphs: the markers, drawn in SVG like the mark. */
+
 .glyph {
-	display: inline-block;
-	width: 0.7em;
-	height: 1.5em;
-	vertical-align: middle;
+	display: block;
+	width: 0.62em;
+	height: 1.35em;
 }
 
-.glyph.token {
-	width: 1.1em;
-	height: 1.1em;
+.ql-marker {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	font-size: 1.15rem;
+	line-height: 1;
 }
 
-/* Buttons: uppercase display type with clipped corners. */
+.ql-marker:empty {
+	display: none;
+}
+
+/* Buttons: display type on a rounded rectangle, like the mark's square. */
 
 .button {
-	--cut: 8px;
-	display: inline-block;
-	font: 700 1rem/1.2 var(--ql-font-display);
-	letter-spacing: 0.1em;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.5em;
+	min-height: 2.75rem;
+	padding: 0.55em 1.25em;
+	font: 700 1.05rem/1 var(--ql-font-display);
+	letter-spacing: 0.08em;
 	text-transform: uppercase;
+	text-decoration: none;
 	color: var(--ql-text);
 	background: var(--ql-raised);
-	border: 0;
-	clip-path: polygon(
-		var(--cut) 0,
-		100% 0,
-		100% calc(100% - var(--cut)),
-		calc(100% - var(--cut)) 100%,
-		0 100%,
-		0 var(--cut)
-	);
-	padding: 0.75em 1.4em;
-	text-decoration: none;
+	border: 1px solid var(--ql-rule-strong);
+	border-radius: var(--radius);
 	cursor: pointer;
 	transition:
 		background 120ms,
+		border-color 120ms,
 		color 120ms;
 }
 
 .button:hover {
-	background: var(--ql-rule-strong);
-}
-
-/* The clip path hides an outset outline, so draw it inside, in a colour that shows on the accent too. */
-.button:focus-visible {
-	outline-color: var(--ql-text);
-	outline-offset: -5px;
+	color: var(--ql-text);
+	background: #222a37;
+	border-color: #4a5669;
 }
 
 .button.primary {
 	color: var(--ql-bg);
 	background: var(--ql-accent);
+	border-color: var(--ql-accent);
 }
 
 .button.primary:hover {
 	background: #ffd56e;
+	border-color: #ffd56e;
+}
+
+.button.primary:focus-visible {
+	outline-color: var(--ql-text);
 }
 
 .button.quiet {
-	background: rgb(255 255 255 / 0.06);
+	background: rgb(255 255 255 / 0.04);
 }
 
 .button.quiet:hover {
-	background: rgb(255 255 255 / 0.12);
+	background: rgb(255 255 255 / 0.1);
+}
+
+/* A button inside a row: lower, but still a comfortable tap target. */
+.button.small {
+	min-height: 2.25rem;
+	padding: 0.4em 0.9em;
+	font-size: 0.95rem;
+}
+
+.actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.75rem;
+	margin-top: 1.5rem;
+}
+
+/* A short label, such as Private or who a waiting item waits on. */
+.tag {
+	display: inline-block;
+	padding: 0.05em 0.5em;
+	font: 600 0.8rem/1.5 var(--ql-font-display);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--ql-muted);
+	border: 1px solid var(--ql-rule-strong);
+	border-radius: 3px;
+}
+
+/* Size labels, a little larger than the theme's default so a one-letter size reads at a glance. */
+.ql-size {
+	min-width: 2.1rem;
+	padding: 0.1em 0.45em;
+	font-size: 0.95rem;
+	line-height: 1.3;
 }
 
 /* Header and footer */
@@ -185,51 +297,44 @@ pre {
 	position: sticky;
 	top: 0;
 	z-index: 10;
-	background: rgb(10 12 17 / 0.8);
+	background: rgb(10 12 17 / 0.82);
 	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
 	border-bottom: 1px solid var(--ql-rule);
+	padding-top: env(safe-area-inset-top);
 }
 
 .nav {
 	display: flex;
-	flex-wrap: wrap;
 	align-items: center;
-	gap: 0.5rem 1.75rem;
-	padding-block: 0.7rem;
-}
-
-.nav a {
-	font-family: var(--ql-font-display);
-	font-size: 1.05rem;
-	font-weight: 600;
-	letter-spacing: 0.1em;
-	text-transform: uppercase;
-	color: var(--ql-muted);
-	text-decoration: none;
-}
-
-.nav a:hover {
-	color: var(--ql-text);
+	gap: 1rem;
+	min-height: 3.75rem;
 }
 
 .nav a.brand {
 	display: flex;
 	align-items: center;
-	gap: 0.6rem;
-	margin-right: 0.5rem;
-	font-size: 1.5rem;
-	font-weight: 700;
-	letter-spacing: 0.06em;
+	gap: 0.65rem;
+	font: 700 1.6rem/1 var(--ql-font-display);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
 	color: var(--ql-text);
+	text-decoration: none;
 }
 
 .account {
 	margin-left: auto;
 	display: flex;
-	flex-wrap: wrap;
 	align-items: center;
 	gap: 0.75rem;
-	font-size: 0.95rem;
+	min-width: 0;
+	font-size: 0.9rem;
+}
+
+.account > .muted {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .account form {
@@ -237,128 +342,25 @@ pre {
 }
 
 .account .button {
-	font-size: 0.9rem;
-	padding: 0.6em 1.1em;
+	min-height: 2.25rem;
+	padding: 0.4em 0.9em;
+	font-size: 0.95rem;
 }
 
 .site-footer {
-	margin-top: 3rem;
-	padding-block: 2rem;
+	margin-top: 4rem;
+	padding-block: 1.75rem calc(1.75rem + env(safe-area-inset-bottom));
 	border-top: 1px solid var(--ql-rule);
-	text-align: center;
 	color: var(--ql-muted);
-	font-size: 0.95rem;
+	font-size: 0.875rem;
+}
+
+.site-footer p {
+	margin: 0;
 }
 
 .site-footer a {
 	color: var(--ql-muted);
-}
-
-/* Home */
-
-.hero h1 {
-	margin: 0.5rem 0 0;
-}
-
-.lede {
-	font-size: 1.3rem;
-	font-weight: 600;
-	color: var(--ql-text);
-}
-
-.actions {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 0.75rem;
-}
-
-.log {
-	list-style: none;
-	margin: 0;
-	padding: 0;
-	display: grid;
-	gap: 0.5rem;
-}
-
-/* A log entry, edged in its size colour like an inventory slot. */
-.entry {
-	--ql-edge: var(--ql-rule-strong);
-	display: grid;
-	grid-template-columns: 1.4rem 1fr;
-	column-gap: 0.5rem;
-	padding: 0.65rem 0.9rem 0.65rem 0.6rem;
-	background:
-		linear-gradient(90deg, color-mix(in srgb, var(--ql-edge) 9%, transparent), transparent 60%), var(--ql-bg);
-	border: 1px solid var(--ql-rule);
-	border-left: 2px solid var(--ql-edge);
-	border-radius: 4px;
-}
-
-.entry:has(.ql-xs) {
-	--ql-edge: var(--ql-size-xs);
-}
-
-.entry:has(.ql-s) {
-	--ql-edge: var(--ql-size-s);
-}
-
-.entry:has(.ql-m) {
-	--ql-edge: var(--ql-size-m);
-}
-
-.entry:has(.ql-l) {
-	--ql-edge: var(--ql-size-l);
-}
-
-.entry:has(.ql-xl) {
-	--ql-edge: var(--ql-size-xl);
-}
-
-.entry-title {
-	font-weight: 600;
-}
-
-.entry-meta {
-	grid-column: 2;
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 0.5rem;
-	font-size: 0.92rem;
-}
-
-.ql-marker {
-	display: inline-flex;
-	justify-content: center;
-	font-size: 1.1rem;
-	line-height: 1;
-}
-
-.section {
-	padding-block: 3rem 1rem;
-}
-
-.section > h2 {
-	margin-top: 0.35rem;
-}
-
-.note {
-	color: var(--ql-muted);
-	font-size: 0.95rem;
-	margin-top: 1.5rem;
-}
-
-.quest-page h4 {
-	font-size: 1rem;
-	letter-spacing: 0.12em;
-	text-transform: uppercase;
-	color: var(--ql-muted);
-	margin: 1.25rem 0 0.25rem;
-}
-
-.quest-page p,
-.quest-page ul {
-	margin: 0.5rem 0;
 }
 
 /* Breadcrumbs */
@@ -366,12 +368,17 @@ pre {
 .crumbs ol {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 0.25rem 0.5rem;
+	gap: 0.15rem 0.5rem;
 	list-style: none;
 	margin: 0;
-	padding: 1rem 0 0;
-	font-size: 0.92rem;
+	padding: 1.1rem 0 0;
+	font-size: 0.875rem;
 	color: var(--ql-muted);
+}
+
+.crumbs li {
+	min-width: 0;
+	overflow-wrap: anywhere;
 }
 
 .crumbs li + li::before {
@@ -384,94 +391,530 @@ pre {
 	color: var(--ql-muted);
 }
 
+.crumbs a:hover {
+	color: var(--ql-text);
+}
+
+/* Sections: a heading with an eyebrow and a count, then a log. */
+
+.section {
+	padding-block: 2.5rem 1rem;
+}
+
+.page-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: end;
+	justify-content: space-between;
+	gap: 1rem;
+	margin-bottom: 1.5rem;
+}
+
+.page-head h1 {
+	margin: 0;
+}
+
+.block + .block,
+.block + .fold,
+.fold + .block {
+	margin-top: 0.5rem;
+}
+
+.block-head {
+	margin-bottom: 0.85rem;
+}
+
+.block-head h2 {
+	display: flex;
+	align-items: baseline;
+	gap: 0.6rem;
+	margin: 0.15rem 0 0;
+}
+
+.count {
+	font: 600 1rem/1 var(--ql-font-body);
+	color: var(--ql-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+/* The log: entries as og.svg draws them. */
+
+.log {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: grid;
+	gap: var(--gap);
+}
+
+.entry {
+	--edge: var(--ql-rule-strong);
+	display: grid;
+	grid-template-columns: 1.25rem minmax(0, 1fr);
+	align-items: start;
+	column-gap: 0.7rem;
+	row-gap: 0.4rem;
+	padding: 0.85rem 1rem 0.85rem 0.85rem;
+	background: var(--ql-panel);
+	border: 1px solid var(--ql-rule);
+	border-radius: var(--radius);
+	box-shadow: inset 3px 0 0 var(--edge);
+	transition: border-color 120ms;
+}
+
+.entry:has(a.entry-title:hover) {
+	border-color: var(--ql-rule-strong);
+}
+
+/* A row with no marker: the title and its meta take the whole width. */
+.entry.plain {
+	grid-template-columns: minmax(0, 1fr);
+	padding-left: 1.1rem;
+}
+
+.edge-xs {
+	--edge: var(--ql-size-xs);
+}
+
+.edge-s,
+.edge-ql-s {
+	--edge: var(--ql-size-s);
+}
+
+.edge-m {
+	--edge: var(--ql-size-m);
+}
+
+.edge-l {
+	--edge: var(--ql-size-l);
+}
+
+.edge-xl,
+.edge-ql-xl {
+	--edge: var(--ql-size-xl);
+}
+
+.edge-ql-xs {
+	--edge: var(--ql-grey);
+}
+
+.edge-ql-available,
+.edge-wait {
+	--edge: var(--ql-wait);
+}
+
+.edge-ql-running {
+	--edge: var(--ql-running);
+}
+
+.entry .ql-marker {
+	height: 1.6rem;
+}
+
+.entry-title {
+	font-weight: 600;
+	font-size: 1.05rem;
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+	color: var(--ql-text);
+}
+
+a.entry-title {
+	text-decoration: none;
+}
+
+a.entry-title:hover {
+	color: var(--ql-text);
+	text-decoration: underline;
+	text-decoration-color: var(--ql-rule-strong);
+}
+
+/* A whole entry is a tap target for its title's link. */
+.entry:has(a.entry-title) {
+	position: relative;
+}
+
+a.entry-title::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	border-radius: var(--radius);
+}
+
+.entry-meta a,
+.entry-meta form,
+.entry-meta button {
+	position: relative;
+	z-index: 1;
+}
+
+.entry-meta {
+	grid-column: 2;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.4rem 0.75rem;
+	font-size: 0.9rem;
+	color: var(--ql-muted);
+}
+
+.entry.plain .entry-meta {
+	grid-column: 1;
+}
+
+.entry-meta form {
+	display: inline;
+	margin: 0;
+}
+
+.entry-why {
+	line-height: 1.5;
+}
+
+.entry-why .tag {
+	margin-right: 0.35rem;
+}
+
+/* State labels, beside their markers. */
+
+.entry-status,
+.ci-state {
+	font-weight: 600;
+}
+
+.entry-status.ql-ready,
+.entry-status.ql-review {
+	color: var(--ql-accent);
+}
+
+.entry-status.ql-blocked {
+	color: var(--ql-grey);
+}
+
+.entry-status.ql-claimed {
+	color: var(--ql-text);
+}
+
+.ci-state.ql-running {
+	color: var(--ql-running);
+}
+
+/* Home */
+
+.hero {
+	display: grid;
+	gap: 2.5rem;
+	padding-block: 3rem 1rem;
+}
+
+.hero h1 {
+	margin: 0;
+	max-width: 14ch;
+}
+
+.lede {
+	text-wrap: balance;
+	margin: 1.25rem 0 0.5rem;
+	font-size: clamp(1.15rem, 2.6vw, 1.4rem);
+	color: var(--ql-muted);
+}
+
+.hero-copy > p:not(.lede, .actions) {
+	max-width: 34rem;
+}
+
+.sample {
+	margin: 0;
+}
+
+.sample figcaption {
+	margin-top: 0.6rem;
+	font-size: 0.8rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+/* Example rows are a picture of a board, not links. */
+.sample .entry {
+	pointer-events: none;
+}
+
+.sample .entry:nth-child(3) .entry-title {
+	color: var(--ql-muted);
+}
+
+@media (min-width: 60rem) {
+	.hero {
+		grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+		align-items: center;
+		padding-block: 5rem 2rem;
+	}
+}
+
 /* Board */
 
 .board {
 	display: grid;
 	/* One column no wider than the screen, whatever its widest child. */
 	grid-template-columns: minmax(0, 1fr);
-	gap: 2rem;
-	padding-block: 2.5rem 1rem;
+	gap: 2.25rem;
+	padding-block: 1.5rem 1rem;
+}
+
+/* A repository heading: the owner small above the name. */
+.board-head .owner {
+	margin: 0 0 0.25rem;
+	font-size: 0.95rem;
+	overflow-wrap: anywhere;
 }
 
 .board-head h1 {
-	margin: 0.25rem 0 0.5rem;
-}
-
-.board-head .lede {
-	max-width: 48rem;
-	margin: 0 0 1.25rem;
-	font-size: 1.15rem;
-	font-weight: 400;
-}
-
-.tally {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 0.5rem;
-	list-style: none;
 	margin: 0;
-	padding: 0;
-}
-
-.tally a {
-	display: flex;
-	align-items: center;
-	gap: 0.4rem;
-	min-height: 2.25rem;
-	background: var(--ql-panel);
-	border: 1px solid var(--ql-rule);
-	border-radius: 4px;
-	padding: 0.3rem 0.8rem 0.3rem 0.5rem;
-	font-size: 0.95rem;
-	color: inherit;
-	text-decoration: none;
-}
-
-.tally li:first-child a {
-	padding-left: 0.8rem;
-	color: var(--ql-text);
-}
-
-.tally a:hover {
-	border-color: var(--ql-rule-strong);
-}
-
-.tally a[aria-current] {
-	border-color: var(--ql-accent);
-	background: var(--ql-raised);
-}
-
-.tally .ql-marker {
-	min-width: 0.9rem;
+	font-size: clamp(2.5rem, 10vw, 4rem);
+	overflow-wrap: anywhere;
 }
 
 .as-of {
-	margin: 1rem 0 0;
+	margin: 0.75rem 0 0;
 	font-size: 0.9rem;
 }
 
-.board h2 {
-	margin: 0 0 0.25rem;
+.board-head .lede {
+	max-width: 46rem;
+	margin: 0.75rem 0 0;
+	font-size: 1rem;
 }
 
-.board .log {
-	margin-top: 1rem;
+.summary {
+	display: grid;
+	gap: 1rem;
 }
 
-a.entry-title {
+/* Ready and Waiting side by side where there is room for both. */
+.columns {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 2.25rem;
+}
+
+@media (min-width: 64rem) {
+	.columns {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		align-items: start;
+	}
+}
+
+.columns:empty {
+	display: none;
+}
+
+/* State tiles: the count large, its marker and label beneath. */
+.stats {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: var(--gap);
+}
+
+.stat {
+	position: relative;
+	display: grid;
+	gap: 0.35rem;
+	padding: 0.9rem 1rem 0.85rem;
+	background: var(--ql-panel);
+	border: 1px solid var(--ql-rule);
+	border-radius: var(--radius);
+}
+
+/* The panel's accent tab, in the state's colour. */
+.stat::before {
+	content: "";
+	position: absolute;
+	top: -1px;
+	left: 1rem;
+	width: 2rem;
+	height: 2px;
+	border-radius: 0 0 2px 2px;
+	background: var(--tab, var(--ql-rule-strong));
+}
+
+.stat-ready,
+.stat-review {
+	--tab: var(--ql-accent);
+}
+
+.stat-blocked {
+	--tab: var(--ql-grey);
+}
+
+.stat-value {
+	font: 700 2.5rem/1 var(--ql-font-display);
+	font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	min-height: 1.5rem;
+	font-size: 0.9rem;
+	color: var(--ql-muted);
+}
+
+.stat-label .ql-marker {
+	font-size: 0.95rem;
+}
+
+@media (min-width: 40rem) {
+	.stats {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+}
+
+.size-tally {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem 1.1rem;
+	margin: 0;
+	font-variant-numeric: tabular-nums;
+}
+
+.size-count {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.4rem;
+	font-weight: 600;
+}
+
+/* Milestones: one row each, its counts by state as chips. */
+.milestones {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	border: 1px solid var(--ql-rule);
+	border-radius: var(--radius);
+	background: var(--ql-panel);
+}
+
+.milestones li + li {
+	border-top: 1px solid var(--ql-rule);
+}
+
+.milestone-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.4rem 1rem;
+	padding: 0.75rem 1rem;
 	color: var(--ql-text);
 	text-decoration: none;
 }
 
-a.entry-title:hover {
-	color: var(--ql-accent);
-	text-decoration: underline;
+.milestone-row:hover {
+	color: var(--ql-text);
+	background: rgb(255 255 255 / 0.025);
 }
 
-.entry-why {
-	grid-column: 2;
-	font-size: 0.92rem;
+.milestone-name {
+	display: flex;
+	align-items: baseline;
+	gap: 0.6rem;
+	font-weight: 600;
+	min-width: 0;
+}
+
+.milestone-name .ql-eyebrow {
+	display: inline;
+	flex: none;
+}
+
+.milestone-counts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.3rem 0.9rem;
+	font-size: 0.875rem;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
+.count-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3rem;
+}
+
+.count-chip .ql-marker {
+	font-size: 0.85rem;
+}
+
+.count-chip .muted {
+	font-weight: 400;
+}
+
+/* A folded section: its summary is the heading, and it opens on tap. */
+.fold {
+	border-top: 1px solid var(--ql-rule);
+	padding-top: 0.25rem;
+}
+
+.fold > summary {
+	display: flex;
+	align-items: baseline;
+	gap: 0.6rem;
+	padding: 0.85rem 0;
+	cursor: pointer;
+	list-style: none;
+	font: 700 1.35rem/1.1 var(--ql-font-display);
+	text-transform: uppercase;
+}
+
+.fold > summary::-webkit-details-marker {
+	display: none;
+}
+
+/* A chevron that turns as the section opens. */
+.fold > summary::after {
+	content: "";
+	margin-left: auto;
+	align-self: center;
+	width: 0.55rem;
+	height: 0.55rem;
+	border-right: 2px solid var(--ql-muted);
+	border-bottom: 2px solid var(--ql-muted);
+	transform: rotate(45deg) translate(-2px, -2px);
+	transition: transform 150ms;
+}
+
+.fold[open] > summary::after {
+	transform: rotate(225deg) translate(-2px, -2px);
+}
+
+.fold > summary .ql-eyebrow {
+	display: inline;
+	flex: none;
+}
+
+.fold-title {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.fold-link {
+	margin: 0 0 0.75rem;
+	font-size: 0.9rem;
+}
+
+.fold > .log {
+	margin-bottom: 1rem;
+}
+
+.gaps {
+	margin: 0;
+	font-size: 0.9rem;
 }
 
 /* Quest page */
@@ -485,241 +928,254 @@ a.entry-title:hover {
 
 /* A readable line length, left-aligned with the rest of the site. */
 .quest-view > * {
-	max-width: 48rem;
+	max-width: 46rem;
 }
 
 /* The state's marker sits beside the title, as in a list row. */
 .quest-title {
 	display: flex;
-	align-items: baseline;
-	gap: 0.6rem;
+	align-items: flex-start;
+	gap: 0.75rem;
+}
+
+.quest-title .ql-marker {
+	font-size: clamp(2rem, 6vw, 2.75rem);
+	height: 1.1em;
 }
 
 .quest-title h1 {
-	margin: 0.5rem 0 0;
-	font-size: clamp(2.1rem, 5vw, 3rem);
-}
-
-.quest-title h1 .ql-marker:empty {
-	display: none;
+	margin: 0;
+	font-size: clamp(2.25rem, 7vw, 3.25rem);
+	overflow-wrap: anywhere;
+	min-width: 0;
 }
 
 .quest-meta {
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
-	gap: 0.5rem;
+	gap: 0.5rem 0.9rem;
 	margin: 0;
 	font-weight: 600;
 }
 
+.quest-meta .source {
+	font-weight: 400;
+	font-size: 0.9rem;
+}
+
+/* A note set apart, such as what blocks a quest. */
+.callout {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.7rem;
+	margin: 0;
+	padding: 0.85rem 1rem;
+	background: var(--ql-panel);
+	border: 1px solid var(--ql-rule);
+	border-radius: var(--radius);
+	box-shadow: inset 3px 0 0 var(--ql-grey);
+}
+
+.callout .ql-marker {
+	height: 1.6rem;
+}
+
+/* The quest's own Markdown. */
 .quest-page h2 {
-	font-size: 1.1rem;
-	letter-spacing: 0.12em;
-	text-transform: uppercase;
+	font-size: 1rem;
+	letter-spacing: 0.14em;
 	color: var(--ql-muted);
-	margin: 1.75rem 0 0.5rem;
+	margin: 2rem 0 0.6rem;
+	padding-bottom: 0.4rem;
 	border-bottom: 1px solid var(--ql-rule);
-	padding-bottom: 0.3rem;
 }
 
 .quest-page h3 {
-	font-size: 1.2rem;
-	margin: 1.25rem 0 0.25rem;
+	font-size: 1.25rem;
+	margin: 1.5rem 0 0.4rem;
 }
 
-.quest-page > h2:first-child {
-	margin-top: 0;
+.quest-page h4 {
+	font-size: 0.95rem;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--ql-muted);
+	margin: 1.25rem 0 0.3rem;
 }
 
-/* On a phone the header scrolls away and the nav tightens. */
-@media (max-width: 40rem) {
-	.site-header {
-		position: static;
-	}
-
-	.nav {
-		gap: 0.25rem 1rem;
-		padding-block: 0.5rem;
-	}
-
-	.nav a {
-		font-size: 0.95rem;
-	}
-
-	.nav a.brand {
-		font-size: 1.25rem;
-	}
-
-	.account {
-		gap: 0.5rem;
-		font-size: 0.85rem;
-	}
+.quest-page p,
+.quest-page ul,
+.quest-page ol {
+	margin: 0.6rem 0;
 }
 
-/* Board stats: state tallies, a milestone table, and size counts. */
-.tally-item {
-	display: flex;
-	align-items: center;
-	gap: 0.4rem;
-	min-height: 2.25rem;
-	background: var(--ql-panel);
-	border: 1px solid var(--ql-rule);
-	border-radius: 4px;
-	padding: 0.3rem 0.8rem 0.3rem 0.5rem;
+.quest-page ul,
+.quest-page ol {
+	padding-left: 1.25rem;
+}
+
+.quest-page li + li {
+	margin-top: 0.3rem;
+}
+
+.quest-page li::marker {
+	color: var(--ql-muted);
+}
+
+.quest-page blockquote {
+	margin: 0.75rem 0;
+	padding: 0.1rem 1rem;
+	border-left: 3px solid var(--ql-rule-strong);
+	color: var(--ql-muted);
+}
+
+.quest-page section:first-child h2 {
+	margin-top: 0.5rem;
+}
+
+/* Tables: the bench's rollups. A narrow screen shows each row as a card. */
+
+.stats-scroll {
+	overflow-x: auto;
 }
 
 .stats-table {
 	width: 100%;
-	margin-top: 1rem;
-	border-collapse: collapse;
-	font-variant-numeric: tabular-nums;
+	border-collapse: separate;
+	border-spacing: 0;
+	overflow: hidden;
+	background: var(--ql-panel);
+	border: 1px solid var(--ql-rule);
+	border-radius: var(--radius);
 }
 
-.stats-table caption {
-	text-align: left;
-	font-size: 0.9rem;
+.stats-table td {
+	font-variant-numeric: tabular-nums;
 }
 
 .stats-table th,
 .stats-table td {
-	padding: 0.4rem 0.5rem;
+	padding: 0.6rem 0.85rem;
 	border-bottom: 1px solid var(--ql-rule);
 	text-align: right;
 }
 
-.stats-table th[scope="row"] {
-	white-space: nowrap;
+.stats-table tbody tr:last-child > * {
+	border-bottom: 0;
+}
+
+.stats-table thead th {
+	font: 600 0.85rem/1.2 var(--ql-font-display);
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--ql-muted);
 }
 
 .stats-table th[scope="row"],
 .stats-table thead th:first-child {
 	text-align: left;
-}
-
-.size-tally {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 0.75rem;
-}
-
-.entry-status.ql-ready,
-.entry-status.ql-review {
-	color: var(--ql-accent);
-}
-
-.entry-status.ql-blocked {
-	color: var(--ql-grey);
-}
-
-/* A narrow screen scrolls the table, not the page. */
-.stats-scroll {
-	overflow-x: auto;
-}
-
-/* Long repository names and quest titles wrap rather than widen the page. */
-.board-head h1,
-.quest-title h1,
-.entry-title {
-	overflow-wrap: anywhere;
-	min-width: 0;
-}
-
-/* CI rows keep their buttons on the meta line. */
-.ci-run form,
-.ci .entry form {
-	display: inline;
-	margin: 0;
-}
-
-.ci-state {
-	font-weight: 600;
-}
-
-/* A row with no status marker: the title and its meta take the whole width. */
-.entry.plain {
-	grid-template-columns: minmax(0, 1fr);
-}
-
-.entry.plain .entry-meta,
-.entry.plain .entry-why {
-	grid-column: 1;
-}
-
-.entry-why {
-	grid-column: 2;
-	color: var(--ql-muted);
-	font-size: 0.92rem;
-}
-
-/* The home page's pitch, one column. */
-.hero {
-	padding-block: 3.5rem 1rem;
-	max-width: 40rem;
-}
-
-.group + .group {
-	margin-top: 1.5rem;
-}
-
-.group-title {
-	margin: 0 0 0.5rem;
-	font-size: 1rem;
-	letter-spacing: 0.12em;
-	text-transform: uppercase;
-	color: var(--ql-muted);
-}
-
-/* A repository heading: the owner small above the name. */
-.board-head .owner {
-	margin: 0;
-	font-size: 0.95rem;
-}
-
-.board-head h1 {
-	margin: 0;
-	font-size: clamp(2rem, 9vw, 3.5rem);
-}
-
-.ql-panel h2 {
-	margin: 0 0 0.75rem;
-	font-size: 1.35rem;
-}
-
-.summary {
-	display: grid;
-	gap: 1rem;
-}
-
-.blocked-by {
-	color: var(--ql-muted);
-}
-
-.gaps {
-	margin: 0;
-	font-size: 0.92rem;
-}
-
-/* Folded panels open on tap; the summary is the panel's heading. */
-details.ql-panel > summary {
-	cursor: pointer;
-	font-family: var(--ql-font-display);
-	font-size: 1.2rem;
-	font-weight: 700;
-	list-style-position: inside;
-}
-
-details.ql-panel > summary .ql-eyebrow {
-	display: inline;
-	margin-right: 0.4rem;
-}
-
-details.ql-panel[open] > summary {
-	margin-bottom: 0.75rem;
+	white-space: nowrap;
 }
 
 @media (max-width: 40rem) {
+	.stats-table.cards,
+	.stats-table.cards tbody {
+		display: grid;
+		gap: var(--gap);
+		background: none;
+		border: 0;
+	}
+
+	.stats-table.cards thead {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+	}
+
+	.stats-table.cards tr {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 0.6rem 0.75rem;
+		padding: 0.85rem 1rem;
+		background: var(--ql-panel);
+		border: 1px solid var(--ql-rule);
+		border-radius: var(--radius);
+	}
+
+	.stats-table.cards th[scope="row"] {
+		grid-column: 1 / -1;
+		padding: 0;
+		border: 0;
+		font-weight: 600;
+	}
+
+	.stats-table.cards td {
+		display: grid;
+		padding: 0;
+		border: 0;
+		text-align: left;
+		font-weight: 600;
+	}
+
+	.stats-table.cards td::before {
+		content: attr(data-label);
+		font: 600 0.75rem/1.3 var(--ql-font-display);
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--ql-muted);
+	}
+}
+
+/* The invalid-tree notice. */
+.ql-panel.note h2 {
+	margin: 0 0 0.5rem;
+	font-size: 1.4rem;
+}
+
+.ql-panel.note ul {
+	margin: 0;
+	padding-left: 1.25rem;
+}
+
+/* On a phone the header scrolls away and everything tightens. */
+@media (max-width: 40rem) {
+	.wrap {
+		width: min(68rem, 100% - 2rem);
+	}
+
+	.site-header {
+		position: static;
+	}
+
+	.nav {
+		min-height: 3.5rem;
+		gap: 0.75rem;
+	}
+
+	.nav a.brand {
+		font-size: 1.4rem;
+	}
+
+	.nav a.brand img {
+		width: 28px;
+		height: 28px;
+	}
+
+	.hero {
+		padding-block: 2.25rem 0.5rem;
+		gap: 2rem;
+	}
+
 	.ql-panel {
 		padding: 1.1rem;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	* {
+		transition: none !important;
 	}
 }

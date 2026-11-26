@@ -1,12 +1,10 @@
 import type { Child } from "hono/jsx";
 
 // The site shell: every HTML page the Worker serves renders inside Layout.
-// Colours, type, and glyphs follow design/theme.md; tokens live in /theme/theme.css.
+// Colours, type, and glyphs follow design/theme.md; tokens live in /theme/theme.css,
+// and the theme's fonts are served from /fonts (scripts/build.ts).
 
 export const repo = "https://github.com/moq-dev/quest";
-
-const fonts =
-	"https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;600&display=swap";
 
 /** The signed-in person, as the header shows them. */
 export type User = { login: string };
@@ -23,6 +21,8 @@ export type Page = {
 	path: string;
 	user: User | null;
 	crumbs?: Crumb[];
+	/** The site's origin, for the social preview's absolute URLs; given on public pages. */
+	origin?: string;
 };
 
 /** The page shell. */
@@ -39,12 +39,33 @@ export function Layout(props: Page & { children: Child }) {
 				<link rel="icon" href="/theme/logo.svg" type="image/svg+xml" />
 				<link rel="manifest" href="/manifest.webmanifest" />
 				<link rel="apple-touch-icon" href="/theme/icon-192.png" />
-				<link rel="preconnect" href="https://fonts.googleapis.com" />
-				<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
-				<link rel="stylesheet" href={fonts} />
+				{/* The display face draws every heading, so fetch it before the stylesheet asks. */}
+				<link
+					rel="preload"
+					href="/fonts/barlow-condensed-latin-700-normal.woff2"
+					as="font"
+					type="font/woff2"
+					crossorigin=""
+				/>
 				<link rel="stylesheet" href="/theme/theme.css" />
 				<link rel="stylesheet" href="/site.css" />
 				<script src="/app.js" defer></script>
+				{props.origin && (
+					<>
+						<meta property="og:type" content="website" />
+						<meta property="og:title" content={title} />
+						<meta property="og:description" content={props.description} />
+						<meta property="og:url" content={new URL(props.path, props.origin).href} />
+						<meta property="og:image" content={new URL("/theme/og.png", props.origin).href} />
+						<meta property="og:image:width" content="1280" />
+						<meta property="og:image:height" content="640" />
+						<meta
+							property="og:image:alt"
+							content="Quest: a quest log for your repo and your agents. Readable plans, explicit dependencies, reviewable Git changes."
+						/>
+						<meta name="twitter:card" content="summary_large_image" />
+					</>
+				)}
 			</head>
 			<body>
 				<header class="site-header">
@@ -153,4 +174,48 @@ export type Size = "XS" | "S" | "M" | "L" | "XL";
 /** A size label in its size colour. */
 export function Difficulty(props: { size: Size }) {
 	return <span class={`ql-size ql-${props.size.toLowerCase()}`}>{props.size}</span>;
+}
+
+/**
+ * A log entry, drawn like design/theme/og.svg's: a panel edged in the quest's
+ * size colour (or `tone`'s, for a CI run), its marker beside the title, and a
+ * meta line under it. Pass the meta line, starting with the size and state
+ * labels, as children.
+ */
+export function Entry(props: {
+	title: Child;
+	href?: string;
+	status?: Status;
+	size?: Size | null;
+	/** An edge colour for a row with no size: a size or status class such as `ql-s`. */
+	tone?: string;
+	children?: Child;
+}) {
+	const edge = props.size ? `edge-${props.size.toLowerCase()}` : props.tone ? `edge-${props.tone}` : "";
+	return (
+		<li class={`entry ${edge} ${props.status ? "" : "plain"}`}>
+			{props.status && <Marker status={props.status} />}
+			{props.href ? (
+				<a class="entry-title" href={props.href}>
+					{props.title}
+				</a>
+			) : (
+				<span class="entry-title">{props.title}</span>
+			)}
+			{props.children && <span class="entry-meta">{props.children}</span>}
+		</li>
+	);
+}
+
+/** A section's heading: a small label in the accent over the title, and an optional count. */
+export function Heading(props: { eyebrow?: string; title: string; count?: number; id?: string }) {
+	return (
+		<header class="block-head">
+			{props.eyebrow && <p class="ql-eyebrow">{props.eyebrow}</p>}
+			<h2 id={props.id}>
+				{props.title}
+				{props.count !== undefined && <span class="count">{props.count}</span>}
+			</h2>
+		</header>
+	);
 }

@@ -1,5 +1,6 @@
 import type { Workflow } from "./board/load.ts";
 import type { Run, Runs } from "./github/ci.ts";
+import { Entry, Heading } from "./layout.tsx";
 
 const WORDS: Record<string, string> = {
 	success: "Passed",
@@ -41,23 +42,19 @@ const TONE: Record<string, string> = {
 
 function RunRow(props: { run: Run; repository: string; next: string }) {
 	const { run } = props;
+	const tone = run.status === "completed" ? TONE[run.conclusion ?? ""] : "ql-running";
 	return (
-		<li class="entry plain ci-run">
-			<a class="entry-title" href={run.url}>
-				{run.name}
-			</a>
-			<span class="entry-meta">
-				<span class={`ci-state ${TONE[run.conclusion ?? ""] ?? ""}`}>{state(run)}</span>
-				{run.seconds !== null && run.seconds > 0 && <span class="muted">{took(run.seconds)}</span>}
-				{run.why && <a href={run.url}>{run.why}</a>}
-				{run.rerun && (
-					<form method="post" action={`/repos/${props.repository}/runs/${run.id}/rerun`}>
-						<input type="hidden" name="next" value={props.next} />
-						<button class="button quiet">Re-run failed jobs</button>
-					</form>
-				)}
-			</span>
-		</li>
+		<Entry title={run.name} href={run.url} tone={tone}>
+			<span class={`ci-state ${tone ?? ""}`}>{state(run)}</span>
+			{run.seconds !== null && run.seconds > 0 && <span class="muted">{took(run.seconds)}</span>}
+			{run.why && <a href={run.url}>{run.why}</a>}
+			{run.rerun && (
+				<form method="post" action={`/repos/${props.repository}/runs/${run.id}/rerun`}>
+					<input type="hidden" name="next" value={props.next} />
+					<button class="button small">Re-run failed jobs</button>
+				</form>
+			)}
+		</Entry>
 	);
 }
 
@@ -71,8 +68,8 @@ export function RunList(props: {
 	link: string;
 }) {
 	return (
-		<section class="ql-panel ci">
-			<h2>{props.title}</h2>
+		<section class="block ci">
+			<Heading title={props.title} />
 			{props.runs.length === 0 && <p class="muted">No runs yet.</p>}
 			<ul class="log">
 				{props.runs.map((run) => (
@@ -106,8 +103,8 @@ export function PullCi(props: { runs: Runs; checks: Runs; repository: string; ne
 /** A PR's CI that this site cannot read, such as an upstream PR where the App is not installed. */
 export function CiElsewhere(props: { repository: string; link: string }) {
 	return (
-		<section class="ql-panel ci">
-			<h2>CI</h2>
+		<section class="block ci">
+			<Heading title="CI" />
 			<p class="muted">
 				This site can't read {props.repository}'s CI. <a href={props.link}>See the checks on GitHub</a>
 			</p>
@@ -120,27 +117,28 @@ export function Dispatch(props: { workflows: Workflow[]; repository: string; bra
 	const startable = props.workflows.filter((w) => w.dispatch);
 	if (startable.length === 0) return null;
 	return (
-		<details class="ql-panel ci">
-			<summary>Run a workflow on {props.branch}</summary>
+		<details class="fold ci">
+			<summary>
+				<span class="ql-eyebrow">Actions</span>
+				<span class="fold-title">Run a workflow on {props.branch}</span>
+				<span class="count">{startable.length}</span>
+			</summary>
 			<ul class="log">
 				{startable.map((w) => (
-					<li class="entry plain">
-						<span class="entry-title">{w.name}</span>
-						<span class="entry-meta">
-							{w.inputs ? (
-								<a
-									href={`https://github.com/${props.repository}/actions/workflows/${encodeURIComponent(w.file)}`}
-								>
-									Needs inputs: run on GitHub
-								</a>
-							) : (
-								<form method="post" action={`/repos/${props.repository}/workflows/${w.file}/dispatch`}>
-									<input type="hidden" name="next" value={props.next} />
-									<button class="button quiet">Run</button>
-								</form>
-							)}
-						</span>
-					</li>
+					<Entry title={w.name}>
+						{w.inputs ? (
+							<a
+								href={`https://github.com/${props.repository}/actions/workflows/${encodeURIComponent(w.file)}`}
+							>
+								Needs inputs: run on GitHub
+							</a>
+						) : (
+							<form method="post" action={`/repos/${props.repository}/workflows/${w.file}/dispatch`}>
+								<input type="hidden" name="next" value={props.next} />
+								<button class="button small">Run</button>
+							</form>
+						)}
+					</Entry>
 				))}
 			</ul>
 		</details>
