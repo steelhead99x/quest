@@ -8,7 +8,7 @@ Nothing here is needed for moq-dev's own repositories, which m0 serves first.
 
 ## Plan
 
-Decided 2026-10-30 (user, /quest-plan): m0 is adoption on moq-dev/quest,
+Decided 2026-10-30 (user, /quest-plan): m0 is adoption on kixel-ai/quest,
 moq-dev/moq, and moq-dev/moq.pro, hosted at quest.moq.dev and closed to
 other owners. Work only third-party repositories need moved here, and the
 earlier "Later work" milestone became m2.

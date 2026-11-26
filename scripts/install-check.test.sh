@@ -111,7 +111,7 @@ check mise x86_64-unknown-linux-gnu
 check shell x86_64-unknown-linux-gnu
 grep -qxF 'mise github:steelhead99x/quest@v0.1.0' "$work/log"
 grep -qxF 'shell https://github.com/steelhead99x/quest/releases/download/v0.1.0/quest-installer.sh' "$work/log"
-export RELEASE_REPOSITORY=moq-dev/quest
+export RELEASE_REPOSITORY=kixel-ai/quest
 check mise x86_64-unknown-linux-gnu
 check shell x86_64-unknown-linux-gnu
 (($(wc -l <"$work/log") == 4))
@@ -142,11 +142,11 @@ for tag in '' '../v0.1.0' 'v0.1' 'latest'; do
     reject shell x86_64-unknown-linux-gnu
 done
 export RELEASE_TAG=v0.1.0
-for repository in '' 'moq-dev' 'moq-dev/quest/x' 'moq-dev/quest;rm'; do
+for repository in '' 'kixel-ai' 'kixel-ai/quest/x' 'kixel-ai/quest;rm'; do
     export RELEASE_REPOSITORY="$repository"
     reject shell x86_64-unknown-linux-gnu
 done
-export RELEASE_REPOSITORY=moq-dev/quest
+export RELEASE_REPOSITORY=kixel-ai/quest
 reject unknown x86_64-unknown-linux-gnu
 reject shell aarch64-unknown-linux-gnu
 (($(wc -l <"$work/log") == log_lines))

@@ -182,6 +182,8 @@ const base = (): SessionRecord => ({
 	start: at(0),
 	end: at(1),
 	waits: [],
+	gated: [],
+	shell: [],
 	split: {
 		categories: Object.fromEntries(SPLIT_CATEGORIES.map((c) => [c, { ms: 1, tokens: 2 }])) as never,
 		notes: ["one line"],

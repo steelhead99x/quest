@@ -2,22 +2,44 @@
 // `src/github/claims.ts` decides them. Commands that must not disturb held work look here first,
 // and `quest start` records a claim the same way, judging readiness by the upstream tree.
 import { git } from "./git";
-import { type Remote, readRemote, remoteRepository, requireRemote } from "./github";
-import { type GitHubDependencies, type Repository, GitHub, object, repositoryPath, string } from "../github/client";
-import {
-	type Claim,
-	type Holdings,
-	type OpenPull,
-	held as githubHeld,
-	openPullRequests,
-	questBranches,
-} from "../github/claims";
+import { type Remote, readRemote, remoteHost, remoteRepository, requireRemote } from "./github";
+import { type GitHubDependencies, GitHub, object, repositoryPath, string } from "../github/client";
+import type { Claim, Forge, ForgeWrites, Holdings, OpenPull, Repository } from "../core";
+import { questBranches } from "../github/claims";
+import { landingCheck } from "./landed";
+import { GitHubWrites } from "./writes";
 import { type Snapshot, snapshot } from "./tree";
 
 export interface ClaimDependencies {
 	/** Called only when the remote is on GitHub, so other forges need no token. */
 	github(): GitHubDependencies;
+	/** The forge answering reads of a repository on GitHub, such as its claims and open PRs. */
+	forge(repository: Repository): Promise<Forge>;
+	/** Kixel Quest, for remotes on it; without it, no remote is. */
+	kixel?: {
+		/** The repository `url` on Kixel Quest names, or null for none. */
+		hosted(url: string): Repository | null;
+		/** Kixel Quest's backend for a repository it hosts, which both reads and writes there. */
+		forge(repository: Repository): Forge & ForgeWrites;
+	};
 	warn(message: string): void;
+}
+
+/** The forge an upstream's PRs and claims live on, GitHub or Kixel Quest. */
+export interface Hosting {
+	/** Where PRs open and claims are checked. */
+	repository: Repository;
+	/** The repository the remote pushes to: `repository` itself, or a fork. */
+	head: Repository;
+	defaultBranch: string;
+	/** Where this checkout's tree sits in the repository: empty at the top level, else a path ending in `/`. */
+	prefix: string;
+	/** The forge answering reads of `repository`, chosen on first use. */
+	forge(): Promise<Forge>;
+	/** The forge taking writes to `repository`, created on first use. */
+	writes(): ForgeWrites;
+	/** A link to `path` on the default branch, where the forge shows files. */
+	link(path: string): string | null;
 }
 
 /**
@@ -30,16 +52,10 @@ export interface Upstream {
 	git: string;
 	/** The URL the remote pushes to, where a claim branch is pushed. Read from git on first use. */
 	readonly push: string;
-	github: {
-		client: GitHub;
-		/** Where PRs open and claims are checked. */
-		repository: Repository;
-		/** The repository the remote pushes to: `repository` itself, or a fork. */
-		head: Repository;
-		defaultBranch: string;
-		/** Where this checkout's tree sits in the repository: empty at the top level, else a path ending in `/`. */
-		prefix: string;
-	} | null;
+	/** The forge PRs open on, or null off GitHub and Kixel Quest. */
+	hosting: Hosting | null;
+	/** `hosting` on GitHub, with its client for what only GitHub answers; null elsewhere. */
+	github: (Hosting & { client: GitHub }) | null;
 }
 
 /**
@@ -47,19 +63,37 @@ export interface Upstream {
  * up to each parent whose default branch holds the quest tree's README, and
  * stops at the first parent without one; a failed lookup fails rather than
  * stops the walk. An ancestor is reached with the same URL scheme as the
- * remote. Off GitHub, the remote is its own upstream. The head repository is
- * where the remote pushes, which may be a fork even when it fetches from upstream.
+ * remote. Off GitHub, the remote is its own upstream, and on Kixel Quest, which
+ * keeps no forks, it is the repository there. The head repository is where the
+ * remote pushes, which may be a fork even when it fetches from upstream.
  */
 export async function upstream(root: string, remote: Remote, deps: ClaimDependencies): Promise<Upstream> {
-	const source = remoteRepository(remote);
-	if (source.repository === null)
+	const kixel = deps.kixel;
+	const source = remoteHost(remote, kixel ? (url) => kixel.hosted(url) : null);
+	if (source?.forge !== "github") {
+		const repository = source?.repository ?? null;
+		let hosted: (Forge & ForgeWrites) | undefined;
+		const forge = () => (hosted ??= kixel!.forge(repository!));
 		return {
 			git: remote.name,
 			get push() {
 				return remote.used().push;
 			},
+			hosting:
+				repository === null
+					? null
+					: {
+							repository,
+							head: repository,
+							defaultBranch: defaultBranch(root, remote.name),
+							prefix: git(root, ["rev-parse", "--show-prefix"]),
+							forge: async () => forge(),
+							writes: forge,
+							link: () => null,
+						},
 			github: null,
 		};
+	}
 
 	const client = new GitHub(deps.github());
 	const self = await repositoryInfo(client, source.repository);
@@ -73,14 +107,36 @@ export async function upstream(root: string, remote: Remote, deps: ClaimDependen
 	// The README where this checkout's tree sits, which may be below the top level.
 	const prefix = git(root, ["rev-parse", "--show-prefix"]);
 	const up = await base(client, self, prefix);
+	let forge: Promise<Forge> | undefined;
+	let writes: ForgeWrites | undefined;
+	const { owner, repo } = up.repository;
+	const github = {
+		client,
+		repository: up.repository,
+		head,
+		defaultBranch: up.defaultBranch,
+		prefix,
+		forge: () => (forge ??= deps.forge(up.repository)),
+		writes: () => (writes ??= new GitHubWrites(deps.github(), landingCheck(root))),
+		link: (path: string) =>
+			`https://github.com/${owner}/${repo}/blob/${up.defaultBranch}/${encodeURI(prefix + path)}`,
+	};
 	return {
 		// Reach an ancestor the way the remote is reached, so the same credentials work.
 		git: up === self ? remote.name : /^https:/.test(source.url) ? up.https : up.ssh,
 		get push() {
 			return remote.used().push;
 		},
-		github: { client, repository: up.repository, head, defaultBranch: up.defaultBranch, prefix },
+		hosting: github,
+		github,
 	};
+}
+
+/** The branch `remote`'s HEAD names, as `git ls-remote --symref` reports it. */
+export function defaultBranch(root: string, remote: string): string {
+	const match = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(git(root, ["ls-remote", "--symref", remote, "HEAD"]));
+	if (match === null) throw new Error(`${remote} names no default branch`);
+	return match[1]!;
 }
 
 type Info = Awaited<ReturnType<typeof repositoryInfo>>;
@@ -145,7 +201,7 @@ function listRemote(root: string, remote: string, patterns: string[]): Map<strin
 /**
  * Which of `branches` someone holds: pushed to `remote` or its upstream, or the
  * head of an open PR in either. Without the remote it warns and checks nothing;
- * off GitHub it checks branches only.
+ * off GitHub and Kixel Quest it checks branches only.
  */
 export async function claims(
 	root: string,
@@ -158,8 +214,8 @@ export async function claims(
 }
 
 /**
- * The upstream of `remote` for reading claims, warning when off GitHub that
- * only branches count. Without the remote it warns and returns `null`.
+ * The upstream of `remote` for reading claims, warning when off GitHub and
+ * Kixel Quest that only branches count. Without the remote it warns and returns `null`.
  */
 export async function reach(root: string, name: string, deps: ClaimDependencies): Promise<Upstream | null> {
 	const remote = readRemote(root, name);
@@ -168,14 +224,15 @@ export async function reach(root: string, name: string, deps: ClaimDependencies)
 		return null;
 	}
 	const up = await upstream(root, remote, deps);
-	if (up.github === null) deps.warn(`${name} is not on GitHub, so only its branches were checked for claims`);
+	if (up.hosting === null)
+		deps.warn(`${name} is not on GitHub or Kixel Quest, so only its branches were checked for claims`);
 	return up;
 }
 
 /**
- * Which of `branches` someone holds, as {@link githubHeld} decides it on GitHub. `tips` are the
- * upstream's `quest/*` branches, when already read; the fork's are read through git too. Off GitHub,
- * every branch pushed upstream holds its quest.
+ * Which of `branches` someone holds, as the upstream's forge decides it. `tips` are the upstream's
+ * `quest/*` branches, when already read; the fork's are read through git too. Off GitHub and Kixel
+ * Quest, every branch pushed upstream holds its quest.
  */
 export async function held(
 	root: string,
@@ -183,7 +240,7 @@ export async function held(
 	branches: string[],
 	tips: Map<string, string> = remoteBranches(root, up.git),
 ): Promise<Holdings> {
-	if (up.github === null)
+	if (up.hosting === null)
 		return {
 			claims: [...new Set(branches)]
 				.sort()
@@ -191,21 +248,19 @@ export async function held(
 				.map((branch) => ({ branch, url: null, pull: null })),
 			landed: new Map(),
 		};
-	const { client, repository, head } = up.github;
-	return githubHeld(
-		client,
-		{
-			upstream: { repository, tips },
-			...(same(head, repository) ? {} : { fork: { repository: head, tips: remoteBranches(root, up.push) } }),
-		},
-		branches,
-	);
+	const { repository, head } = up.hosting;
+	const forge = await up.hosting.forge();
+	const sources = {
+		upstream: { repository, tips },
+		...(same(head, repository) ? {} : { fork: { repository: head, tips: remoteBranches(root, up.push) } }),
+	};
+	return (await forge.held(sources, branches)).value;
 }
 
 /**
  * The open drafts in the upstream of the remote `name`, from any head
- * repository. Reading them needs GitHub, so without the remote, off GitHub,
- * or when GitHub cannot be reached or refuses, it warns that they were
+ * repository. Reading them needs a forge, so without the remote, off GitHub
+ * and Kixel Quest, or when the forge cannot be reached or refuses, it warns that they were
  * skipped and returns none, leaving the caller the quest tree.
  */
 export async function openDrafts(root: string, name: string, deps: ClaimDependencies): Promise<OpenPull[]> {
@@ -216,11 +271,11 @@ export async function openDrafts(root: string, name: string, deps: ClaimDependen
 	}
 	try {
 		const up = await upstream(root, remote, deps);
-		if (up.github === null) {
-			deps.warn(`${name} is not on GitHub, so draft PRs were skipped`);
+		if (up.hosting === null) {
+			deps.warn(`${name} is not on GitHub or Kixel Quest, so draft PRs were skipped`);
 			return [];
 		}
-		const pulls = await openPullRequests(up.github.client, up.github.repository);
+		const pulls = (await (await up.hosting.forge()).pulls(up.hosting.repository)).value;
 		return pulls.filter((pull) => pull.draft).sort((a, b) => a.number - b.number);
 	} catch (error) {
 		deps.warn(`draft PRs were skipped: ${error instanceof Error ? error.message : String(error)}`);

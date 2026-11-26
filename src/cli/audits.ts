@@ -4,10 +4,15 @@
 
 import { AUDITS } from "../core";
 import running from "../../assets/audit.md";
+import code from "../../assets/audits/code.md";
+import cost from "../../assets/audits/cost.md";
 import deps from "../../assets/audits/deps.md";
+import docs from "../../assets/audits/docs.md";
+import instructions from "../../assets/audits/instructions.md";
+import tests from "../../assets/audits/tests.md";
 import tree from "../../assets/audits/tree.md";
 
-const DEFINITIONS: Readonly<Record<string, string>> = { deps, tree };
+const DEFINITIONS: Readonly<Record<string, string>> = { code, cost, deps, docs, instructions, tests, tree };
 
 /** What `quest audit <name>` prints: its definition, then how every audit runs and recurs; undefined for one quest does not ship. */
 export function audit(name: string): string | undefined {

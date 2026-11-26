@@ -14,7 +14,7 @@
     # weekly nix update bumps it in its own PR, without the cooldown; bump it by
     # hand with `nix flake update quest-pinned`.
     quest-pinned = {
-      url = "github:moq-dev/quest";
+      url = "github:kixel-ai/quest";
       flake = false;
     };
     # token-max, which reads and prices `quest usage`'s sessions; the lock pins it so its JSON stays what the

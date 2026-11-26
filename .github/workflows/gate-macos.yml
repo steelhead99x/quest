@@ -1,26 +1,14 @@
 name: Gate (macOS)
 
-# The gate owns commands through a process group on macOS, which Check's Linux
-# suite does not reach. Pull requests that change the gate run its tests here,
-# and Release calls this before publishing. It is not a required check, so a
-# slow hosted macOS queue holds back no merge.
+# The gate owns commands through a process group on macOS, which the merge
+# queue's Linux suite does not reach. Release calls this before publishing a
+# release that changes what ships; dispatch it to check a branch.
 on:
-  pull_request:
-    paths:
-      - .github/workflows/gate-macos.yml
-      - src/cli/gate.ts
-      - src/cli/supervise.ts
-      - src/cli/interrupt.ts
-      - test/gate.test.ts
   workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: gate-macos-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gate:

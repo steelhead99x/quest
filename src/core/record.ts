@@ -1,4 +1,5 @@
 import { type BreakageRecord, breakageKey, parseBreakage } from "./breakage";
+import { isCommandName } from "./command";
 import { parser } from "./parse";
 
 // The record of one agent session that `quest` sends to Kixel Code, which stores exactly this shape, and that
@@ -32,6 +33,42 @@ export interface SessionWait {
 	end: string;
 	/** For a `pull` or `merge-queue` wait, the first activity `quest wait` printed, as `checks:passed`; null on timeout. */
 	until: string | null;
+}
+
+/** One outermost `quest gate` run, its instants ISO 8601 UTC. */
+export interface GatedRun {
+	/** The programs it ran, as `commandName` keeps them: no arguments. */
+	command: string;
+	/** When it asked to be admitted. */
+	start: string;
+	/** When it was admitted; null for a run that ended while queued. */
+	admitted: string | null;
+	end: string;
+	/** The CPU milliseconds its command used; null where the gate ran it outside a systemd scope. */
+	cpu: number | null;
+}
+
+/** One shell call a session's harness ran, its instants ISO 8601 UTC. */
+export interface ShellCall {
+	/** The programs it ran, as `commandName` keeps them: no arguments. */
+	command: string;
+	start: string;
+	/** When it returned, or for one the harness ran in the background, when it was first seen finished. */
+	end: string;
+}
+
+/**
+ * Shell calls that overlapped in one cgroup, and the CPU milliseconds it used from the first one's start to the
+ * last one's end: what ran outside `quest gate`, and the harness itself meanwhile. A group shared by sessions in
+ * one cgroup, as a sub-agent's with its parent's, is in each of their records, listing only that session's calls.
+ */
+export interface ShellGroup {
+	/** The session's calls in it, oldest first. */
+	calls: ShellCall[];
+	/** Null where the cgroup held more than the session, as a terminal's may, or none counts it, as on macOS. */
+	cpu: number | null;
+	/** Whether calls of other sessions in its cgroup ran in it too, sharing its CPU. */
+	shared: boolean;
 }
 
 /** One model and effort's tokens in a session, and their cost at API list price in USD. */
@@ -133,6 +170,13 @@ export interface SessionRecord {
 	end: string;
 	/** Its timed waits, oldest first; null when they could not be read, as for a session on another host. */
 	waits: SessionWait[] | null;
+	/** Its outermost `quest gate` runs, oldest first; null for a session on another host. */
+	gated: GatedRun[] | null;
+	/**
+	 * Its shell calls, grouped where they overlapped, from the groups that started since the window's start, oldest
+	 * first; null for a session on another host.
+	 */
+	shell: ShellGroup[] | null;
 	/** Where the rest of its time went; null until every step is classified, and for a session on another host. */
 	split: TimeSplit | null;
 }
@@ -175,12 +219,16 @@ export function parseRecord(value: unknown): SessionRecord {
 		"start",
 		"end",
 		"waits",
+		"gated",
+		"shell",
 		"split",
 	];
 	exact(value, keys, "the record");
 	const pulls = Array.isArray(value.pulls) ? value.pulls : fail("pulls");
 	const models = Array.isArray(value.models) ? value.models : fail("models");
 	const waits = value.waits === null ? null : Array.isArray(value.waits) ? value.waits : fail("waits");
+	const gated = value.gated === null ? null : Array.isArray(value.gated) ? value.gated : fail("gated");
+	const shell = value.shell === null ? null : Array.isArray(value.shell) ? value.shell : fail("shell");
 	const repository = ownerRepo(value.repository, "repository");
 	const quest = maybe(value.quest, "quest");
 	if (quest !== null && !/^quest\/.+\.md$/.test(quest)) fail("quest is not a quest path");
@@ -226,12 +274,63 @@ export function parseRecord(value: unknown): SessionRecord {
 					fail(`a ${wait.kind} wait names what ended it`);
 				return wait;
 			}) ?? null,
+		gated: gated?.map(parseGated) ?? null,
+		shell: shell?.map(parseGroup) ?? null,
 		split: value.split === null ? null : parseSplit(value.split),
 	};
 	if (new Set(record.pulls).size !== record.pulls.length) fail("a PR listed twice");
 	if (record.split !== null && record.waits === null) fail("a split without the waits it leaves out");
 	if (Date.parse(record.end) < Date.parse(record.start)) fail("it ends before it starts");
 	return record;
+}
+
+/** Program names as `commandName` keeps them, so no record carries a command's arguments. */
+function command(value: unknown, field: string): string {
+	const name = text(value, field);
+	return isCommandName(name) ? name : fail(`${field} is not program names alone`);
+}
+
+/** CPU milliseconds, or null. */
+const cpu = (value: unknown, field: string): number | null => (value === null ? null : count(value, field));
+
+/** A gated run, failing on an admission outside its run. */
+function parseGated(value: unknown): GatedRun {
+	if (!isObject(value)) return fail("a gated run");
+	exact(value, ["command", "start", "admitted", "end", "cpu"], "a gated run");
+	const run: GatedRun = {
+		command: command(value.command, "a gated command"),
+		start: instant(value.start, "a gated run's start"),
+		admitted: value.admitted === null ? null : instant(value.admitted, "a gated run's admission"),
+		end: instant(value.end, "a gated run's end"),
+		cpu: cpu(value.cpu, "a gated run's CPU"),
+	};
+	const [start, end] = [Date.parse(run.start), Date.parse(run.end)];
+	const admitted = run.admitted === null ? start : Date.parse(run.admitted);
+	if (admitted < start || end < admitted) fail("a gated run's instants are out of order");
+	if (run.admitted === null && run.cpu !== null) fail("a gated run that never started used CPU");
+	return run;
+}
+
+/** A shell group, failing on one without calls or a call that ends before it starts. */
+function parseGroup(value: unknown): ShellGroup {
+	if (!isObject(value)) return fail("a shell group");
+	exact(value, ["calls", "cpu", "shared"], "a shell group");
+	if (!Array.isArray(value.calls) || value.calls.length === 0) return fail("a shell group's calls");
+	return {
+		calls: value.calls.map((c: unknown) => {
+			if (!isObject(c)) return fail("a shell call");
+			exact(c, ["command", "start", "end"], "a shell call");
+			const call: ShellCall = {
+				command: command(c.command, "a shell command"),
+				start: instant(c.start, "a shell call's start"),
+				end: instant(c.end, "a shell call's end"),
+			};
+			if (Date.parse(call.end) < Date.parse(call.start)) fail("a shell call ends before it starts");
+			return call;
+		}),
+		cpu: cpu(value.cpu, "a shell group's CPU"),
+		shared: flag(value.shared, "whether a shell group is shared"),
+	};
 }
 
 /** A split, failing on a missing or unknown category, a disagreement past what was checked, or a multi-line note. */

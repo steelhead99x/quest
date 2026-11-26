@@ -28,7 +28,7 @@ export const REFERENCE_MARKER = "Quests: ";
  * whose `quest setup` hook already printed the rules skips the command.
  */
 export const REFERENCE_LINE =
-	"Quests: before any work, run `quest context` and follow it, or read https://github.com/moq-dev/quest/blob/main/docs/context.md where `quest` is not installed, unless this session already holds its rules.";
+	"Quests: before any work, run `quest context` and follow it, or read https://github.com/kixel-ai/quest/blob/main/docs/context.md where `quest` is not installed, unless this session already holds its rules.";
 
 /**
  * The skill directories Claude Code and other agents (Codex) read, each with
@@ -151,6 +151,9 @@ export function planInit(repo: Checkout, stubs: readonly Stub[], options: { goal
 	return changes;
 }
 
+/** A milestone's README, capturing its number. */
+const MILESTONE = /^quest\/m(0|[1-9]\d*)\/README\.md$/;
+
 /**
  * The stubs for every shipped audit no quest names and the root README does
  * not skip, with any milestone they need. Each first run waits for the work
@@ -161,18 +164,18 @@ export function planInit(repo: Checkout, stubs: readonly Stub[], options: { goal
  * when there is none, and are ready at once.
  */
 export function planAudits(repo: Checkout): InitChange[] {
-	const docs = questDocs(repo);
+	const { paths, docs } = questDocs(repo);
 	const done = covered(docs, "quest/README.md");
 	const missing = AUDITS.filter((audit) => !done.has(audit.name));
 	if (missing.length === 0) return [];
 
 	const milestones = new Map<number, Doc>();
 	for (const doc of docs) {
-		const match = /^quest\/m(0|[1-9]\d*)\/README\.md$/.exec(doc.path);
+		const match = MILESTONE.exec(doc.path);
 		if (match) milestones.set(Number(match[1]), doc);
 	}
 	const open = [...milestones]
-		.filter(([, milestone]) => has(milestone, "Required") || docs.some((d) => holds(milestone.path, d.path)))
+		.filter(([, milestone]) => has(milestone, "Required") || paths.some((path) => holds(milestone.path, path)))
 		.map(([number]) => number);
 	const after = open.length > 0 ? Math.min(...open) : milestones.size > 0 ? Math.min(...milestones.keys()) : 0;
 	const next = after + 1;
@@ -197,7 +200,10 @@ export function planAudits(repo: Checkout): InitChange[] {
 		// No quest names the audit, so whatever sits here is other work, and its branch would nest a stub's.
 		for (const taken of [path, path.slice(0, -".md".length)])
 			if (repo.lstat(taken) !== null)
-				refuse(taken, `is in the way of the \`${audit.name}\` audit's stub, which no quest names`);
+				throw new InitRefused(
+					taken,
+					`${taken} is in the way of the \`${audit.name}\` audit's stub, which no quest names; move it, or, if the maintainer declines the audit, list \`${audit.name}\` under \`## Skipped audits\` in \`quest/README.md\`, before running \`quest init\``,
+				);
 		changes.push({ path, content: auditStub(audit, open.length > 0 ? after : null) });
 	}
 	return changes;
@@ -220,18 +226,30 @@ function auditStub(audit: Audit, after: number | null): string {
 	);
 }
 
-/** Every quest document under `quest/`, as `quest check` collects them: symlinked files are read, symlinked directories skipped. */
-function questDocs(repo: Checkout): Doc[] {
+/**
+ * Every quest document's path under `quest/`, as `quest check` collects them (symlinked files are read,
+ * symlinked directories skipped), and the documents an audit plan reads: the milestone READMEs and any
+ * whose text, without emphasis, code, and escape marks, holds either heading's name, so a decorated or
+ * setext heading still counts. Parsing the rest would take a 500-document tree's hook from 0.1s to 0.5s.
+ */
+function questDocs(repo: Checkout): { paths: string[]; docs: Doc[] } {
+	const paths: string[] = [];
 	const docs: Doc[] = [];
 	const walk = (dir: string) => {
 		for (const name of repo.list(dir)) {
 			const path = `${dir}/${name}`;
 			if (repo.lstat(path) === "dir") walk(path);
-			else if (isQuest(path) && repo.stat(path) === "file") docs.push(parse(path, repo.read(path)));
+			else if (isQuest(path) && repo.stat(path) === "file") {
+				paths.push(path);
+				const text = repo.read(path);
+				const plain = text.replace(/[*_`\\]/g, "");
+				if (MILESTONE.test(path) || plain.includes("Audit") || /Skipped\s+audits/.test(plain))
+					docs.push(parse(path, text));
+			}
 		}
 	};
 	if (repo.stat("quest") === "dir") walk("quest");
-	return docs;
+	return { paths, docs };
 }
 
 /** Check an install destination and its parents before any writes, following valid symlinks. */

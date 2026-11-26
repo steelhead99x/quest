@@ -18,8 +18,8 @@ export interface Simple {
 	argv: string[];
 	redirects: Redirect[];
 	stdin?: string;
-	/** The words in `argv` holding a parameter expansion or command substitution, whose text only the shell knows. */
-	expanded?: string[];
+	/** The indices in `argv` of the words holding a parameter expansion or command substitution, whose text only the shell knows. */
+	expanded?: number[];
 	/** Whether `stdin` holds an expansion, from a here-string or a here-document with an unquoted delimiter. */
 	stdinExpanded?: boolean;
 	/** Whether starting the command runs another: a command substitution in a word, a redirection, or a here-document. */
@@ -50,8 +50,8 @@ export function parse(line: string): Simple[] {
 	const endWord = () => {
 		if (word === null) return;
 		if (redirect === null) {
+			if (expands) (command.expanded ??= []).push(command.argv.length);
 			command.argv.push(word);
-			if (expands) (command.expanded ??= []).push(word);
 		} else if (redirect === "<<" || redirect === "<<-")
 			heredocs.push({ command, delimiter: word, tabs: redirect === "<<-", literal: quoted, stdin: !fd });
 		else if (redirect === "<<<") {

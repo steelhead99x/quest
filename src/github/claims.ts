@@ -1,59 +1,19 @@
 // Who holds a quest on GitHub: its claim branch upstream or in the head fork, unless that branch is a
 // merged PR's head, or the earliest open PR from a branch of that name in either.
-import { handedBack, landed } from "../core";
-import { type GitHub, type Repository, object, repositoryPath, string } from "./client";
-
-/** An open PR, from any head repository, as the claim checks read it. */
-export interface OpenPull {
-	number: number;
-	url: string;
-	branch: string;
-	/** The head repository as `owner/repo`, or `null` once a fork is deleted. */
-	head: string | null;
-	draft: boolean;
-	/** Epoch milliseconds. The earliest open PR on a branch holds the claim. */
-	created: number;
-	/** Epoch milliseconds of the last push, comment, or edit. */
-	updated: number;
-	/** Its body has a `## Waiting` section, so it waits on the maintainer. */
-	handedBack: boolean;
-	body: string;
-}
-
-/** A held quest branch, and the open PR from it if there is one. */
-export interface Claim {
-	branch: string;
-	/** The PR holding the claim: the earliest open one. */
-	url: string | null;
-	pull: OpenPull | null;
-}
-
-/** Which branches someone holds, and which landed branches a new claim replaces. */
-export interface Holdings {
-	/** Sorted by branch. */
-	claims: Claim[];
-	/**
-	 * Branches in the head fork, or upstream without one, whose tip is the head of a merged PR, by
-	 * that tip. Their work landed, so they hold nothing and a claim may replace them.
-	 */
-	landed: Map<string, string>;
-}
-
-/** A repository claim branches live in, and its `quest/*` branch tips when the caller already read them. */
-export interface Source {
-	repository: Repository;
-	tips?: Map<string, string>;
-}
-
-/** Where claims live: the upstream repository, and the fork a contributor pushes claims to, if any. */
-export interface Sources {
-	upstream: Source;
-	/** Absent when claims are pushed upstream. */
-	fork?: Source;
-}
+import {
+	type Claim,
+	type ClaimSource,
+	type ClaimSources,
+	type Holdings,
+	type OpenPull,
+	type Repository,
+	handedBack,
+	landed,
+} from "../core";
+import { type GitHubReader, object, repositoryPath, string } from "./client";
 
 /** Every open PR in `repository`, from any head repository. */
-export async function openPullRequests(github: GitHub, repository: Repository): Promise<OpenPull[]> {
+export async function openPullRequests(github: GitHubReader, repository: Repository): Promise<OpenPull[]> {
 	const rows = await github.all(`${repositoryPath(repository)}/pulls?state=open&per_page=100`);
 	return rows.map((row) => {
 		const head = object(row.head);
@@ -62,7 +22,9 @@ export async function openPullRequests(github: GitHub, repository: Repository): 
 			number: Number(row.number),
 			url: string(row.html_url),
 			branch: string(head.ref),
+			base: string(object(row.base).ref),
 			head: repo === null ? null : string(repo.full_name),
+			...(typeof head.sha === "string" ? { sha: head.sha } : {}),
 			draft: row.draft === true,
 			created: Date.parse(string(row.created_at)),
 			updated: Date.parse(string(row.updated_at)),
@@ -86,7 +48,7 @@ export function questBranches(refs: Map<string, string>): Map<string, string> {
 }
 
 /** The `quest/*` branches of `repository`, with their tips. */
-export async function claimBranches(github: GitHub, repository: Repository): Promise<Map<string, string>> {
+export async function claimBranches(github: GitHubReader, repository: Repository): Promise<Map<string, string>> {
 	const rows = await github.all(`${repositoryPath(repository)}/git/matching-refs/heads/quest/`);
 	return questBranches(new Map(rows.map((row) => [string(row.ref), string(object(row.object).sha)])));
 }
@@ -97,9 +59,9 @@ export async function claimBranches(github: GitHub, repository: Repository): Pro
  * PR's branch still holds its quest, since that work may be wanted back. A fork's own branches and PRs
  * count, so a claim pushed there is seen before its PR opens. Tips a source leaves out are read here.
  */
-export async function held(github: GitHub, sources: Sources, branches: string[]): Promise<Holdings> {
+export async function held(github: GitHubReader, sources: ClaimSources, branches: string[]): Promise<Holdings> {
 	const { upstream, fork } = sources;
-	const read = async (source: Source) => ({
+	const read = async (source: ClaimSource) => ({
 		repository: source.repository,
 		tips: source.tips ?? (await claimBranches(github, source.repository)),
 	});
@@ -131,7 +93,7 @@ export async function held(github: GitHub, sources: Sources, branches: string[])
 
 /** The URL of the PR from `head`'s `branch` that merged into `repository` with `tip` as its head, or `null`. */
 export async function mergedPull(
-	github: GitHub,
+	github: GitHubReader,
 	repository: Repository,
 	head: Repository,
 	branch: string,

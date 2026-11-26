@@ -9,7 +9,7 @@ Bun release fixes it and Quest's pin includes that release, `remove()` in
 
 ## Plan
 
-- [moq-dev/quest#233](https://github.com/moq-dev/quest/pull/233) found the
+- [kixel-ai/quest#233](https://github.com/kixel-ai/quest/pull/233) found the
   race and worked around it. Its diagnostic runs have the minimal repro: two
   processes `rmSync` the same file on `windows-11-arm` and `windows-2022`.
 - Reported upstream on 2026-11-14 (approved by the user, 2026-10-28) as a

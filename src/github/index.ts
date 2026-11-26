@@ -1,36 +1,18 @@
-// Quest's GitHub readers for a host with no checkout, git, or Node APIs, such as a Worker: a PR's
-// status as `quest status` reads it, and the claims on quest branches as `quest start` decides them.
-// The caller supplies `fetch` and the token through `GitHubDependencies`.
+// Quest's GitHub readers for a host with no checkout, git, or Node APIs, such as a Worker: the forge reads'
+// GitHub backend, a PR's status as `quest status` reads it, the claims on quest branches as `quest start`
+// decides them, and `ago`, the "3 hours ago" formatter. The caller supplies `fetch` and the token through
+// `GitHubDependencies`; the read types are `quest/core`'s.
 
 export {
 	GitHub,
 	GitHubDeadline,
 	type GitHubDependencies,
 	GitHubGraphQLError,
-	type PullRequest,
-	type Repository,
+	type GitHubReadDependencies,
+	GitHubReader,
+	reading,
 } from "./client";
-export {
-	type BaseNeeds,
-	type Check,
-	type Reaction,
-	type Review,
-	type ReviewRecord,
-	type Status,
-	type Needs,
-	type Thread,
-	pullRequestStatus,
-	requiredOf,
-} from "./status";
-export { type HoldFact, type HoldReport } from "./hold";
-export { type Signal } from "./signals";
-export {
-	type Claim,
-	type Holdings,
-	type OpenPull,
-	type Source,
-	type Sources,
-	claimBranches,
-	held,
-	openPullRequests,
-} from "./claims";
+export { GitHubForge } from "./forge";
+export { type BaseNeeds, type Needs, pullRequestStatus, requiredOf } from "./status";
+export { type HoldReport, ago } from "./hold";
+export { claimBranches, held, openPullRequests } from "./claims";

@@ -28,7 +28,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import { type HarnessName, strippedEnvironment } from "../../src/cli/agent";
 import { DEFAULT_SIZE, REVIEWERS } from "../../src/cli/models";
-import { ReviewInputError, claudeFlags, review, reviewerEnvironment, schema } from "../../src/cli/review";
+import { ReviewerUnavailableError, claudeFlags, review, reviewerEnvironment, schema } from "../../src/cli/review";
 
 /** The model a sizeless review runs on `harness`. */
 const modelOf = (harness: HarnessName) => REVIEWERS[DEFAULT_SIZE].find((entry) => entry.harness === harness)!.model;
@@ -294,7 +294,7 @@ async function reviewerIn(home: Home): Promise<NodeJS.ProcessEnv> {
 	try {
 		return await reviewerEnvironment(home.harness, fixture.clone, environment(home));
 	} catch (error) {
-		if (!(error instanceof ReviewInputError)) throw error;
+		if (!(error instanceof ReviewerUnavailableError)) throw error;
 		throw new Error(
 			`${error.message}. The test copies the login file from the user's config home, or else passes ` +
 				`${CREDENTIALS[home.harness]}; a login in the macOS keychain has no file, so export one of those`,
@@ -379,6 +379,9 @@ describe.each(["codex", "claude"] as const)("%s", (harness) => {
 				effort: EFFORT,
 				schema: schema(0),
 				schemaFile: "",
+				root: fixture.clone,
+				ranges: [],
+				env: process.env,
 			};
 			const [program, ...args] = claudeFlags(context);
 			run = spawnSync(program, args, {
@@ -432,6 +435,9 @@ describe.each(["codex", "claude"] as const)("%s", (harness) => {
 				effort: EFFORT,
 				schema: schema(0),
 				schemaFile: "",
+				root: fixture.clone,
+				ranges: [],
+				env: process.env,
 			};
 			const [program, ...args] = claudeFlags(context);
 			run = spawnSync(program, args, {
@@ -478,7 +484,7 @@ async function reviewIn(dir: Home, verify: () => void) {
 	try {
 		outcome = await review(
 			{ root: fixture.clone, base: "origin/main", harness: dir.harness, effort: EFFORT, fresh: true },
-			{ env: environment(dir) },
+			{ env: environment(dir), queue: () => {} },
 		).catch((error: unknown) => error);
 	} finally {
 		clearTimeout(timer);

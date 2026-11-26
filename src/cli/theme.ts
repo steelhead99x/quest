@@ -56,8 +56,8 @@ export class Theme {
 
 	/**
 	 * `quest unblocked <path>`: the quest with its marker, then its status: Ready
-	 * or what blocks it, its `Scheduled` date and `Required` chain, with each
-	 * required epic expanded into the quests it still holds.
+	 * or what blocks it, its `Parked` item, `Scheduled` date, and `Required`
+	 * chain, with each required epic expanded into the quests it still holds.
 	 */
 	blockers(docs: Map<string, Doc>, doc: Doc, found: Blocker[]): string[] {
 		const marker: Marker = found.length === 0 ? "ready" : "blocked";

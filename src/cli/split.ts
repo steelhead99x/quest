@@ -16,7 +16,7 @@ import {
 } from "../core";
 import { eachLine, parseLine } from "./messages";
 import { type Model, SPLITTERS, SPLIT_CHECKERS } from "./models";
-import { type Answer, type Question, ReviewInputError, ReviewLimitError, UnansweredError } from "./review";
+import { type Answer, type Question, ReviewInputError, ReviewerUnavailableError, UnansweredError } from "./review";
 
 /** The categories a model may pick; `idle` is measured, never judged. */
 export const LABELS = SPLIT_CATEGORIES.filter((c) => c !== "idle") as Exclude<SplitCategory, "idle">[];
@@ -520,7 +520,7 @@ export async function labelSession(
 				labeled.checks.push({ from: part.from, labels: check.value.labels });
 				addUsage(labeled.usage, check.spent);
 			} catch (error) {
-				if (!(error instanceof ReviewInputError || error instanceof ReviewLimitError)) throw error;
+				if (!(error instanceof ReviewInputError || error instanceof ReviewerUnavailableError)) throw error;
 				addUsage(labeled.usage, spentBy(error));
 			}
 		}

@@ -9,12 +9,14 @@ went, and the reviewers still run nothing from a reviewed head.
 
 ## Plan
 
+Decided 2026-11-22 (maintainer, `/quest-plan` in [kixel-ai/kixel.quest#104](https://github.com/kixel-ai/kixel.quest/pull/104)): ✅ Kixel Quest reads experiments out itself, putting a decision prompt in the inbox when one reaches its sample, with the tally and its routing chart (rejected: a recurring agent quest; the view only). Once its [readouts](https://github.com/kixel-ai/kixel.quest/blob/main/quest/m0/insight/readouts.md) land, trim this quest to what they do not do, bumping stale model ids and running `just review-sandbox` with the installed CLIs, and delete its tallies and charts (amended 2026-11-23, review of kixel-ai/kixel.quest#104; rejected: deleting it whole, which would leave the sandbox test with no owner); until then, run as below.
+
 Recurring, decided 2026-10-28 (user, /quest-plan of the follow-ups from
-[moq-dev/quest#271](https://github.com/moq-dev/quest/pull/271)) as the
+[kixel-ai/quest#271](https://github.com/kixel-ai/quest/pull/271)) as the
 review harness check. The m0 run was
-[moq-dev/quest#426](https://github.com/moq-dev/quest/pull/426). Extended on
+[kixel-ai/quest#426](https://github.com/kixel-ai/quest/pull/426). Extended on
 2026-11-04 (user, /quest-plan follow-up of
-[moq-dev/quest#487](https://github.com/moq-dev/quest/pull/487)) to audit
+[kixel-ai/quest#487](https://github.com/kixel-ai/quest/pull/487)) to audit
 the size tables of model routing (`src/cli/models.ts`):
 
 - Should the routing audit be its own recurring quest?
@@ -22,7 +24,7 @@ the size tables of model routing (`src/cli/models.ts`):
   - A separate audit owning the tables
   - A separate audit of efforts only
 - When does it run? ✅ First in m0 once routing lands
-  ([moq-dev/quest#584](https://github.com/moq-dev/quest/pull/584)), then
+  ([kixel-ai/quest#584](https://github.com/kixel-ai/quest/pull/584)), then
   each milestone (rejected: each milestone only)
 
 Audit the routing from the records of the PRs merged since the last run,
@@ -42,15 +44,15 @@ checkpoints and outages to count by hand:
 - Move a size to a stronger model or effort where its PRs needed clearly
   more rounds or fixes than the size above, and to a cheaper one where its
   reviews come back clean. Do the same for the review efforts in `src/cli/models.ts`
-  from what later reviews and follow-ups found that a review missed, and score each
-  reviewer change with `quest eval run` before recommending it (`README.md`'s Score the
-  reviewer). Record the tallies in the next run's Plan as its baseline.
+  from what later reviews and follow-ups found that a review missed: the
+  `## Caused by` escapes `quest usage` lists against each culprit's
+  reviewers. Record the tallies in the next run's Plan as its baseline.
 - Recommend each change to a list's order, harness, or effort to the
   maintainer with its tally, as a decision in the PR, rather than changing
   it unasked. Replacing a stale model id with the same vendor's newer one,
   below, needs no decision, as this check always did.
 - Chart cost against quality for every writer and reviewer cell, as decided
-  2026-11-11 (user, /quest-plan, moq-dev/quest#642's follow-ups), so a
+  2026-11-11 (user, /quest-plan, kixel-ai/quest#642's follow-ups), so a
   routing change is read off the frontier rather than tables. The agent
   running the check makes the charts itself, from the saved
   `quest usage --since <date> --json` (with `--ssh` for each host that runs
@@ -58,7 +60,7 @@ checkpoints and outages to count by hand:
   run, and no chart code goes into `quest`. It draws them as Mermaid
   charts in its PR body, which GitHub renders and any harness can write
   (user, 2026-11-14, /quest-run on
-  [moq-dev/quest#721](https://github.com/moq-dev/quest/pull/721); rejected:
+  [kixel-ai/quest#721](https://github.com/kixel-ai/quest/pull/721); rejected:
   images in a secret gist, a claude.ai page made by hand). Mermaid's
   quadrant charts scale both axes to 0-1, so each title gives the scales
   and each point's label carries its PR count. The body also puts every
@@ -127,9 +129,9 @@ checkpoints and outages to count by hand:
   and baseline first: its shadow reviews and writer A/B measure the cells
   that observational tallies cannot separate.
 - Baseline from m0's routing audit
-  ([moq-dev/quest#584](https://github.com/moq-dev/quest/pull/584)): the 25
+  ([kixel-ai/quest#584](https://github.com/kixel-ai/quest/pull/584)): the 25
   PRs merged from 2026-11-07T22:30:45Z, when routing landed in
-  [moq-dev/quest#558](https://github.com/moq-dev/quest/pull/558), to
+  [kixel-ai/quest#558](https://github.com/kixel-ai/quest/pull/558), to
   2026-11-09T17:00Z, by GitHub's `merged_at`, with their records from
   `quest usage --since 2026-11-06 --json`. `quest usage` selects by update
   time with open PRs included, so filter its PRs by merge time. Writers on
@@ -143,10 +145,10 @@ checkpoints and outages to count by hand:
     0 fixed. No PR names a routed PR under `## Caused by`, so no review
     miss showed, and no outage skipped a quest.
   - Unfinished then, not counted: open
-    [moq-dev/quest#583](https://github.com/moq-dev/quest/pull/583),
-    [moq-dev/quest#586](https://github.com/moq-dev/quest/pull/586), and
-    [moq-dev/quest#588](https://github.com/moq-dev/quest/pull/588), and
-    [moq-dev/quest#553](https://github.com/moq-dev/quest/pull/553) (M,
+    [kixel-ai/quest#583](https://github.com/kixel-ai/quest/pull/583),
+    [kixel-ai/quest#586](https://github.com/kixel-ai/quest/pull/586), and
+    [kixel-ai/quest#588](https://github.com/kixel-ai/quest/pull/588), and
+    [kixel-ai/quest#553](https://github.com/kixel-ai/quest/pull/553) (M,
     merged 2026-11-09T17:33Z after a hand-back). Count those that merged
     in m1's run.
   - Too thin (0-4 PRs per cell) to move a size; no table changed. Watch
@@ -166,7 +168,7 @@ checkpoints and outages to count by hand:
       (34.7 against 46.3) for $0.006 less a task.
   - Changed again (maintainer, 2026-11-11): XS writes on Sonnet high
     instead of Haiku xhigh, since two Haiku XS agents in a row on
-    [moq-dev/quest#643](https://github.com/moq-dev/quest/pull/643) died
+    [kixel-ai/quest#643](https://github.com/kixel-ai/quest/pull/643) died
     refilling context right after compaction: Haiku 5.5 bills 5x past 100k
     input, so the maintainer caps its auto-compact window there, barely above an
     agent's 40-60k fixed load. Sonnet 5.5's price is flat over its 1M
@@ -188,19 +190,19 @@ checkpoints and outages to count by hand:
     [video](https://www.youtube.com/watch?v=XtykeVoSmP8) estimates about
     $3k a month of Fable against $14k of Opus on the $200 plan). XS stays Sonnet high, since `quest usage` had no
     Sonnet medium runs to compare. The
-    writer A/B ([moq-dev/quest#720](https://github.com/moq-dev/quest/pull/720)) tests each change
+    writer A/B ([kixel-ai/quest#720](https://github.com/kixel-ai/quest/pull/720)) tests each change
     against its alternative, Fable medium on XL included; tally the S cell
     fresh.
 - Compare both tables' models (in `src/cli/models.ts`) with each vendor's current models: the newest
   model of each tier the tables pin. Bump any that are stale, and check that both CLIs
   accept the new ids and the pinned efforts. `--deep` and its strongest-model
   tier were dropped in
-  [moq-dev/quest#361](https://github.com/moq-dev/quest/pull/361).
+  [kixel-ai/quest#361](https://github.com/kixel-ai/quest/pull/361).
   - The review efforts follow the PR's size since
-    [moq-dev/quest#493](https://github.com/moq-dev/quest/pull/493) (user,
+    [kixel-ai/quest#493](https://github.com/kixel-ai/quest/pull/493) (user,
     2026-11-04): Sol medium, medium, high, xhigh, and xhigh for XS to XL
     (user, 2026-11-11). It restores the efforts the
-    [token waste](/quest/m0/token-waste/README.md) audit lowered to low,
+    token waste audit lowered to low,
     medium, medium, high, and xhigh on 2026-11-05, raising XS, M, and L. Opus
     low, low, medium, high, and xhigh when Sol wrote the code (agent's choice).
     They replaced Codex `xhigh` and Claude `high` (maintainer, 2026-11-03), for
@@ -214,7 +216,7 @@ checkpoints and outages to count by hand:
     the frontier `gpt-6-astra`. Neither pin changed.
   - Check that the pinned Claude Code maps the Claude id to each cloud
     provider. `quest review` keeps Bedrock, Vertex and Foundry routing
-    ([moq-dev/quest#424](https://github.com/moq-dev/quest/pull/424)) but
+    ([kixel-ai/quest#424](https://github.com/kixel-ai/quest/pull/424)) but
     strips `ANTHROPIC_MODEL`, so the pin must resolve on each route.
     Claude Code 2.1.316's model catalog lists `claude-opus-5-5` with
     `provider_ids` (Bedrock `us.anthropic.claude-opus-5-5`; Vertex and
@@ -235,9 +237,9 @@ checkpoints and outages to count by hand:
   - Claude Code draws its status line only in an interactive session, so the
     planted `statusLine` has no control. Check whether print mode runs it now.
   - Codex reads a linked worktree's hooks from the main checkout's
-    `.codex/hooks.json`. In m0 neither the land fixer (`src/cli/land-fix.ts`,
-    which passes `--ignore-user-config`) nor `quest agent` used Codex hooks,
-    and `quest init` installs none. Recheck if either starts to.
+    `.codex/hooks.json`. In m0 `quest agent` used no Codex hooks, the land
+    fixer (`src/cli/land-fix.ts`) runs Claude Code, not Codex, and
+    `quest init` installs none. Recheck if either starts to.
 - The PR that finishes this run creates the next milestone's run the same
   way: in that milestone's directory, requiring this milestone's README,
   carrying forward the model ids and efforts it found, the routing tallies

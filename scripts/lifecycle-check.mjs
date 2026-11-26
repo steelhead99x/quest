@@ -25,7 +25,7 @@ const write = (root, path, text) => {
 };
 const read = (root, path) => readFileSync(join(root, path), "utf8");
 const assertFile = (root, path, expected) => assert.equal(read(root, path), expected, `user content changed: ${path}`);
-const skills = ["complete", "delete", "export", "import", "iterate", "merge", "plan", "run", "spawn", "start"];
+const skills = ["afk", "import", "iterate", "merge", "plan", "review", "run", "start"];
 const destinations = [".claude/skills", ".agents/skills"];
 try {
 	// Run the caller's binary in place, so the cleanup below never deletes an executable it just ran:
@@ -91,7 +91,10 @@ try {
 		// What the stubs call prints from the bundled assets.
 		for (const skill of skills) assert.match(run(root, "skill", skill), /\n# Quest guide\n\n## /);
 		// Init plants a stub per audit, and the stub names a definition the binary prints.
-		for (const audit of ["tree", "deps"]) {
+		for (const audit of run(root, "audit")
+			.trim()
+			.split("\n")
+			.map((line) => line.split(" - ")[0])) {
 			assert.match(read(root, `quest/m1/audit-${audit}.md`), new RegExp(`\n## Audit\n\n- ${audit}\n`));
 			assert.match(run(root, "audit", audit), /\n# Running an audit\n/);
 		}
@@ -106,7 +109,7 @@ try {
 		run(root, "check");
 		assert.equal(
 			run(root, "unblocked"),
-			"1\tquest/m0/one.md\n0\tquest/m1/audit-deps.md\n0\tquest/m1/audit-tree.md\n",
+			"1\tquest/m0/one.md\n0\tquest/m1/audit-code.md\n0\tquest/m1/audit-cost.md\n0\tquest/m1/audit-deps.md\n0\tquest/m1/audit-docs.md\n0\tquest/m1/audit-instructions.md\n0\tquest/m1/audit-tests.md\n0\tquest/m1/audit-tree.md\n",
 		);
 		assert.equal(run(root, "unblocked", join(root, "quest", "m0", "one.md")), "");
 		assert.equal(run(root, "unblocked", join("quest", "m0", "one.md")), "");

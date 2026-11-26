@@ -2,7 +2,8 @@
 // thread, and any review whose
 // body opens with `Automated review by <name>`, as a reviewer posting under a person's account does. A finding is a
 // review thread one opens, or a `[P<n>]` line in its review body; whoever answers it says whether it was taken.
-import { type GitHub, type ObjectValue, type Repository, array, object } from "./client";
+import { type GitHubReader, type ObjectValue, array, object } from "./client";
+import type { Repository } from "../core";
 
 /** One online reviewer's record on one PR. */
 export interface OnlineReview {
@@ -53,11 +54,11 @@ export function bodyFindings(body: string): { title: string; key: string }[] {
 	});
 }
 
-const THREAD_COMMENT = "author { __typename login } authorAssociation body url pullRequestReview { id }";
+const THREAD_COMMENT = "author { __typename login } authorAssociation body createdAt url pullRequestReview { id }";
 const FIELDS = {
 	reviews: "id url state author { __typename login } authorAssociation body submittedAt commit { oid }",
 	reviewThreads:
-		"id isResolved resolvedBy { __typename login } " +
+		"id isResolved isOutdated path line originalLine resolvedBy { __typename login } " +
 		`comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { ${THREAD_COMMENT} } }`,
 	comments: "author { __typename login } authorAssociation body createdAt url",
 	// Each edit's `diff` is the whole body as that edit left it, so the earliest one is the body the PR opened with.
@@ -86,7 +87,7 @@ export type Activity = Record<Exclude<Connection, "userContentEdits">, ObjectVal
 
 /** Each PR's reviews, review threads, and comments, and its head, read in batches and then in pages. */
 export async function readActivity(
-	client: GitHub,
+	client: GitHubReader,
 	repository: Repository,
 	numbers: number[],
 	extra: "userContentEdits"[] = [],
@@ -301,7 +302,7 @@ export function onlineReviews(pull: Activity): OnlineReview[] {
 
 /** Each PR's online reviews, and every body its edits left, by number. */
 export async function readOnlineReviews(
-	client: GitHub,
+	client: GitHubReader,
 	repository: Repository,
 	numbers: number[],
 ): Promise<Map<number, { online: OnlineReview[]; bodies: string[] }>> {

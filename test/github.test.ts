@@ -106,9 +106,9 @@ describe("transient failures", () => {
 	});
 
 	test("an accepted status with no body keeps its status and headers", async () => {
-		const { github } = fixture([new Response(null, { status: 304, headers: { etag: '"x"' } })]);
-		const response = await github.request(`${repo}/pulls`, { etag: '"x"' });
-		expect(response.status).toBe(304);
+		const { github } = fixture([new Response(null, { status: 204, headers: { etag: '"x"' } })]);
+		const response = await github.request(`${repo}/pulls`);
+		expect(response.status).toBe(204);
 		expect(response.headers.get("etag")).toBe('"x"');
 	});
 

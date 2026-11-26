@@ -2,7 +2,20 @@
 // a time. It holds the `quest:active` label, and the ID of the timeline event
 // that added the label is its hold token, since sessions often share an account.
 // `quest merge` takes no label: the pinned auto-merge or merge-queue entry it creates is the queue signal.
-import { ACTIVE_LABEL, formatFinding, handedBack, latestHold, heldToken, withoutHandBack } from "../core";
+import { REVIEW_CONTEXT, unreviewedHigh } from "../github/review-trust";
+import {
+	ACTIVE_LABEL,
+	formatFinding,
+	handedBack,
+	heldToken,
+	latestHold,
+	type Hold,
+	type Method,
+	type PullRequest,
+	Refusal,
+	recordedRisk,
+	withoutHandBack,
+} from "../core";
 import { cleanAutoMergeRefusal, immediateMerge, queueHead } from "../github/merge";
 import {
 	currentChecks,
@@ -11,7 +24,6 @@ import {
 	GitHubGraphQLError,
 	object,
 	type ObjectValue,
-	type PullRequest,
 	requirements,
 	string,
 	repositoryPath,
@@ -21,30 +33,37 @@ import { LAND_CHECK } from "../github/land";
 import { QUEUE_CHECK } from "./land-queue";
 import type { LandingCheck } from "./landed";
 import { classifyCheck } from "../github/status";
-import { Refusal } from "./start";
 import { type Snapshot, ago, readSnapshot, starterHeld } from "../github/hold";
 import { describe, readSignals } from "../github/signals";
 
-export type Method = "merge" | "squash" | "rebase";
-
-/** A session's hold: its label and the token naming the event that added it. */
-export interface Hold {
-	label: string;
-	token: string;
-}
-
 /** Take `pr`, or keep the hold `token` names. Prints nothing; returns the hold. */
-export async function take(pr: PullRequest, token: string | undefined, deps: GitHubDependencies): Promise<Hold> {
-	const { hold } = await acquire(new Labels(pr, deps), token);
+export async function take(pr: PullRequest, token: string | null, deps: GitHubDependencies): Promise<Hold> {
+	const { hold } = await acquire(new Labels(pr, deps), token ?? undefined);
 	return hold;
 }
 
 /**
  * While `token` holds `pr`, hand it to reviewers: drop its `## Waiting` section
- * and mark a draft ready for review. The hold stays.
+ * and mark a draft ready for review. The hold stays. Without a token, mark a draft
+ * ready only while no session holds it.
  */
-export async function finish(pr: PullRequest, token: string, deps: GitHubDependencies): Promise<Hold> {
+export async function finish(pr: PullRequest, token: string | null, deps: GitHubDependencies): Promise<Hold | null> {
 	const labels = new Labels(pr, deps);
+	const markReady = (snapshot: Snapshot) =>
+		snapshot.draft
+			? labels.github.graphql(
+					`mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }`,
+					{ id: snapshot.id },
+				)
+			: undefined;
+	if (token === null) {
+		const snapshot = await labels.read();
+		open(snapshot);
+		const label = snapshot.labels[0];
+		if (label !== undefined) throw new Refusal(holder(snapshot, label, deps.now()));
+		await markReady(snapshot);
+		return null;
+	}
 	const { hold, snapshot } = await acquire(labels, token);
 	return holding(hold, async () => {
 		if (handedBack(snapshot.body)) {
@@ -53,12 +72,7 @@ export async function finish(pr: PullRequest, token: string, deps: GitHubDepende
 				body: { body: withoutHandBack(snapshot.body) },
 			});
 		}
-		if (snapshot.draft) {
-			await labels.github.graphql(
-				`mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }`,
-				{ id: snapshot.id },
-			);
-		}
+		await markReady(snapshot);
 	});
 }
 
@@ -134,7 +148,7 @@ export interface LandRequest {
  * auto-merge whose commit body pins `sha`, with a method {@link signalMethod} picks.
  * That request only signals the queue: `quest land` lands with its own method. It takes no label.
  * It first refuses a head whose quest check finds anything, so the refusal comes before a queue
- * build is spent, even on a base whose gate checks it again.
+ * build is spent, even on a base whose gate checks it again, and a high head no `quest review` status covers.
  */
 export async function land(pr: PullRequest, request: LandRequest, deps: GitHubDependencies): Promise<void> {
 	const { sha, method: named, direct = false } = request;
@@ -144,12 +158,14 @@ export async function land(pr: PullRequest, request: LandRequest, deps: GitHubDe
 	open(snapshot);
 	current(snapshot);
 	unheld(snapshot, undefined, deps.now());
+	readableRisk(snapshot);
 	// The policy below is decided for the base read above; reread before landing, since a retarget decides nothing.
 	const unchanged = async () => {
 		const fresh = await labels.read();
 		open(fresh);
 		current(fresh);
 		unheld(fresh, undefined, deps.now());
+		readableRisk(fresh);
 		if (fresh.base !== snapshot.base) {
 			throw new Refusal(`${snapshot.url} was retargeted from ${snapshot.base} to ${fresh.base}; land it again`);
 		}
@@ -158,6 +174,9 @@ export async function land(pr: PullRequest, request: LandRequest, deps: GitHubDe
 	};
 	await passing(labels.github, pr, snapshot.url, sha);
 	await unsignaled(labels.github, pr, snapshot.url, sha);
+	const unreviewed = await unreviewedHigh(labels.github, { ...pr, base: snapshot.base }, sha, snapshot.body);
+	if (unreviewed !== null)
+		throw new Refusal(`${snapshot.url} head ${unreviewed}; run quest review on it, then land it again`);
 	const findings = await request.check({
 		remote: `https://github.com/${pr.owner}/${pr.repo}.git`,
 		base: snapshot.base,
@@ -246,6 +265,7 @@ export async function land(pr: PullRequest, request: LandRequest, deps: GitHubDe
 		const fresh = await labels.read();
 		current(fresh);
 		unheld(fresh, undefined, deps.now());
+		readableRisk(fresh);
 		if (
 			fresh.state !== "OPEN" ||
 			fresh.draft ||
@@ -266,20 +286,24 @@ export async function land(pr: PullRequest, request: LandRequest, deps: GitHubDe
  * own queue's informational check, which reports how a past pick ended rather than the head.
  */
 async function passing(github: GitHub, pr: PullRequest, url: string, sha: string): Promise<void> {
-	const failing = (await currentChecks(github, pr, sha, await contexts(github, pr, sha))).checks
+	const failed = (await currentChecks(github, pr, sha, await contexts(github, pr, sha))).checks
 		.filter((context) => context.name !== QUEUE_CHECK)
 		.map(classifyCheck)
-		.filter(({ outcome }) => outcome === "failing")
-		.map(({ check }) => (check.url === null ? check.name : `${check.name} (${check.url})`));
+		.filter(({ outcome }) => outcome === "failing");
+	const failing = failed.map(({ check }) => (check.url === null ? check.name : `${check.name} (${check.url})`));
+	// A commit status cannot be rerun: a failing review needs another round or the maintainer's acceptance.
+	const reviewed = failed.some(({ check }) => check.name === REVIEW_CONTEXT)
+		? "; a failing quest review needs another quest review round or quest review --accept"
+		: "";
 	if (failing.length > 0)
 		throw new Refusal(
-			`${url} head ${sha} failed ${failing.length === 1 ? "a check" : "checks"}: ${failing.sort().join(", ")}; fix the PR or rerun the check, then land it again`,
+			`${url} head ${sha} failed ${failing.length === 1 ? "a check" : "checks"}: ${failing.sort().join(", ")}; fix the PR or rerun the check, then land it again${reviewed}`,
 		);
 }
 
 /**
- * Refuse a head that an online reviewer's unanswered finding or a newer maintainer decision holds, naming each:
- * the review a pick relied on predates them, so landing would skip them.
+ * Refuse a head that an unanswered finding from an online reviewer the base requires, or a newer maintainer decision,
+ * holds, naming each: the review a pick relied on predates them, so landing would skip them.
  */
 async function unsignaled(github: GitHub, pr: PullRequest, url: string, sha: string): Promise<void> {
 	const read = (await readSignals(github, pr, [pr.number])).get(pr.number)!;
@@ -340,18 +364,18 @@ async function holding(hold: Hold, work: () => Promise<void>): Promise<Hold> {
 }
 
 /** Remove the label `token` holds. A label already gone is released; one added again since is not ours. */
-export async function release(pr: PullRequest, token: string, deps: GitHubDependencies): Promise<string> {
+export async function release(pr: PullRequest, token: string, deps: GitHubDependencies): Promise<Hold> {
 	const labels = new Labels(pr, deps);
 	const snapshot = await labels.read();
 	const event = snapshot.events.find((candidate) => candidate.id === token && candidate.label !== null);
 	if (!event?.label) throw new Refusal(unknown(snapshot, token));
 	if (!snapshot.labels.includes(event.label)) {
 		deps.warn(`${event.label} is already off ${snapshot.url}`);
-		return event.label;
+		return { label: event.label, token };
 	}
 	held(snapshot, token);
 	await labels.remove(event.label);
-	return event.label;
+	return { label: event.label, token };
 }
 
 /**
@@ -389,6 +413,13 @@ function open(snapshot: Snapshot): void {
 	if (snapshot.state !== "OPEN") {
 		throw new Refusal(`${snapshot.url} is ${snapshot.state.toLowerCase()}; a push now would bring its branch back`);
 	}
+}
+
+/** Refuse a body whose `## Review` risk record does not parse, so no reader can mistake its tier. */
+function readableRisk(snapshot: Snapshot): void {
+	const risk = recordedRisk(snapshot.body);
+	if (risk !== null && "malformed" in risk)
+		throw new Refusal(`${snapshot.url}: ${risk.malformed}; rerun quest review to rewrite it, then land it again`);
 }
 
 /**

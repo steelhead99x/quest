@@ -11,11 +11,11 @@ import {
 	link,
 	object,
 	type ObjectValue,
-	type Repository,
 	string,
 } from "../github/client";
+import type { Repository } from "../core";
 import { lacksApproval } from "../github/merge";
-import type { Entry, LandMethod, Plan } from "./land";
+import { type Entry, git, type LandMethod, type Plan } from "./land";
 import type { Reason } from "../github/land";
 import { authenticatedRead } from "./land-git";
 import { jobLog } from "./land-checks";
@@ -71,7 +71,7 @@ export interface WatchOptions {
 	fixer?: string;
 	/** The most fixer jobs that run at once. */
 	fixerJobs: number;
-	/** The fixer's `model_reasoning_effort`. */
+	/** The fixer's `--effort`, `low` to `xhigh`. */
 	fixerEffort: string;
 	/** Patterns of tags fetched from GitHub into each fixer checkout. */
 	fixerTag: string[];
@@ -335,11 +335,11 @@ async function enqueueArmed(
 }
 
 /**
- * Take each queued or armed PR whose head draws a signal, an online reviewer's unanswered finding or a newer
- * maintainer decision, out of the merge queue and disarm its auto-merge, so neither it nor {@link enqueueArmed} lands
- * it, and say why on it once per pick and head. Nothing waits for a reviewer: a signal that arrives before the merge
- * ends the pick until a writer fixes or answers it and picks the PR again. A pull is read again just before, so a
- * head pushed since is left for the next pass.
+ * Take each queued or armed PR whose head draws a signal, an unanswered finding from an online reviewer the base
+ * requires or a newer maintainer decision, out of the merge queue and disarm its auto-merge, so neither it nor
+ * {@link enqueueArmed} lands it, and say why on it once per pick and head. Nothing waits for a reviewer: a signal that
+ * arrives before the merge ends the pick until a writer fixes or answers it and picks the PR again. A pull is read
+ * again just before, so a head pushed since is left for the next pass.
  */
 async function dequeueSignaled(
 	github: GitHub,
@@ -535,33 +535,43 @@ async function failedBuild(
 	return { jobs, base: group.slice(prefix.length) };
 }
 
-/** The failing jobs of `runs`, and with `timedOut` those still running, each with its log. */
+/**
+ * The failing jobs of `runs`, and with `timedOut` those still running, each with its log. A cancelled
+ * job counts only when none failed: GitHub cancels a job past its time limit, which fails the build with
+ * no `failure`, while a failure's fail-fast siblings are cancelled in its wake.
+ */
 export async function failingJobs(
 	github: GitHub,
 	repository: string,
 	runs: ObjectValue[],
 	timedOut: boolean,
 ): Promise<(FailedJob & { log: string })[]> {
-	const jobs: (FailedJob & { log: string })[] = [];
+	const failed: { run: ObjectValue; job: ObjectValue }[] = [];
+	const cancelled: { run: ObjectValue; job: ObjectValue }[] = [];
 	for (const run of runs) {
 		const path = `/repos/${repository}/actions/runs/${Number(run.id)}/jobs?filter=latest&per_page=100`;
 		for (const job of await listed(github, path, "jobs")) {
 			const conclusion = typeof job.conclusion === "string" ? job.conclusion : null;
-			const running = job.status !== "completed";
-			if (!(conclusion !== null && FAILED.includes(conclusion)) && !(timedOut && running)) continue;
-			const step = array(job.steps ?? []).find(
-				(item) => typeof item.conclusion === "string" && FAILED.includes(item.conclusion),
-			);
-			const log = running ? "" : await jobLog(github, repository, Number(job.id));
-			jobs.push({
-				workflow: string(run.name),
-				name: string(job.name),
-				url: string(job.html_url),
-				conclusion: conclusion ?? string(job.status),
-				...(step ? { step: string(step.name) } : {}),
-				log,
-			});
+			if ((conclusion !== null && FAILED.includes(conclusion)) || (timedOut && job.status !== "completed"))
+				failed.push({ run, job });
+			else if (conclusion === "cancelled") cancelled.push({ run, job });
 		}
+	}
+	const jobs: (FailedJob & { log: string })[] = [];
+	for (const { run, job } of failed.length > 0 ? failed : cancelled) {
+		const conclusion = typeof job.conclusion === "string" ? job.conclusion : null;
+		const steps = array(job.steps ?? []);
+		const step =
+			steps.find((item) => typeof item.conclusion === "string" && FAILED.includes(item.conclusion)) ??
+			steps.find((item) => item.conclusion === "cancelled");
+		jobs.push({
+			workflow: string(run.name),
+			name: string(job.name),
+			url: string(job.html_url),
+			conclusion: conclusion ?? string(job.status),
+			...(step ? { step: string(step.name) } : {}),
+			log: job.status !== "completed" ? "" : await jobLog(github, repository, Number(job.id)),
+		});
 	}
 	return jobs;
 }
@@ -892,9 +902,10 @@ type Permissions = Record<string, "read" | "write">;
 /**
  * The installation token permissions the watcher asks for. On GitHub's merge queue, `api` reads the
  * queue's events, comments, and the `merge_group` logs (`actions: read`), and enqueues the armed picks
- * GitHub left out of the queue, which `enqueuePullRequest` needs `merge_queues: write` for, and disarms a
+ * GitHub left out of the queue, which `enqueuePullRequest` needs `merge_queues: write` for, reads a head's checks
+ * (`checks: read` and `statuses: read`) to tell whether a finding's reviewer is one the base requires, and disarms a
  * signaled PR's auto-merge, which needs `contents: write`; with a fixer it also re-enqueues, edits the PR body's Review,
- * and reads the PR's own checks for the fixer (`checks: read` and `statuses: read`). The `own` queue
+ * and reads the PR's own checks for the fixer. The `own` queue
  * also disarms and arms auto-merge, cancels a build's runs (`actions: write`), posts each pick's queue
  * check (`checks: write`), and reads the base's classic protection (`administration: read`). `push` lease-pushes a fix, a merge, a queue branch, or a landing, and
  * `pushWorkflows` one that carries a workflow change; `read` fetches.
@@ -923,17 +934,19 @@ export function watchPermissions(
 			pushWorkflows: { ...push, workflows: "write" },
 			read: { contents: "read" },
 		};
-	// Disarming a signaled PR's auto-merge needs contents: write, as arming it does.
-	if (!fixing) return { api: { contents: "write", pull_requests: "write", actions: "read", merge_queues: "write" } };
+	// Disarming a signaled PR's auto-merge needs contents: write, as arming it does; telling a required reviewer's
+	// findings from an optional one's reads the head's checks and statuses.
+	const api: Permissions = {
+		contents: "write",
+		pull_requests: "write",
+		actions: "read",
+		merge_queues: "write",
+		checks: "read",
+		statuses: "read",
+	};
+	if (!fixing) return { api };
 	return {
-		api: {
-			contents: "write",
-			pull_requests: "write",
-			actions: "read",
-			merge_queues: "write",
-			checks: "read",
-			statuses: "read",
-		},
+		api,
 		push,
 		pushWorkflows: { ...push, workflows: "write" },
 		read: { contents: "read" },
@@ -955,6 +968,13 @@ export async function watch(
 	if (options.fixer) {
 		options.fixer = resolve(options.fixer);
 		accessSync(options.fixer, constants.X_OK);
+		// Validating a fix reads `git merge-tree -z`'s structured conflict messages, which Git 2.39 added.
+		const version = git(root, ["version"]);
+		const [major, minor] = (/(\d+)\.(\d+)/.exec(version) ?? []).slice(1).map(Number);
+		if (major === undefined || minor === undefined || major < 2 || (major === 2 && minor < 39))
+			throw new Error(
+				`--fixer needs Git 2.39 or later, whose merge-tree -z structures its messages; ${version} is installed`,
+			);
 	}
 	if (options.bump) checkTools();
 	const now = { fetch, now: Date.now };

@@ -10,6 +10,13 @@ import { stateDirectory } from "./send";
 const UNIT = "quest-records.service";
 const LABEL = "dev.moq.quest.records";
 
+/**
+ * How long a stopping launchd job may stay listed: launchd SIGKILLs it once its `ExitTimeOut` (20 seconds, as the
+ * plist leaves it unset) passes and drops it after reaping, so a few seconds past that is an error, not a wait.
+ */
+const DROP_TIMEOUT_MS = 25_000;
+const DROP_POLL_MS = 250;
+
 /** What installing the sender reads and runs. */
 export interface ServiceDependencies {
 	platform: NodeJS.Platform;
@@ -18,8 +25,12 @@ export interface ServiceDependencies {
 	uid: number;
 	/** Run a service manager command, throwing when it fails. */
 	run(command: string, args: string[]): void;
-	/** Run one whose failure is expected, such as stopping a service that is not loaded. */
-	tryRun(command: string, args: string[]): void;
+	/** Run one whose failure is expected, such as stopping a service that is not loaded, and report whether it succeeded. */
+	tryRun(command: string, args: string[]): boolean;
+	/** Milliseconds on a monotonic clock. */
+	now(): number;
+	/** Block for this many milliseconds. */
+	sleep(ms: number): void;
 }
 
 const home = (env: NodeJS.ProcessEnv) => env.HOME || homedir();
@@ -122,7 +133,15 @@ export function installSender(deps: ServiceDependencies): string {
 		deps.run("systemctl", ["--user", "enable", UNIT]);
 		deps.run("systemctl", ["--user", "restart", UNIT]);
 	} else {
-		deps.tryRun("launchctl", ["bootout", `gui/${deps.uid}/${LABEL}`]);
+		const job = `gui/${deps.uid}/${LABEL}`;
+		deps.tryRun("launchctl", ["bootout", job]);
+		// `bootout` returns before the job is gone, and `bootstrap` fails with an I/O error while it is still listed.
+		const deadline = deps.now() + DROP_TIMEOUT_MS;
+		while (deps.tryRun("launchctl", ["print", job])) {
+			if (deps.now() >= deadline)
+				throw new Error(`launchd still lists ${job} ${DROP_TIMEOUT_MS / 1000} seconds after bootout`);
+			deps.sleep(DROP_POLL_MS);
+		}
 		deps.run("launchctl", ["bootstrap", `gui/${deps.uid}`, path]);
 	}
 	return path;

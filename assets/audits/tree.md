@@ -11,7 +11,7 @@ Look for:
 - Stale plans: work already done, blockers that have cleared, or references to code that no longer exists.
 - Obsolete quests: a problem that is no longer real, or a plan a later change or decision has made the wrong solution.
 
-Split the reading across parallel sub-agents, each given a slice of the scope and returning its findings with evidence (a path, line, or commit).
+Where the tree is too large for one reader, split the reading across parallel sub-agents, each given a slice of the scope and returning its findings with evidence (a path, line, or commit).
 
 Apply factual corrections and changes the maintainer has already decided.
 Moving a quest between milestones, deleting one whose problem is still real, and any unresolved scope, priority, or API choice are the maintainer's decisions, never factual corrections; recommendations are not decisions.

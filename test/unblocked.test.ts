@@ -149,3 +149,26 @@ test("a blocker waiting on a quest under the epic requiring it is a cycle", () =
 	const docs = graph({ "m0/x.md": ["m0/epic/a.md"], "m0/epic/README.md": ["m0/x.md"], "m0/epic/a.md": [] });
 	expect(check(docs, () => true).some((f) => f.message.startsWith("Required cycle"))).toBe(true);
 });
+
+test("parked work neither scores as a dependent nor passes impact through", () => {
+	const docs = graph({
+		"m0/a.md": [],
+		"m0/b.md": [],
+		"m0/c.md": ["m0/b.md"],
+		"m0/epic/d.md": ["m0/a.md"],
+		"m0/epic/e.md": ["m0/a.md"],
+	});
+	expect(unblocked(docs, TODAY).map((quest) => [quest.path, quest.dependents])).toEqual([
+		["quest/m0/a.md", 2],
+		["quest/m0/b.md", 1],
+	]);
+	const parked = docs.map((doc) =>
+		doc.path === "quest/m0/epic/README.md"
+			? parse(doc.path, "# Epic\n\n## Goal\n\nWork.\n\n## Parked\n\n- until spring\n")
+			: doc,
+	);
+	expect(unblocked(parked, TODAY).map((quest) => [quest.path, quest.dependents])).toEqual([
+		["quest/m0/b.md", 1],
+		["quest/m0/a.md", 0],
+	]);
+});

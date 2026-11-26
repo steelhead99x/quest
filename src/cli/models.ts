@@ -20,37 +20,56 @@ export interface Model {
 /** The size of a PR with neither a quest nor `--size`. */
 export const DEFAULT_SIZE: Size = "M";
 
-const sol = (effort: string): Model => ({ harness: "codex", model: "gpt-6.1-sol", effort });
+const sol = (effort: string): Model => ({ harness: "codex", model: "gpt-6.2-sol", effort });
 const opus = (effort: string): Model => ({ harness: "claude", model: "claude-opus-5-5", effort });
 const sonnet = (effort: string): Model => ({ harness: "claude", model: "claude-sonnet-5-5", effort });
-const fable = (effort: string): Model => ({ harness: "claude", model: "claude-fable-5-2", effort });
 
 /**
  * Each size's writers, ranked: a spawn starts the quest on the first that can
  * run, falling through only while nothing is written, since the model that
- * writes a PR runs all its iterates. XS runs Sonnet rather than the cheaper
- * Haiku, whose surcharge past 100k input tokens leads users to cap its
- * compaction window there, barely above an agent's fixed load of prompt,
- * context, and skill. No size runs Opus at low, which misses too much. XL
- * stays on Opus rather than Fable, which a subscription caps at half its
- * weekly limit and which uses that limit faster.
+ * writes a PR runs all its iterates. Only Claude writes; a quest whose writers are all at their usage limit
+ * waits for one rather than starting on another vendor. XS runs Sonnet rather
+ * than the cheaper Haiku, whose surcharge past 100k input tokens leads users
+ * to cap its compaction window there, barely above an agent's fixed load of
+ * prompt, context, and skill. No size runs Opus at low, which misses too much.
+ * XL runs Opus at xhigh rather than Fable, which costs several times as much
+ * and draws on a limit a subscription caps at half the weekly one.
  */
 export const WRITERS: Record<Size, readonly Model[]> = {
-	XS: [sonnet("high"), sol("low")],
-	S: [opus("medium"), sol("medium")],
-	M: [opus("medium"), sol("high")],
-	L: [opus("high"), sol("xhigh")],
+	XS: [sonnet("high")],
+	S: [opus("medium")],
+	M: [opus("high")],
+	L: [opus("high")],
 	XL: [opus("xhigh")],
 };
 
 /**
- * Each PR size's reviewers, ranked: the first whose model is not the latest
- * writer's reviews it, so Claude reviews what Sol changed last.
+ * Whether model `reviewer` is too weak to review what model `writer` wrote: only Sonnet is, of any other model's
+ * work. A model may review its own work, in a session of its own.
+ */
+export const weaker = (reviewer: string, writer: string): boolean =>
+	reviewer !== writer && reviewer === "claude-sonnet-5-5";
+
+/**
+ * Whether an entry runs model `model` or a {@link weaker} one, as `--exclude-model` avoids. `model` is a listed
+ * model's ID, so callers pass a record's or flag's spelling through `canonicalModel` first.
+ */
+export const unfit =
+	(model: string) =>
+	(entry: Model): boolean =>
+		entry.model === model || weaker(entry.model, model);
+
+/**
+ * Each size's two reviewers, one per vendor: Sol reviews a medium head alone, whoever wrote it, Opus takes its
+ * place when Sol cannot run, and a high head gets both. Opus reviews at the effort it writes
+ * the size at, since it may review its own work. No list names Fable, whose xhigh reviews measured at ten times
+ * Sol xhigh's cost per PR for half its high findings, or Astra, which no review showed finding what these two
+ * missed.
  */
 export const REVIEWERS: Record<Size, readonly Model[]> = {
-	XS: [sol("medium"), opus("low")],
-	S: [sol("medium"), opus("low")],
-	M: [sol("high"), opus("medium")],
+	XS: [sol("low"), opus("medium")],
+	S: [sol("medium"), opus("medium")],
+	M: [sol("high"), opus("high")],
 	L: [sol("xhigh"), opus("high")],
 	XL: [sol("xhigh"), opus("xhigh")],
 };
@@ -90,27 +109,26 @@ export const SPLIT_CHECKERS: readonly Model[] = [sonnet("medium"), sol("medium")
 /**
  * The writer A/B: each armed size's quests split between its first writer
  * and an alternative where published results disagree, until the readout in
- * quest/m0/routing-evidence/README.md deletes it. L runs no arm.
+ * quest/m0/routing-evidence/README.md deletes it. M, L, and XL run no arm.
  */
 export const ARMS: Partial<Record<Size, Record<Arm, Model>>> = {
 	XS: { A: sonnet("high"), B: opus("medium") },
 	S: { A: opus("medium"), B: sonnet("high") },
-	M: { A: opus("medium"), B: opus("high") },
-	XL: { A: opus("xhigh"), B: fable("medium") },
 };
 
 /**
  * The writers that start quest `doc`, ranked, and its writer A/B arm. A quest
  * whose size runs an arm starts on the arm's entry, then the size's list
  * without it; the arm hashes the quest's path, so a restart or respawn draws
- * the same one. A `Maintainer:` wait leaves it a decision to settle, so it
- * runs the next size's list and no arm, which keeps each arm at its PR's size.
+ * the same one. A `Maintainer:` decision or prose wait leaves it a decision to
+ * settle, so it runs the next size's list and no arm, which keeps each arm at
+ * its PR's size; an action is only a step for the maintainer, not part of the work.
  */
 export function questWriters(doc: Doc): { arm: Arm | null; models: readonly Model[] } {
 	const sized = size(doc);
 	// `quest check` requires a size of every quest that is not an epic, and only those can be ready.
 	if (sized === null) throw new Error(`${doc.path} has no size`);
-	if (waits(doc).some(onMaintainer))
+	if (waits(doc).some((wait) => onMaintainer(wait) && wait.kind !== "action"))
 		return { arm: null, models: WRITERS[SIZES[Math.min(SIZES.indexOf(sized) + 1, SIZES.length - 1)]!] };
 	const arms = ARMS[sized];
 	if (!arms) return { arm: null, models: WRITERS[sized] };

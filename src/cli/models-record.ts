@@ -1,7 +1,7 @@
 // A pull request body's `## Models` record, which names the PR's size and each session that implemented it.
 
 import { SIZES } from "../core";
-import { ARMS, ARM_NAMES, type Arm, REVIEWERS, WRITERS } from "./models";
+import { ARMS, ARM_NAMES, type Arm, CLASSIFIERS, REVIEWERS, SPLITTERS, WRITERS } from "./models";
 
 const SECTION = /^## Models[ \t]*\r?$/m;
 
@@ -49,18 +49,38 @@ export function recorded(body: string): {
 }
 
 // Display names and IDs compare alike: `Opus 5.5`, `Claude Opus 5.5`, and `claude-opus-5-5` share a key, as do
-// `GPT 6.1 Sol` and `openai/gpt-6.1-sol`.
+// `GPT 6.2 Sol` and `openai/gpt-6.2-sol`.
 const key = (name: string) =>
 	name
 		.toLowerCase()
 		.replace(/^.*\//, "")
 		.replace(/[\s.]+/g, "-")
 		.replace(/^claude-/, "");
+// Models the tables no longer list, which older records still name.
+const RETIRED = ["gpt-6.1-sol"];
+// Models no table lists, which run only when named, as `--model claude-fable-5-2` does, and which records still name.
+const NAMED = ["claude-fable-5-2", "gpt-6.2-astra"];
 const KNOWN = new Map(
-	[...Object.values(WRITERS), ...Object.values(REVIEWERS), ...Object.values(ARMS).flatMap(Object.values)]
-		.flat()
-		.map(({ model }) => [key(model), model]),
+	[
+		...[
+			...Object.values(WRITERS),
+			...Object.values(REVIEWERS),
+			...Object.values(ARMS).flatMap(Object.values),
+			CLASSIFIERS,
+			SPLITTERS,
+		]
+			.flat()
+			.map(({ model }) => model),
+		...RETIRED,
+		...NAMED,
+	].map((model) => [key(model), model]),
 );
+
+/** A listed, retired, or named model's ID for any spelling of it, as `openai/gpt-6.2-astra` or `GPT-6.1 Sol`, else the name. */
+export const canonicalModel = (name: string): string => KNOWN.get(key(name)) ?? name;
+
+/** Whether two model names mean the same model, however each is spelled. */
+export const sameModel = (a: string, b: string): boolean => canonicalModel(a) === canonicalModel(b);
 
 /**
  * The model ID `name` means: a listed model by its ID or display name, a Claude harness's `<Family> <version>` as

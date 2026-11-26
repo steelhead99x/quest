@@ -21,6 +21,7 @@ import {
 	HOST,
 	HOSTS,
 	hostOf,
+	PARKED,
 	SCHEDULED,
 	dateOf,
 	isEpic,
@@ -35,7 +36,7 @@ import {
 } from "./doc";
 import { AUDIT, AUDITS, SKIPPED, auditOf, skippedOf } from "./audit";
 import { comparePaths, join } from "./path";
-import { MAINTAINER, WAITING, parseWait } from "./waiting";
+import { MAINTAINER, WAITING, readWait } from "./waiting";
 
 /**
  * The `## ` headings a quest document may use. Readiness greps `## Required`
@@ -49,6 +50,7 @@ export const HEADINGS = [
 	"Skipped audits",
 	"Hosts",
 	"Waiting",
+	"Parked",
 	"Scheduled",
 	"Required",
 	"Closes",
@@ -65,6 +67,7 @@ export const LIST_SECTIONS = [
 	"Skipped audits",
 	"Hosts",
 	"Waiting",
+	"Parked",
 	"Scheduled",
 	"Required",
 	"Closes",
@@ -99,17 +102,28 @@ function compareFindings(a: Finding, b: Finding): number {
 	);
 }
 
+/** What `check` validates beyond the tree's own structure. */
+export interface CheckOptions {
+	/**
+	 * Whether `## Audit` and `## Skipped audits` items must name an audit this
+	 * build ships. A build older than the tree, such as a base binary checking a
+	 * PR that ships a new audit and its stub, turns this off.
+	 */
+	auditNames?: boolean;
+}
+
 /**
  * Validate a whole tree. `docs` is every quest document, and `exists` reports
  * whether a repository-relative path (a file or a directory) exists, which is
  * how links outside the tree resolve. Returns every finding, sorted.
  */
-export function check(docs: Doc[], exists: (path: string) => boolean): Finding[] {
+export function check(docs: Doc[], exists: (path: string) => boolean, options: CheckOptions = {}): Finding[] {
 	const found: Finding[] = [];
 	const known = new Set(docs.map((d) => d.path));
+	const auditNames = options.auditNames ?? true;
 
 	for (const doc of docs) {
-		headings(found, docs, doc);
+		headings(found, docs, doc, auditNames);
 		links(found, exists, known, doc);
 	}
 
@@ -144,7 +158,7 @@ function collisions(found: Finding[], known: Set<string>, docs: Doc[]) {
 	}
 }
 
-function headings(found: Finding[], docs: Doc[], doc: Doc) {
+function headings(found: Finding[], docs: Doc[], doc: Doc, auditNames: boolean) {
 	if (!isEpic(docs, doc)) {
 		if (size(doc) === null)
 			found.push({ path: doc.path, line: null, message: "quest title must be '# [XS|S|M|L|XL] Title'" });
@@ -217,12 +231,28 @@ function headings(found: Finding[], docs: Doc[], doc: Doc) {
 		if (message !== null) found.push({ path: doc.path, line: entry.line, message });
 	});
 
+	// A blank item would park the work with no reason; one reason to resume is
+	// what a reader weighs, and a second only splits it. An item opening with a
+	// link would read as a list entry, which `quest rm` and the merge driver
+	// treat as removable and mergeable: a quest the work waits on is `Required`.
+	entries(doc, PARKED).forEach((entry, index) => {
+		const message =
+			entry.text === ""
+				? `'## ${PARKED}' item must say why and when to resume`
+				: entry.target !== null
+					? `'## ${PARKED}' item must not open with a link; list a quest the work waits on under '## Required'`
+					: index > 0
+						? `'## ${PARKED}' holds one item, saying why and when to resume; merge the others into it`
+						: null;
+		if (message !== null) found.push({ path: doc.path, line: entry.line, message });
+	});
+
 	// `quest init` plants a stub for every audit no quest names, so a typo
 	// would plant a second run of the audit it meant.
 	const names = AUDITS.map((audit) => audit.name).join(", ");
 	entries(doc, AUDIT).forEach((entry, index) => {
 		const message =
-			auditOf(entry) === null
+			auditNames && auditOf(entry) === null
 				? `'## ${AUDIT}' item must be the name of an audit quest ships (${names})`
 				: index > 0
 					? `'## ${AUDIT}' names one audit; split the others into quests of their own`
@@ -232,6 +262,13 @@ function headings(found: Finding[], docs: Doc[], doc: Doc) {
 
 	// Only the root's list stops `quest init` from planting an audit.
 	for (const heading of doc.headings) {
+		// Parking the root would hold back the whole tree with nothing to show why.
+		if (heading.text === PARKED && doc.path === ROOT)
+			found.push({
+				path: doc.path,
+				line: heading.line,
+				message: `'## ${PARKED}' parks a quest, epic, or milestone, not the whole tree in ${ROOT}`,
+			});
 		if (heading.text === SKIPPED && doc.path !== ROOT)
 			found.push({
 				path: doc.path,
@@ -240,7 +277,7 @@ function headings(found: Finding[], docs: Doc[], doc: Doc) {
 			});
 	}
 	for (const entry of entries(doc, SKIPPED)) {
-		if (skippedOf(entry) === null) {
+		if (auditNames && skippedOf(entry) === null) {
 			found.push({
 				path: doc.path,
 				line: entry.line,
@@ -250,15 +287,19 @@ function headings(found: Finding[], docs: Doc[], doc: Doc) {
 	}
 
 	// `quest waiting` sorts on who acts, so an item that does not name its
-	// party would hide a decision the maintainer owes.
+	// party would hide a decision the maintainer owes, and a broken choice
+	// list would hide its buttons.
 	for (const entry of entries(doc, WAITING)) {
-		if (parseWait(entry) === null) {
+		const { wait, problems } = readWait(entry);
+		if (wait === null) {
 			found.push({
 				path: doc.path,
 				line: entry.line,
-				message: `'## ${WAITING}' item must open with who acts, as '${MAINTAINER}: ...' or '<party>: ...'`,
+				message: `'## ${WAITING}' item must open with who acts, as '${MAINTAINER}: ...', '${MAINTAINER} (action): ...' for a step only they can take, '${MAINTAINER} (PC): ...' for one only at their computer, or '<party>: ...'`,
 			});
 		}
+		for (const problem of problems)
+			found.push({ path: doc.path, line: problem.line, message: `'## ${WAITING}' ${problem.message}` });
 	}
 }
 

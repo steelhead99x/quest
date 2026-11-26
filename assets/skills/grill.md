@@ -1,5 +1,5 @@
 ---
-description: Settle open decisions through an interactive interview with the user. Use when the user invokes /quest-grill or wants unsettled thinking challenged before action.
+description: Settle open decisions through an interactive interview with the user.
 guide: Questions
 ---
 
@@ -19,4 +19,3 @@ When a frontier question conflicts with a settled decision, an existing quest, o
 
 The interview is done when the frontier is empty and nothing is left silently assumed.
 Record each settled decision and its reason where the calling skill keeps its paper trail, with every decision prompt: mark the chosen option with ✅ and label the rest as rejected, as in `✅ m0 (rejected: m1, m2)`, so no reader takes a rejected option for a qualifier of the chosen one.
-Run on its own, summarize the decisions and get the user's confirmation before acting on them.

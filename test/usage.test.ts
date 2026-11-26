@@ -72,7 +72,7 @@ const parse = (...rows: object[]) => parseSessions(rows.map((row) => JSON.string
 describe("parseSessions", () => {
 	test("reads each session's host, ID, repositories, branches, and spend per model and effort", () => {
 		const [session] = parse(
-			exported(THREAD, "gpt-6.1-sol", "high", 0.5, {
+			exported(THREAD, "gpt-6.2-sol", "high", 0.5, {
 				host: "box",
 				repositories: ["https://github.com/Acme/Proj.git", "https://gitlab.com/acme/proj.git"],
 			}),
@@ -96,7 +96,7 @@ describe("parseSessions", () => {
 			end: Date.parse("2026-11-06T10:06:00Z"),
 			models: [
 				{
-					model: "gpt-6.1-sol",
+					model: "gpt-6.2-sol",
 					effort: "high",
 					input: 10,
 					cacheWrite: 20,
@@ -113,16 +113,16 @@ describe("parseSessions", () => {
 		});
 		// A session token-max could not resolve a repository, model, or ID for keeps the gap as null.
 		const [unknown] = parse({
-			...exported(THREAD, "gpt-6.1-sol", "high", 1, { repositories: null, session: null }),
+			...exported(THREAD, "gpt-6.2-sol", "high", 1, { repositories: null, session: null }),
 			models: [{ ...exported(THREAD, "x", "y", 1).models[0], model: null, effort: null }],
 		});
 		expect([unknown!.id, unknown!.repositories, unknown!.models[0]!.model]).toEqual([null, null, null]);
 	});
 
 	test("fails on a session missing a field, and on a line that is not JSON", () => {
-		const { skippedLines: _, ...missing } = exported(THREAD, "gpt-6.1-sol", "high", 1);
+		const { skippedLines: _, ...missing } = exported(THREAD, "gpt-6.2-sol", "high", 1);
 		expect(() => parse(missing)).toThrow(/skipped line count/);
-		expect(() => parse(exported(THREAD, "gpt-6.1-sol", "high", 1, { start: "soon" }))).toThrow(/a start/);
+		expect(() => parse(exported(THREAD, "gpt-6.2-sol", "high", 1, { start: "soon" }))).toThrow(/a start/);
 		expect(() => parseSessions('{"host"\n')).toThrow();
 	});
 });
@@ -133,8 +133,8 @@ describe("fold", () => {
 			exported(CLAUDE, "claude-opus-5-5", "high", 2),
 			exported(CLAUDE, "claude-opus-5-5", "high", 5, { host: "box" }),
 			exported(OTHER, "claude-opus-5-5", "high", 1, { host: "box" }),
-			exported(THREAD, "gpt-6.1-sol", "high", 1, { session: null }),
-			exported(THREAD, "gpt-6.1-sol", "high", 1, { session: null, host: "box" }),
+			exported(THREAD, "gpt-6.2-sol", "high", 1, { session: null }),
+			exported(THREAD, "gpt-6.2-sol", "high", 1, { session: null, host: "box" }),
 		);
 		const { kept, dropped } = fold([here!, there!, alone!, anonymous!, again!]);
 		expect(kept).toEqual([there, alone, anonymous, again]);
@@ -197,7 +197,7 @@ describe("causes", () => {
 describe("PR records", () => {
 	const round: Round = {
 		reviewer: "codex",
-		model: "gpt-6.1-sol",
+		model: "gpt-6.2-sol",
 		effort: "high",
 		branch: "quest/m0/a",
 		size: "L",
@@ -209,7 +209,9 @@ describe("PR records", () => {
 		usage: [],
 		score: 7,
 		rationale: "One gap.",
+		recommendation: null,
 		findings: [{ file: "src/a.ts", line: 4, severity: "medium", title: "Misses a case", body: "b" }],
+		notes: [],
 		earlier: {
 			head: "c".repeat(40),
 			findings: [
@@ -248,10 +250,10 @@ describe("PR records", () => {
 		unchanged: false,
 	};
 
-	// The shadow: the pick one effort lower, in its own session.
+	// The second reviewer, in its own session.
 	const second: Round = {
 		...round,
-		shadow: true,
+		second: true,
 		effort: "medium",
 		session: "thread-2",
 		round: 1,
@@ -279,26 +281,44 @@ describe("PR records", () => {
 	const risk: Risk = {
 		tier: "medium",
 		reason,
-		classified: { tier: "medium", reason, by: { kind: "paths" }, usage: [] },
+		classified: { tier: "medium", reason, by: { kind: "paths" }, class: null, riskFile: null, usage: [] },
+	};
+	const at = {
+		branch: round.branch,
+		head: round.head,
+		base: round.base,
+		sized: { size: round.size, from: round.sizeFrom },
 	};
 	const tallies = [
 		{ ...tally("codex", 3, { high: 1, medium: 1, low: 2 }, 2, 1), first: { high: 1, medium: 0, low: 1 } },
-		{ ...tally("codex", 1, { high: 0, medium: 0, low: 0 }, 0, 0), shadow: true as const },
+		{ ...tally("codex", 1, { high: 0, medium: 0, low: 0 }, 0, 0), second: true as const },
 		// A left-out reviewer still names its session, so `quest usage` counts that session as reviewing.
 		{ ...tally("claude", 2, { high: 2, medium: 0, low: 0 }, 1, 0), session: CLAUDE },
 	];
 
+	const SKIP = {
+		harness: "claude" as const,
+		model: "claude-opus-5-5",
+		effort: "high",
+		reason: "usage limit, resets 2026-11-18T03:00:00Z",
+	};
+
 	test("reads back each reviewer's round and tally quest review records, after the land fixer's lines", () => {
-		const body = `Summary.\n\n## Review\n\nmechanical fix by codex, gpt-6.1-sol, medium effort: \`merged\` (head ${"d".repeat(40)})\n\n${reviewRecord({ rounds: [round, second], tallies, risk })}\n\n## Models\n\n- Size: L\n`;
+		const body = `Summary.\n\n## Review\n\nmechanical fix by codex, gpt-6.2-sol, medium effort: \`merged\` (head ${"d".repeat(40)})\n\n${reviewRecord({ ...at, rounds: [round, second], tallies, risk, skipped: [SKIP] })}\n\n## Models\n\n- Size: L\n`;
 		expect(body).toContain(
 			"\n- Rounds: 3; first round 2 (high 1, low 1); findings 4 (high 1, medium 1, low 2): fixed 2, refuted 1, open 1\n",
+		);
+		// A reviewer the run skipped is named in the header, outside the blocks parseReview reads.
+		expect(body).toContain(
+			"\n- Skipped: Claude Code, claude-opus-5-5, high effort: usage limit, resets 2026-11-18T03:00:00Z\n\n- Reviewer: Codex,",
 		);
 		expect(parseReview(body)).toEqual([
 			{
 				harness: "Codex",
-				model: "gpt-6.1-sol",
+				model: "gpt-6.2-sol",
 				effort: "high",
 				shadow: false,
+				second: false,
 				session: THREAD,
 				round: 3,
 				score: 7,
@@ -315,9 +335,10 @@ describe("PR records", () => {
 			},
 			{
 				harness: "Codex",
-				model: "gpt-6.1-sol",
+				model: "gpt-6.2-sol",
 				effort: "medium",
-				shadow: true,
+				shadow: false,
+				second: true,
 				session: "thread-2",
 				round: 1,
 				score: 10,
@@ -338,6 +359,7 @@ describe("PR records", () => {
 				model: "m",
 				effort: "high",
 				shadow: false,
+				second: false,
 				session: CLAUDE,
 				round: null,
 				score: null,
@@ -357,31 +379,50 @@ describe("PR records", () => {
 		expect(body).not.toContain("b".repeat(40));
 		// Claude's left-out tally still holds an open finding, which keeps it short too.
 		const clean = [{ ...round, findings: [] }, second];
-		expect(reviewRecord({ rounds: clean, tallies, risk })).not.toContain("b".repeat(40));
+		expect(reviewRecord({ ...at, rounds: clean, tallies, risk, skipped: [] })).not.toContain("b".repeat(40));
 		const settledAll = [tally("codex", 3, { high: 1, medium: 1, low: 2 }, 3, 1), tallies[1]!];
-		expect(reviewRecord({ rounds: clean, tallies: settledAll, risk })).toContain(`- Head: ${"b".repeat(40)}\n`);
-		expect(fixes(body)).toEqual(["codex, gpt-6.1-sol, medium effort"]);
+		expect(reviewRecord({ ...at, rounds: clean, tallies: settledAll, risk, skipped: [] })).toContain(
+			`- Head: ${"b".repeat(40)}\n`,
+		);
+		expect(fixes(body)).toEqual(["codex, gpt-6.2-sol, medium effort"]);
 		// The reviewer sessions read even from a record whose other lines this version cannot parse.
 		const newer = body.replace(/^- Rounds: 3;/m, "- Rounds: 3; first round 1 (medium 1);");
 		expect(() => parseReview(newer)).toThrow("Rounds line is malformed");
 		expect(reviewSessions(newer)).toEqual([THREAD, "thread-2", CLAUDE]);
 		expect(classifierSessions(body)).toEqual([]);
 		const classified = reviewRecord({
+			...at,
 			rounds: [round],
 			tallies,
+			skipped: [],
 			risk: {
 				...risk,
 				classified: {
 					...risk.classified,
-					by: { kind: "model", harness: "codex", model: "gpt-6.1-sol", effort: "low", session: "k1" },
+					by: { kind: "model", harness: "codex", model: "gpt-6.2-sol", effort: "low", session: "k1" },
 				},
 			},
 		});
 		expect(classifierSessions(`## Review\n\n${classified}\n`)).toEqual(["k1"]);
+		// Findings the maintainer accepted read back as settled, with the head named in full.
+		const accepted = reviewRecord({
+			...at,
+			rounds: [round, second],
+			tallies,
+			risk,
+			skipped: [],
+			accepted: "Kept.",
+		});
+		expect(accepted).toContain(`- Head: ${"b".repeat(40)}\n`);
+		expect(accepted).toContain("- Accepted by the maintainer: `Kept.`\n");
+		expect(accepted).toContain("- Findings, accepted by the maintainer:\n");
+		const [pick, , left] = parseReview(`## Review\n\n${accepted}\n`);
+		expect(pick).toMatchObject({ tally: { settled: 1, open: 0 }, open: { high: 0, medium: 0, low: 0 } });
+		expect(left).toMatchObject({ tally: { settled: 1, open: 0 } });
 	});
 
 	test("a record written before tallies has none, and a Rounds line that does not add up fails", () => {
-		const record = reviewRecord({ rounds: [second], tallies: [tallies[1]!], risk });
+		const record = reviewRecord({ ...at, rounds: [second], tallies: [tallies[1]!], risk, skipped: [] });
 		const older = `## Review\n\n${record.replace(/^- Rounds: .*\n/m, "")}\n`;
 		expect(parseReview(older)[0]!.tally).toBeNull();
 		// The settled count `quest usage` prints reads back.
@@ -411,8 +452,14 @@ describe("PR records", () => {
 			).toThrow(/Rounds line/);
 	});
 
-	test("a skipped review or a fixer-only section has no round", () => {
-		expect(parseReview("## Review\n\nSkipped: too trivial to need one.\n")).toEqual([]);
+	test("a section no round wrote, or a fixer-only one, has no round", () => {
+		expect(parseReview("## Review\n\nSkipped: pin bump.\n")).toEqual([]);
+		// Text written by hand under the mark a round rewrote names no reviewer.
+		expect(
+			parseReview(
+				"## Review\n\nRewritten by `quest review` after each round.\n\n- Head: 6c2ce3d381 (skipped review)\n- Skip: one reworded sentence.\n",
+			),
+		).toEqual([]);
 		expect(parseReview("## Review\n\nmechanical fix by quest land watch: `merged main` (head x)\n")).toEqual([]);
 		expect(fixes("## Review\n\nmechanical fix by quest land watch: `merged main` (head x)\n")).toEqual([
 			"quest land watch",
@@ -427,9 +474,9 @@ describe("PR records", () => {
 			size: "XS",
 			arm: null,
 		});
-		expect(implementer("Implementer: Codex, gpt-6.1-sol, unknown effort")).toEqual({
+		expect(implementer("Implementer: Codex, gpt-6.2-sol, unknown effort")).toEqual({
 			harness: "Codex",
-			model: "gpt-6.1-sol",
+			model: "gpt-6.2-sol",
 			effort: "unknown",
 			size: null,
 			arm: null,
@@ -484,13 +531,25 @@ describe("share", () => {
 		).toEqual([[0, 3, 0]]);
 		// A routed and a shadow reviewer at one effort: a session the record names goes to its seat, and the rest is
 		// split evenly and counted as split.
-		const reviewers = seats.map(() => ({ model: "gpt-6.1-sol", effort: "low" }));
+		const reviewers = seats.map(() => ({ model: "gpt-6.2-sol", effort: "low" }));
 		expect(
-			costs(share([{ ...spend("gpt-6.1-sol", "low", 8), seat: 0 }, spend("gpt-6.1-sol", "low", 2)], reviewers)),
+			costs(share([{ ...spend("gpt-6.2-sol", "low", 8), seat: 0 }, spend("gpt-6.2-sol", "low", 2)], reviewers)),
 		).toEqual([
 			[0, 9, 1],
 			[1, 1, 1],
 		]);
+		// A provider-qualified spelling of a seat's listed model goes to that seat.
+		expect(
+			costs(
+				share(
+					[spend("openai/gpt-6.2-astra", "high", 3, "iterating")],
+					[
+						{ model: "claude-opus-5-5", effort: "high" },
+						{ model: "gpt-6.2-astra", effort: "high" },
+					],
+				),
+			),
+		).toEqual([[1, 3, 0]]);
 	});
 });
 
@@ -498,6 +557,7 @@ describe("usage", () => {
 	const RISK = [
 		"- Risk: high, `It rewrites the wire format.`",
 		`- Classified: medium by Claude Code, claude-haiku-5-5, low effort, session \`${OWNED}\``,
+		"- Class: `tests`",
 	].join("\n");
 	const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
 	const pr = (number: number, branch: string, body: string, created: string, extra: object = {}) => ({
@@ -539,14 +599,14 @@ describe("usage", () => {
 			}),
 			// The reviewer, named by #10's record; an iterate on #10, with a cheaper copy on another host; one on
 			// another repository's branch of the same name.
-			exported(THREAD, "gpt-6.1-sol", "high", 1, { start: "2026-11-06T12:00:00Z" }),
-			exported(ITERATE, "gpt-6.1-sol", "high", 2, { start: "2026-11-06T13:00:00Z" }),
-			exported(ITERATE, "gpt-6.1-sol", "high", 1, {
+			exported(THREAD, "gpt-6.2-sol", "high", 1, { start: "2026-11-06T12:00:00Z" }),
+			exported(ITERATE, "gpt-6.2-sol", "high", 2, { start: "2026-11-06T13:00:00Z" }),
+			exported(ITERATE, "gpt-6.2-sol", "high", 1, {
 				start: "2026-11-06T13:00:00Z",
 				host: "box",
 				repositories: null,
 			}),
-			exported("22222222-2222-2222-2222-222222222222", "gpt-6.1-sol", "high", 3, {
+			exported("22222222-2222-2222-2222-222222222222", "gpt-6.2-sol", "high", 3, {
 				cwd: OTHER_WORK,
 				repositories: ["https://github.com/other/repo.git"],
 				start: "2026-11-06T13:00:00Z",
@@ -575,7 +635,7 @@ describe("usage", () => {
 				branches: [{ name: "HEAD", first: "2026-11-06T12:30:00Z", last: "2026-11-06T12:31:00Z" }],
 				start: "2026-11-06T12:30:00Z",
 			}),
-			exported(CHECKER, "gpt-6.1-sol", "high", 0.25, { parent: THREAD, start: "2026-11-06T12:10:00Z" }),
+			exported(CHECKER, "gpt-6.2-sol", "high", 0.25, { parent: THREAD, start: "2026-11-06T12:10:00Z" }),
 			// Another host's session in a directory of the same path: this host's sessions there tell nothing of it.
 			exported(REMOTE, "claude-opus-5-5", "high", 4, { host: "box", repositories: null }),
 			// A checkout with remotes for both the fork and its upstream, on a branch each has a PR from.
@@ -594,7 +654,7 @@ describe("usage", () => {
 			"- Size: L",
 			"- Implementer: Claude Code, claude-opus-5-5, high effort",
 			"- Implementer: Claude Code, claude-opus-5-5, high effort (iterate, L)",
-			"- Implementer: Codex, gpt-6.1-sol, medium effort (iterate, S)",
+			"- Implementer: Codex, gpt-6.2-sol, medium effort (iterate, S)",
 			"- Implementer: Claude Code, Some Model",
 			"",
 			"## Review",
@@ -606,14 +666,14 @@ describe("usage", () => {
 			// A reviewer raised the classifier's tier; the classifier's session counts as classifying.
 			RISK,
 			"",
-			"- Reviewer: Codex, gpt-6.1-sol, high effort",
+			"- Reviewer: Codex, gpt-6.2-sol, high effort",
 			`- Session: \`${THREAD}\`, round 2`,
 			"- Score: 9/10, `Fine.`",
 			"- Rounds: 2; first round 1 (high 1); findings 2 (high 1, low 1): fixed 1, refuted 1, open 0",
 			"- Findings: none",
 			"",
 			// A harness quest review does not run, as a hand-written record may name, reads as any other.
-			"- Reviewer: Gemini CLI, gemini-3-pro, high effort",
+			"- Reviewer: Other CLI, other-model-1, high effort",
 			"- Session: `ses_1`, round 1",
 			"- Score: 8/10, `Fine.`",
 			"- Rounds: 1; findings 0: fixed 0, refuted 0, open 0",
@@ -623,8 +683,9 @@ describe("usage", () => {
 			"- Reviewer: Claude Code, claude-opus-5-5, high effort",
 			"- Rounds: 1; findings 1 (medium 1): fixed 1, refuted 0, open 0",
 			"",
-			// The shadow, which measures an effort step and so stays out of the writer's accuracy.
-			"- Reviewer: Codex, gpt-6.1-sol, medium effort, shadow",
+			// The shadow, which measures an effort step and so stays out of the writer's accuracy, spelled as a gateway
+			// names it, which the reviewer rows fold into its listed ID.
+			"- Reviewer: Codex, openai/gpt-6.2-sol, medium effort, shadow",
 			"- Rounds: 1; findings 3 (high 3): fixed 2, refuted 1, open 0",
 		].join("\n");
 		// #9's record and #10's tally the same branch, so the rollup counts the tally once, from #10. Only #10 has a tier.
@@ -637,7 +698,7 @@ describe("usage", () => {
 			"- [acme/proj#2](https://github.com/acme/proj/pull/2) - dropped a header (found by a customer; incident page 7)\n" +
 			"- [acme/proj#99](https://github.com/acme/proj/pull/99) - mistyped\n";
 		const body2 =
-			"Old.\n\n## Models\n\n- Size: XS\n- Implementer: Codex, gpt-6.1-sol, low effort\n\n## Review\n\nRewritten by `quest review` after each round.\n\n- Risk: garbled\n";
+			"Old.\n\n## Models\n\n- Size: XS\n- Implementer: Codex, gpt-6.2-sol, low effort\n\n## Review\n\nRewritten by `quest review` after each round.\n\n- Risk: garbled\n";
 		// A closed duplicate of #11's fix: it never landed, so it fixed nothing.
 		// Newest updated first, as GitHub lists them, so the report stops at #8.
 		const pulls = [
@@ -787,6 +848,8 @@ describe("usage", () => {
 					ssh_url: "git@github.com:acme/proj.git",
 					fork: false,
 				});
+			// A transferred repository: GitHub redirects its former name to the current one.
+			if (url.pathname === "/repos/old/proj") return json({ owner: { login: "Acme" }, name: "proj" });
 			if (url.pathname === "/repos/acme/proj/pulls") return json(pulls);
 			if (url.pathname === "/repos/acme/proj/pulls/2")
 				return json(
@@ -808,16 +871,45 @@ describe("usage", () => {
 				quota: "wait" as const,
 				warn: () => {},
 			}),
+			forge: () => Promise.reject(new Error("usage reads no forge")),
 			warn: () => {},
 			sessions: (since: Date, ssh: string[]) => {
 				calls.push([since, ssh]);
 				return exported;
 			},
 			waits: () => waits,
+			calls: () => [],
 			split: () => null,
 		});
 		return { root, deps, sessions, calls, requests };
 	}
+
+	test("counts sessions that recorded a transferred repository's former name under its current one", async () => {
+		const FORMER = "55555555-5555-5555-5555-555555555555";
+		const BORROWED = "66666666-6666-6666-6666-666666666666";
+		const cwd = removed();
+		const { root, deps, sessions, requests } = setup({
+			sessions: [
+				// Two Codex sessions naming the same former name, and a Claude one with no repository in their directory.
+				exported(FORMER, "gpt-6.2-sol", "high", 1, {
+					cwd,
+					repositories: ["https://github.com/old/proj.git", "https://github.com/acme/proj.git"],
+				}),
+				exported("77777777-7777-7777-7777-777777777777", "gpt-6.2-sol", "high", 1, {
+					cwd,
+					repositories: ["https://github.com/old/proj.git"],
+				}),
+				exported(BORROWED, "claude-opus-5-5", "high", 2, { cwd, repositories: null }),
+			],
+		});
+		const report = await usage(root, { since: "2026-11-05" }, deps(sessions));
+		const ten = report.pulls.find((p) => p.number === 10)!;
+		const on = ten.sessions.map((s) => s.session);
+		expect(on).toEqual(expect.arrayContaining([FORMER, BORROWED]));
+		expect(requests.filter((path) => path === "/repos/old/proj")).toHaveLength(1);
+		// A name GitHub does not serve stays as recorded, so another repository's branch of the same name is still no match.
+		expect(on).not.toContain(OTHER);
+	});
 
 	test("counts each session with no ID apart in the spend rollup", async () => {
 		const { root, deps, sessions } = setup();
@@ -884,7 +976,7 @@ describe("usage", () => {
 		expect(ten.implementers).toEqual([
 			{ harness: "Claude Code", model: "claude-opus-5-5", effort: "high", size: null, arm: null },
 			{ harness: "Claude Code", model: "claude-opus-5-5", effort: "high", size: "L", arm: null },
-			{ harness: "Codex", model: "gpt-6.1-sol", effort: "medium", size: "S", arm: null },
+			{ harness: "Codex", model: "gpt-6.2-sol", effort: "medium", size: "S", arm: null },
 		]);
 		expect(ten.unread).toEqual(["Implementer: Claude Code, Some Model"]);
 		expect(usageLines(report)).toContain("  unread: Implementer: Claude Code, Some Model");
@@ -929,7 +1021,7 @@ describe("usage", () => {
 			[0, 1],
 		]);
 		expect(report.accuracy.map((a) => [a.size, a.model, a.pulls, a.reviewed, a.score, a.tally, a.fixes])).toEqual([
-			["S", "gpt-6.1-sol", 1, 1, 17, tally, 1],
+			["S", "gpt-6.2-sol", 1, 1, 17, tally, 1],
 			["L", "claude-opus-5-5", 7, 5, 85, five, 1],
 		]);
 		// #10's writing spend: the iterate's Sol session to its own line though the efforts differ, and the Haiku
@@ -944,7 +1036,7 @@ describe("usage", () => {
 		]);
 		// The routed Sol reviewer over #10, #5, #6, and #3, each branch's latest record, with its first rounds; its
 		// session and sub-agent price it on #10.
-		const sol = report.reviewers.find((r) => r.size === "L" && r.model === "gpt-6.1-sol" && !r.shadow)!;
+		const sol = report.reviewers.find((r) => r.size === "L" && r.model === "gpt-6.2-sol" && !r.shadow)!;
 		expect([sol.reviewed, sol.tally.rounds, sol.firstRounds, sol.spent.pulls, sol.spent.cost]).toEqual([
 			4,
 			9,
@@ -954,9 +1046,9 @@ describe("usage", () => {
 		]);
 		expect(report.reviewers.filter((r) => r.size === "L").map((r) => [r.model, r.effort, r.shadow])).toEqual([
 			["claude-opus-5-5", "high", false],
-			["gpt-6.1-sol", "high", false],
-			["gpt-6.1-sol", "medium", true],
-			["gemini-3-pro", "high", false],
+			["gpt-6.2-sol", "high", false],
+			["gpt-6.2-sol", "medium", true],
+			["other-model-1", "high", false],
 		]);
 		expect(ten.online).toEqual([
 			{
@@ -991,7 +1083,7 @@ describe("usage", () => {
 			"rounds 2.0, findings 3 (high 1, medium 1, low 1): fixed 2, refuted 1, open 0, first rounds 0: 0; 0 land fixes, 1 later fixes; ~$2.00 per merged PR over 1",
 		);
 		expect(text).toContain(
-			"   L  Codex        gpt-6.1-sol      high            4 reviewed: rounds 2.3, findings 8 (high 4, medium 1, low 3): fixed 4, refuted 2, settled 1, open 1, first rounds 4: 4 (high 4); ~$1.25 per PR reviewed over 1\n",
+			"   L  Codex        gpt-6.2-sol      high            4 reviewed: rounds 2.3, findings 8 (high 4, medium 1, low 3): fixed 4, refuted 2, settled 1, open 1, first rounds 4: 4 (high 4); ~$1.25 per PR reviewed over 1\n",
 		);
 		// Spend split among seats nothing told apart is shown, so the text report does not hide it.
 		sol.spent.split = 0.5;
@@ -1006,10 +1098,10 @@ describe("usage", () => {
 			["medium", true],
 		]);
 		expect(text).toContain(
-			"  review: Codex, gpt-6.1-sol, medium effort, shadow; not in the latest run; rounds 1, findings 3 (high 3): fixed 2, refuted 1, open 0\n",
+			"  review: Codex, openai/gpt-6.2-sol, medium effort, shadow; not in the latest run; rounds 1, findings 3 (high 3): fixed 2, refuted 1, open 0\n",
 		);
 		expect(text).toContain(
-			"#10 L high merged: PR 10 (quest/m0/a)\n  risk: high, It rewrites the wire format.; raised from medium by a reviewer\n",
+			"#10 L high merged: PR 10 (quest/m0/a)\n  risk: high, It rewrites the wire format.; raised from medium by a reviewer; class tests\n",
 		);
 		expect(text).toContain("#11 - - merged: PR 11 (fix/a)\n");
 		// #11 breaks down by culprit, #2 read from GitHub; #12 never merged, and #99 is no PR.
@@ -1023,22 +1115,27 @@ describe("usage", () => {
 			merged: "2026-10-20T00:00:00.000Z",
 			tier: null,
 			size: "XS",
-			writers: [{ harness: "Codex", model: "gpt-6.1-sol", effort: "low" }],
+			writers: [{ harness: "Codex", model: "gpt-6.2-sol", effort: "low" }],
 			reviewers: [],
 		});
 		expect(report.breakages[0]!.culprit).toMatchObject({ tier: "high", size: "L" });
 		expect(text).toContain(
 			"Breakages, by the merged fix naming its culprit under ## Caused by:\n" +
-				"   #10  high, L, written by claude-opus-5-5 high, gpt-6.1-sol medium, reviewed by gpt-6.1-sol high, gemini-3-pro high, claude-opus-5-5 high, gpt-6.1-sol medium; fixed by #11, finder unrecorded, opened before it merged\n" +
-				"   #2   no tier, XS, written by gpt-6.1-sol low, no local review; fixed by #11, closing incident page 7, found by customer, 17.8d after merge\n",
+				"   #10  high, L, written by claude-opus-5-5 high, gpt-6.2-sol medium, reviewed by gpt-6.2-sol high, other-model-1 high, claude-opus-5-5 high, gpt-6.2-sol medium; fixed by #11, finder unrecorded, opened before it merged\n" +
+				"   #2   no tier, XS, written by gpt-6.2-sol low, no local review; fixed by #11, closing incident page 7, found by customer, 17.8d after merge\n",
 		);
 		// #10 is the one PR with a tier, and a later PR fixed it; #11, #5, and #6 of the rest merged.
 		expect(report.tiers).toEqual([
-			{ tier: "high", pulls: 1, merged: 1, raised: 1, culprits: 1 },
-			{ tier: null, pulls: 9, merged: 3, raised: 0, culprits: 0 },
+			{ tier: "high", pulls: 1, merged: 1, raised: 1, overridden: 0, culprits: 1, person: 0 },
+			{ tier: null, pulls: 9, merged: 3, raised: 0, overridden: 0, culprits: 0, person: 0 },
 		]);
 		expect(text).toContain(
-			"By risk tier:\n   high  1 PRs, 1 merged, 1 raised by a reviewer, 1 later fixed\n   -     9 PRs, 3 merged, 0 raised by a reviewer, 0 later fixed",
+			"By risk tier:\n   high  1 PRs, 1 merged, 1 raised by a reviewer, 0 overridden, 1 later fixed; waited on a person 0s\n   -     9 PRs, 3 merged, 0 raised by a reviewer, 0 overridden, 0 later fixed; waited on a person 0s",
+		);
+		// A class the classifier named, though the high tier keeps it from landing without a pick.
+		expect(report.classes).toEqual([{ class: "tests", pulls: 1, low: 0, merged: 1, culprits: 1, person: 0 }]);
+		expect(text).toContain(
+			"By automatic class:\n   tests  1 PRs, 0 low, 1 merged, 1 later fixed; waited on a person 0s",
 		);
 		expect(text).toContain("findings 2 (high 1, low 1): fixed 1, refuted 0, settled 1, open 0\n");
 		expect(text).toContain(
@@ -1079,6 +1176,40 @@ describe("usage", () => {
 		expect(report.unattributed!.sessions).toBe(6);
 	});
 
+	test("reports the part of a review record it cannot read on its PR and reads the rest", async () => {
+		const record = (...lines: string[]) =>
+			["## Review", "", "Rewritten by `quest review` after each round.", "", ...lines, ""].join("\n");
+		const head = `- Head: ${"a".repeat(40)}`;
+		const reviewer = "- Reviewer: Codex, gpt-6.2-sol, high effort";
+		// #30's tier survives its garbled Rounds line, and #31's reviewer its garbled Risk line.
+		const garbledRounds = record(head, RISK, reviewer, "- Rounds: garbled");
+		const garbledRisk = record(
+			head,
+			"- Risk: garbled",
+			reviewer,
+			"- Rounds: 2; findings 1 (medium 1): fixed 1, refuted 0, open 0",
+		);
+		const { root, deps, sessions } = setup({
+			pulls: [
+				pr(30, "quest/m0/bad", garbledRounds, "2026-11-06T00:00:00Z", { updated_at: "2026-11-07T00:00:00Z" }),
+				pr(31, "quest/m0/worse", garbledRisk, "2026-11-06T00:00:00Z", { updated_at: "2026-11-07T00:00:00Z" }),
+			],
+		});
+		const report = await usage(root, { since: "2026-11-05" }, deps(sessions));
+		const rounds = report.pulls.find((p) => p.number === 30)!;
+		expect(rounds.review).toEqual([]);
+		expect(rounds.risk?.tier).toBe("high");
+		expect(rounds.unreadReview).toBe("the ## Review record's Rounds line is malformed: garbled");
+		const risk = report.pulls.find((p) => p.number === 31)!;
+		expect(risk.review.map((r) => r.model)).toEqual(["gpt-6.2-sol"]);
+		expect(risk.risk).toBeNull();
+		expect(risk.unreadReview).toBe("the ## Review record's risk is malformed: garbled");
+		expect(report.pulls.find((p) => p.number === 10)!.unreadReview).toBeNull();
+		expect(usageLines(report).join("\n")).toContain(
+			"  unread review: the ## Review record's Rounds line is malformed: garbled",
+		);
+	});
+
 	test("rolls up the writer A/B by size and arm, leaving out a PR a writer ran off its arm", async () => {
 		const models = (...lines: string[]) =>
 			[
@@ -1090,7 +1221,7 @@ describe("usage", () => {
 				"",
 				"Rewritten by `quest review` after each round.",
 				"",
-				"- Reviewer: Codex, gpt-6.1-sol, high effort",
+				"- Reviewer: Codex, gpt-6.2-sol, high effort",
 				"- Score: 8/10, `Ok.`",
 				"- Rounds: 2; findings 1 (medium 1): fixed 1, refuted 0, open 0",
 				"",
@@ -1119,7 +1250,7 @@ describe("usage", () => {
 					"- Implementer: Claude Code, claude-opus-5-5, medium effort (arm A)",
 				),
 				// A fallback to Sol names no arm, and an iterate naming the other arm, so neither PR counts.
-				armed(23, "quest/m0/off", "- Size: M", "- Implementer: Codex, gpt-6.1-sol, high effort"),
+				armed(23, "quest/m0/off", "- Size: M", "- Implementer: Codex, gpt-6.2-sol, high effort"),
 				armed(
 					24,
 					"quest/m0/mixed",
@@ -1182,8 +1313,8 @@ describe("usage", () => {
 		const { root, deps } = setup();
 		// On `box`, a deleted checkout's only repository evidence is a copy that folds into this host's costlier one.
 		const sessions = parse(
-			exported(THREAD, "gpt-6.1-sol", "high", 2, { cwd: "/gone", branches: [] }),
-			exported(THREAD, "gpt-6.1-sol", "high", 1, { cwd: "/gone", branches: [], host: "box" }),
+			exported(THREAD, "gpt-6.2-sol", "high", 2, { cwd: "/gone", branches: [] }),
+			exported(THREAD, "gpt-6.2-sol", "high", 1, { cwd: "/gone", branches: [], host: "box" }),
 			exported(OWNED, "claude-opus-5-5", "high", 7, {
 				cwd: "/gone",
 				host: "box",

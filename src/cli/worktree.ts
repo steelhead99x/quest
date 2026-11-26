@@ -63,6 +63,18 @@ interface Registry {
 /** Another live process holds the registry lock. */
 export class Busy extends Error {}
 
+/** Runs a registry operation, waiting out the short critical sections of concurrent hooks and commands. */
+export async function waiting<T>(action: () => T | Promise<T>): Promise<T> {
+	for (;;) {
+		try {
+			return await action();
+		} catch (error) {
+			if (!(error instanceof Busy)) throw error;
+		}
+		await sleep(100);
+	}
+}
+
 /** Git that may wait on the network, run without blocking concurrent hooks and commands. */
 function gitAsync(root: string, args: string[]): Promise<unknown> {
 	return promisify(execFile)("git", ["-C", root, ...args], { env: discoveryEnv(), maxBuffer: 64 * 1024 * 1024 });

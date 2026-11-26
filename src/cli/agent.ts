@@ -143,6 +143,17 @@ const claude: Harness = {
 	},
 };
 
+/**
+ * Refuse messages from the person's other Claude Code sessions, and deny the tools to list or send them, so no
+ * other session steers an agent and it cannot steer them. `--settings` outranks user settings; only managed
+ * settings, or a `refuse` in project or local settings, override it. Needs Claude Code 2.1.224 or later; checked
+ * against 2.1.330. A shell can still write to another session's inbox socket: that session closing it is its own setting.
+ */
+const CLOSED_SESSIONS = JSON.stringify({
+	crossSessionInbound: "refuse",
+	permissions: { deny: ["SendMessage", "ListAgents"] },
+});
+
 function claudeFlags(launch: Launch): string[] {
 	return [
 		"claude",
@@ -155,6 +166,8 @@ function claudeFlags(launch: Launch): string[] {
 		launch.effort,
 		"--permission-mode",
 		launch.permissionMode,
+		"--settings",
+		CLOSED_SESSIONS,
 	];
 }
 
@@ -492,13 +505,16 @@ export async function runAgent(
 	const harness = HARNESS[launch.harness];
 	const id = session ?? randomUUID();
 	const [name, ...args] = session === undefined ? harness.start(launch, id) : harness.resume(launch, id);
-	// The CLI is found on PATH, never in the worktree.
-	const program = requireProgram(name, deps.env);
-	const command = checkouts ? undefined : programCommand(program, args, deps.env);
+	// The CLI is found on PATH, never in the worktree. A missing one fails here, before the wait.
+	requireProgram(name, deps.env);
 	const dir = spawnDirectory(deps.base, worktree);
 	// Waited out before the worktree is claimed, so a queued launch holds nothing.
 	const refused = await admitAgent(deps, process.pid);
 	if (refused !== undefined) return refused;
+	// Found again once admitted: `which` returns the file PATH named, which a launcher update during a long wait
+	// may have replaced.
+	const program = requireProgram(name, deps.env);
+	const command = checkouts ? undefined : programCommand(program, args, deps.env);
 
 	const reader = harness.reader();
 	// Claude Code takes the id this command assigns; Codex announces its own.

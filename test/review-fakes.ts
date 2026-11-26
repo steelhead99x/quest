@@ -25,9 +25,7 @@ export const CLAUDE_LOGGED_OUT =
 
 /**
  * The findings turn's reply, `reply`: FAKE_REPLY, or one finding. A JSON reply without `earlier` settles
- * each earlier finding the prompt numbers as FAKE_DISPOSITION says, `fixed` by default, and one without `risk`
- * reports FAKE_RAISE's tier, else the tier the prompt says the change was classified. FAKE_RAISE as
- * `<tier>@<effort>` raises only in turns at that effort.
+ * each earlier finding the prompt numbers as FAKE_DISPOSITION says, `fixed` by default.
  */
 const REPLY = `
 const listed = /<earlier-findings>\\n([\\s\\S]*?)\\n<\\/earlier-findings>/.exec(stdin)?.[1] ?? "";
@@ -36,19 +34,11 @@ const earlier = [...listed.matchAll(/^(\\d+)\\. /gm)].map((m) => ({
 	disposition: process.env.FAKE_DISPOSITION ?? "fixed",
 	reason: "Checked against the head.",
 }));
-const classified = /was classified (low|medium|high) risk/.exec(stdin)?.[1] ?? "medium";
-const [raise, raiseAt] = (process.env.FAKE_RAISE ?? "").split("@");
-const effort = argv.includes("--effort")
-	? argv[argv.indexOf("--effort") + 1]
-	: JSON.parse((argv.find((arg) => arg.startsWith("model_reasoning_effort=")) ?? "=null").split("=")[1]);
-const risk = raise && (!raiseAt || raiseAt === effort)
-	? { tier: raise, reason: "It rewrites the wire format peers read." }
-	: { tier: classified, reason: "As classified." };
 let reply = process.env.FAKE_REPLY ?? JSON.stringify({ score: 8, rationale: "Lands once the off-by-one is fixed.", findings: [${JSON.stringify(FINDING)}] });
 try {
 	const parsed = JSON.parse(reply);
 	if (parsed && typeof parsed === "object" && !("earlier" in parsed)) reply = JSON.stringify({ ...parsed, earlier });
-	if (parsed && typeof parsed === "object" && !("risk" in parsed)) reply = JSON.stringify({ ...JSON.parse(reply), risk });
+	if (parsed && typeof parsed === "object" && !("recommendation" in parsed)) reply = JSON.stringify({ ...JSON.parse(reply), recommendation: null });
 } catch {}
 `;
 
@@ -81,7 +71,14 @@ const logged = (call) => {
  * names. FAKE_LIMITED fails a turn on the account's usage limit with the real
  * CLI's error, naming its reset unless set to `unknown`. FAKE_CLASSIFY fails
  * the classifier's turn of each `<harness>-rejected` or `<harness>-limited` it
- * lists, the same way. FAKE_REPLY replaces the findings reply.
+ * lists, the same way. FAKE_FAILS limits FAKE_LOGGED_OUT, FAKE_REJECTED, and
+ * FAKE_LIMITED to the harnesses and models it lists, comma-separated, so one
+ * reviewer fails while the next runs. FAKE_QUOTED fails Claude Code's findings
+ * turn with a reply that only quotes a limit's message. FAKE_REPLY replaces the
+ * findings reply. FAKE_HANG_CLAUDE, a FIFO's path, hangs Claude Code's review turn until it is stopped, as a seat still
+ * running when another's failure cancels it, after signalling on the FIFO, which Codex's limit waits to read before
+ * failing, so the limit never lands before that turn starts. FAKE_HANG_CODEX, a FIFO's path, does the same to Codex's, after it opened its thread and
+ * signalled on the FIFO, which Claude Code's limit waits to read before failing, so the limit never lands first.
  */
 export const FAKES: Record<string, string> = {
 	claude: `
@@ -89,14 +86,26 @@ const fs = require("node:fs");${LOG}
 const argv = process.argv.slice(2);
 const stdin = fs.readFileSync(0, "utf8");
 const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(CLAUDE|CODEX|ANTHROPIC|FAKE_HOST|PATH$)/.test(k)));
-logged({ argv, stdin, env, cwd: process.cwd() });
+// The directory --add-dir lets it read, as it stood.
+const extra = argv.includes("--add-dir") ? argv[argv.indexOf("--add-dir") + 1] : undefined;
+const readable = extra && Object.fromEntries(fs.readdirSync(extra).map((name) => [name, fs.readFileSync(require("node:path").join(extra, name), "utf8")]));
+logged({ argv, stdin, env, cwd: process.cwd(), readable });
+// FAKE_FAILS limits the FAKE_* failures to the harnesses and models it lists.
+const model = argv.includes("--model") ? argv[argv.indexOf("--model") + 1] : argv.includes("-m") ? argv[argv.indexOf("-m") + 1] : undefined;
+const only = process.env.FAKE_FAILS?.split(",");
+const fake = (name) => (!only || only.includes("claude") || only.includes(model) ? process.env[name] : undefined);
 const credential = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"].some((k) => process.env[k]);
 const provider = Object.entries(process.env).some(([k, v]) => k.startsWith("CLAUDE_CODE_USE_") && v === "1");
-const loggedIn = !process.env.FAKE_LOGGED_OUT || credential || provider;
+const loggedIn = !fake("FAKE_LOGGED_OUT") || credential || provider;
 if (argv[0] === "auth") process.exit(loggedIn ? 0 : 1);
 const at = (flag) => argv[argv.indexOf(flag) + 1];
+if (process.env.FAKE_HANG_CLAUDE && argv.includes("--session-id") && !argv.includes("--json-schema")) {
+	fs.writeFileSync(process.env.FAKE_HANG_CLAUDE, "");
+	setInterval(() => {}, 1000);
+	return;
+}
 const result = (fields) => console.log(JSON.stringify({ type: "result", is_error: false, ...fields }));
-const rejected = process.env.FAKE_REJECTED ?? (loggedIn ? undefined : "status");
+const rejected = fake("FAKE_REJECTED") ?? (loggedIn ? undefined : "status");
 if (rejected) {
 	const session_id = at("--session-id") ?? at("--resume");
 	if (rejected === "status") {
@@ -108,9 +117,16 @@ if (rejected) {
 	}
 	process.exit(1);
 }
+// A turn that fails without the CLI's error, its reply only quoting a limit's message.
+if (process.env.FAKE_QUOTED && argv.includes("--resume")) {
+	result({ session_id: at("--resume"), result: "The diff prints: You've hit your weekly limit · resets Nov 5, 3pm (UTC)" });
+	process.exit(1);
+}
 // The limit hits the findings turn, after the review turn passed.
-if (process.env.FAKE_LIMITED && argv.includes("--resume")) {
-	if (process.env.FAKE_LIMITED !== "unknown") {
+if (fake("FAKE_LIMITED") && argv.includes("--resume")) {
+	// A read of the FIFO blocks until Codex's thread is open, with nothing to poll.
+	if (process.env.FAKE_HANG_CODEX) fs.readFileSync(process.env.FAKE_HANG_CODEX);
+	if (fake("FAKE_LIMITED") !== "unknown") {
 		console.log(JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 1900000000 } }));
 	}
 	result({ session_id: at("--resume"), is_error: true, result: "You've hit your weekly limit · resets Nov 5, 3pm (UTC)" });
@@ -162,8 +178,13 @@ const argv = process.argv.slice(2);
 const stdin = fs.readFileSync(0, "utf8");
 const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(CLAUDE|CODEX|ANTHROPIC|FAKE_HOST|PATH$)/.test(k)));
 logged({ argv, stdin, env, cwd: process.cwd() });
-if (argv[0] === "login") process.exit(process.env.FAKE_LOGGED_OUT && !process.env.CODEX_ACCESS_TOKEN ? 1 : 0);
-if (process.env.FAKE_HANG) {
+// FAKE_FAILS limits the FAKE_* failures to the harnesses and models it lists.
+const model = argv.includes("--model") ? argv[argv.indexOf("--model") + 1] : argv.includes("-m") ? argv[argv.indexOf("-m") + 1] : undefined;
+const only = process.env.FAKE_FAILS?.split(",");
+const fake = (name) => (!only || only.includes("codex") || only.includes(model) ? process.env[name] : undefined);
+if (argv[0] === "login") process.exit(fake("FAKE_LOGGED_OUT") && !process.env.CODEX_ACCESS_TOKEN ? 1 : 0);
+// FAKE_HANG hangs the first turn until it is stopped, writing its pid there, and lets later turns run.
+if (process.env.FAKE_HANG && !fs.existsSync(process.env.FAKE_HANG)) {
 	// It takes a while to exit when asked to, as a CLI saving its session does.
 	process.on("SIGTERM", () => setTimeout(() => process.exit(143), 300));
 	fs.writeFileSync(process.env.FAKE_HANG, String(process.pid));
@@ -171,8 +192,14 @@ if (process.env.FAKE_HANG) {
 	return;
 }
 const event = (value) => console.log(JSON.stringify(value));
-const loggedIn = !process.env.FAKE_LOGGED_OUT || process.env.CODEX_API_KEY || process.env.CODEX_ACCESS_TOKEN;
-const rejected = process.env.FAKE_REJECTED ?? (loggedIn ? undefined : "turn");
+if (process.env.FAKE_HANG_CODEX) {
+	event({ type: "thread.started", thread_id: "thread-1" });
+	fs.writeFileSync(process.env.FAKE_HANG_CODEX, "");
+	setInterval(() => {}, 1000);
+	return;
+}
+const loggedIn = !fake("FAKE_LOGGED_OUT") || process.env.CODEX_API_KEY || process.env.CODEX_ACCESS_TOKEN;
+const rejected = fake("FAKE_REJECTED") ?? (loggedIn ? undefined : "turn");
 if (rejected === "turn") {
 	const message = "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses";
 	event({ type: "thread.started", thread_id: "thread-1" });
@@ -184,10 +211,12 @@ if (rejected) {
 	console.error("Error: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.");
 	process.exit(1);
 }
-if (process.env.FAKE_LIMITED) {
-	const message = process.env.FAKE_LIMITED === "retried"
+if (fake("FAKE_LIMITED")) {
+	// A read of the FIFO blocks until Claude's review turn is running, with nothing to poll.
+	if (process.env.FAKE_HANG_CLAUDE) fs.readFileSync(process.env.FAKE_HANG_CLAUDE);
+	const message = fake("FAKE_LIMITED") === "retried"
 		? "exceeded retry limit, last status: 429 Too Many Requests"
-		: process.env.FAKE_LIMITED === "unknown"
+		: fake("FAKE_LIMITED") === "unknown"
 		? "You've hit your usage limit."
 		: "You've hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 5th, 2026 3:15 PM.";
 	event({ type: "thread.started", thread_id: "thread-1" });
@@ -247,6 +276,8 @@ export interface Call {
 	stdin: string;
 	env: Record<string, string>;
 	cwd: string;
+	/** The files of the directory a Claude Code turn was let read beside the checkout, as they stood. */
+	readable?: Record<string, string> | undefined;
 }
 
 /** Credentials and routes the running session may hold, cleared so each test sets its own. */
@@ -259,6 +290,7 @@ const HOST_CREDENTIALS = [
 	"ANTHROPIC_FOUNDRY_API_KEY",
 	"ANTHROPIC_FOUNDRY_AUTH_TOKEN",
 	"CLAUDE_CODE_OAUTH_TOKEN",
+	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
 	...["BEDROCK", "VERTEX", "FOUNDRY", "MANTLE", "ANTHROPIC_AWS", "ANTHROPIC_GOOGLE_CLOUD"].map(
 		(provider) => `CLAUDE_CODE_USE_${provider}`,
 	),
@@ -316,10 +348,12 @@ export function setup(host: "CLAUDECODE" | "CODEX_THREAD_ID" | null = "CLAUDECOD
 		"FAKE_LOGGED_OUT",
 		"FAKE_REJECTED",
 		"FAKE_LIMITED",
+		"FAKE_FAILS",
+		"FAKE_QUOTED",
 		"FAKE_HANG",
 		"FAKE_DISPOSITION",
 		"FAKE_RISK",
-		"FAKE_RAISE",
+		"FAKE_CLASSIFY",
 	]) {
 		vi.stubEnv(name, undefined);
 	}
@@ -342,10 +376,16 @@ export function effortOf(call: Call): string | null {
 	return setting ? JSON.parse(setting.slice("model_reasoning_effort=".length)) : null;
 }
 
-/** The turns at `effort`, so the size's pick and its shadow, which run at once on the same CLI, read apart. */
+/** The turns at `effort`, so two seats on the same CLI read apart. */
 export const at = (calls: Call[], effort: string) => calls.filter((call) => effortOf(call) === effort);
 
-export async function quest(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+export const quest = (...args: string[]) => questFrom(undefined, ...args);
+
+/** Run the CLI as the quest executing from `entry`, as `bin.ts` reports it. */
+export async function questFrom(
+	entry: string[] | undefined,
+	...args: string[]
+): Promise<{ code: number; stdout: string; stderr: string }> {
 	let stdout = "";
 	let stderr = "";
 	const out: Output = {
@@ -355,6 +395,7 @@ export async function quest(...args: string[]): Promise<{ code: number; stdout: 
 		stderr: (text) => {
 			stderr += text;
 		},
+		entry,
 	};
 	const code = await main(args, out);
 	return { code, stdout, stderr };

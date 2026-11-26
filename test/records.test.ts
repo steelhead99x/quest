@@ -1,9 +1,16 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
-import { type BreakageRecord, type SessionRecord, parseBreakage, parseRecord, parseUpload } from "../src/core";
+import {
+	type BreakageRecord,
+	type SessionRecord,
+	type SessionWait,
+	parseBreakage,
+	parseRecord,
+	parseUpload,
+} from "../src/core";
 import { buildRecords } from "../src/cli/records";
 import { transcriptFacts } from "../src/cli/transcript";
 import type { Pull, Session } from "../src/cli/usage";
@@ -37,6 +44,22 @@ const record = (extra: Partial<SessionRecord> = {}): SessionRecord => ({
 	end: "2026-11-06T11:00:00.000Z",
 	waits: [
 		{ kind: "pull", start: "2026-11-06T10:10:00.000Z", end: "2026-11-06T10:20:00.000Z", until: "checks:passed" },
+	],
+	gated: [
+		{
+			command: "just check",
+			start: "2026-11-06T10:21:00.000Z",
+			admitted: "2026-11-06T10:22:00.000Z",
+			end: "2026-11-06T10:30:00.000Z",
+			cpu: 1200,
+		},
+	],
+	shell: [
+		{
+			calls: [{ command: "git status", start: "2026-11-06T10:31:00.000Z", end: "2026-11-06T10:31:01.000Z" }],
+			cpu: 40,
+			shared: false,
+		},
 	],
 	split: null,
 	...extra,
@@ -92,6 +115,80 @@ describe("parseRecord", () => {
 			"ends before it starts",
 		],
 		["a mixed-case repository", record({ repository: "Acme/Proj" }), "lowercase"],
+		[
+			"a gated run admitted after it ended",
+			record({
+				gated: [
+					{
+						...{
+							command: "just check",
+							start: "2026-11-06T10:21:00.000Z",
+							admitted: "2026-11-06T10:22:00.000Z",
+							end: "2026-11-06T10:30:00.000Z",
+							cpu: 1200,
+						},
+						admitted: "2026-11-06T10:31:00.000Z",
+					},
+				],
+			}),
+			"out of order",
+		],
+		[
+			"a gated run that never started but used CPU",
+			record({
+				gated: [
+					{
+						...{
+							command: "just check",
+							start: "2026-11-06T10:21:00.000Z",
+							admitted: "2026-11-06T10:22:00.000Z",
+							end: "2026-11-06T10:30:00.000Z",
+							cpu: 1200,
+						},
+						admitted: null,
+					},
+				],
+			}),
+			"never started",
+		],
+		[
+			"a gated command with its arguments",
+			record({
+				gated: [
+					{
+						...{
+							command: "just check",
+							start: "2026-11-06T10:21:00.000Z",
+							admitted: "2026-11-06T10:22:00.000Z",
+							end: "2026-11-06T10:30:00.000Z",
+							cpu: 1200,
+						},
+						command: "gh pr view 1",
+					},
+				],
+			}),
+			"program names alone",
+		],
+		["a shell group without calls", record({ shell: [{ calls: [], cpu: 1, shared: false }] }), "calls"],
+		[
+			"a shell command over two lines",
+			record({
+				shell: [
+					{
+						calls: [
+							{
+								command: "a\nb",
+								start: "2026-11-06T10:31:00.000Z",
+								end: "2026-11-06T10:31:01.000Z",
+							},
+						],
+						cpu: null,
+						shared: false,
+					},
+				],
+			}),
+			"program names alone",
+		],
 		["a quest that is not a path", record({ quest: "a.md" }), "quest path"],
 	])("refuses %s", (_, value, message) => {
 		expect(() => parseRecord(value)).toThrow(message);
@@ -118,7 +215,7 @@ const breakage = (extra: Partial<BreakageRecord> = {}): BreakageRecord => ({
 		tier: "low",
 		size: "S",
 		writers: [{ harness: "Claude", model: "claude-opus-5-5", effort: "medium" }],
-		reviewers: [{ harness: "Codex", model: "gpt-6.1-sol", effort: "high" }],
+		reviewers: [{ harness: "Codex", model: "gpt-6.2-sol", effort: "high" }],
 	},
 	fix: 9,
 	incident: null,
@@ -201,17 +298,55 @@ describe("wait log", () => {
 		]);
 	});
 
-	test("reads waits that ended since an instant, tolerating only a cut-off last line", () => {
-		const e = env({ CODEX_THREAD_ID: "x1" });
-		logWait(wait, { env: e, cwd: "/w", now: Date.parse(wait.end) });
-		const later = { ...wait, start: "2026-11-07T10:00:00.000Z", end: "2026-11-07T10:05:00.000Z" };
-		logWait(later, { env: e, cwd: "/w", now: Date.parse(later.end) });
-		expect(readWaits(Date.parse("2026-11-07T00:00:00Z"), e).map((w) => w.end)).toEqual([later.end]);
-		const today = join(waitsDirectory(e), "2026-11-07.jsonl");
-		appendFileSync(today, '{"kind":"gate-r');
-		expect(readWaits(0, e)).toHaveLength(2);
-		appendFileSync(today, '\n{"kind":"gate-run"}\n');
-		expect(() => readWaits(0, e)).toThrow("2026-11-07.jsonl:2");
+	test("reads waits that ended since an instant, skipping and reporting a torn line wherever it sits", () => {
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		try {
+			const e = env({ CODEX_THREAD_ID: "x1" });
+			logWait(wait, { env: e, cwd: "/w", now: Date.parse(wait.end) });
+			const later = { ...wait, start: "2026-11-07T10:00:00.000Z", end: "2026-11-07T10:05:00.000Z" };
+			logWait(later, { env: e, cwd: "/w", now: Date.parse(later.end) });
+			expect(readWaits(Date.parse("2026-11-07T00:00:00Z"), e).map((w) => w.end)).toEqual([later.end]);
+			expect(stderr).not.toHaveBeenCalled();
+			// A short write's fragment, last in the file.
+			const today = join(waitsDirectory(e), "2026-11-07.jsonl");
+			appendFileSync(today, '{"kind":"gate-r');
+			expect(readWaits(0, e)).toHaveLength(2);
+			expect(stderr).toHaveBeenLastCalledWith(`quest: skipped ${today}:3, not a wait quest logged\n`);
+			// The next write starts on a fresh line, so the fragment sits between whole lines and costs only itself.
+			logWait(later, { env: e, cwd: "/w", now: Date.parse(later.end) });
+			stderr.mockClear();
+			expect(readWaits(0, e)).toHaveLength(3);
+			expect(stderr.mock.calls).toEqual([[`quest: skipped ${today}:3, not a wait quest logged\n`]]);
+		} finally {
+			stderr.mockRestore();
+		}
+	});
+
+	test("logs a gate run as one line, which still reads beside the waits older gates logged", () => {
+		const e = env({ CLAUDE_CODE_SESSION_ID: "c1" });
+		const run = {
+			kind: "gate" as const,
+			command: "just check",
+			start: "2026-11-06T10:00:00.000Z",
+			admitted: null,
+			end: "2026-11-06T10:05:00.000Z",
+			cpu: null,
+		};
+		logWait(run, { env: e, cwd: "/w", now: Date.parse(run.end) });
+		logWait(wait, { env: e, cwd: "/w", now: Date.parse(run.end) });
+		expect(readWaits(0, e).map((w) => w.kind)).toEqual(["gate", "gate-run"]);
+		appendFileSync(
+			join(waitsDirectory(e), "2026-11-06.jsonl"),
+			`${JSON.stringify({ ...run, cpu: -1, sessions: [], directory: "/w" })}\n`,
+		);
+		logWait(wait, { env: e, cwd: "/w", now: Date.parse(run.end) });
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		try {
+			expect(readWaits(0, e).map((w) => w.kind)).toEqual(["gate", "gate-run", "gate-run"]);
+			expect(stderr).toHaveBeenCalledWith(expect.stringContaining("2026-11-06.jsonl:5, not a wait"));
+		} finally {
+			stderr.mockRestore();
+		}
 	});
 
 	test("drops days past what it keeps", () => {
@@ -368,7 +503,7 @@ describe("buildRecords", () => {
 		closed: null,
 		body: "",
 	});
-	const logged = (kind: LoggedWait["kind"], start: string, sessions: string[], directory = "/w"): LoggedWait => ({
+	const logged = (kind: SessionWait["kind"], start: string, sessions: string[], directory = "/w"): LoggedWait => ({
 		kind,
 		start: `2026-11-06T${start}.000Z`,
 		end: `2026-11-06T${start.replace(/:\d\d$/, ":59")}.000Z`,
@@ -388,6 +523,7 @@ describe("buildRecords", () => {
 		const p1 = pull(1, "quest/m0/a", "10:30:00");
 		const p2 = pull(2, "quest/m0/b", "10:05:00");
 		const records = buildRecords({
+			calls: [],
 			repository: "acme/proj",
 			sessions: [coordinator, a, b, helper, loose],
 			own: new Map([
@@ -438,6 +574,7 @@ describe("buildRecords", () => {
 		const remote = session("far", { host: "box" });
 		const p = pull(3, "quest/m0/c", "09:00:00");
 		const records = buildRecords({
+			calls: [],
 			repository: "acme/proj",
 			sessions: [merger, reviewer, remote],
 			own: new Map([
@@ -471,6 +608,7 @@ describe("buildRecords", () => {
 		const here = session("h", { parent: "p" });
 		const elsewhere = session("e", { parent: "p" });
 		const records = buildRecords({
+			calls: [],
 			repository: "acme/proj",
 			sessions: [parent, here, elsewhere],
 			own: new Map([[parent, pull(1, "quest/m0/a", "09:00:00")]]),
@@ -488,6 +626,7 @@ describe("buildRecords", () => {
 		const on = session("on");
 		const off = session("off");
 		const records = buildRecords({
+			calls: [],
 			repository: "acme/proj",
 			sessions: [on, off],
 			own: new Map([[on, pull(1, "quest/m0/a", "09:00:00")]]),
@@ -504,6 +643,7 @@ describe("buildRecords", () => {
 		// Its first request in the window comes after the wait ended.
 		const named = session("n", { start: at("10:45:00") });
 		const records = buildRecords({
+			calls: [],
 			repository: "acme/proj",
 			sessions: [anonymous, named],
 			own: new Map([
@@ -518,6 +658,87 @@ describe("buildRecords", () => {
 		});
 		expect(records.get(anonymous)).toMatchObject({ session: null, pulls: [1] });
 		expect(records.get(named)!.waits!.map((w) => w.kind)).toEqual(["pull"]);
+	});
+
+	test("a gate run gives its queue and run waits and a gated entry, and overlapping calls one shell group", () => {
+		const main = session("s");
+		const sub = session("sub", { parent: "s", start: at("10:05:00") });
+		const remote = session("r", { host: "box" });
+		const gate = (start: string, admitted: string | null, end: string, cpu: number | null): LoggedWait => ({
+			kind: "gate",
+			command: "just check",
+			start: `2026-11-06T${start}.000Z`,
+			admitted: admitted && `2026-11-06T${admitted}.000Z`,
+			end: `2026-11-06T${end}.000Z`,
+			cpu,
+			sessions: [{ harness: "claude", session: "s" }],
+			directory: "/elsewhere",
+		});
+		const sample = (time: string, usage: number) => ({ at: `2026-11-06T${time}.000Z`, cgroup: "/a.scope", usage });
+		const caller = (agent: string | null) => ({ harness: "claude", session: "s", agent });
+		const records = buildRecords({
+			calls: [
+				{ kind: "start", ...caller(null), call: "1", command: "cargo build", ...sample("10:10:00", 1_000_000) },
+				{ kind: "start", ...caller("sub"), call: "2", command: "ls", ...sample("10:10:01", 1_000_500) },
+				{ kind: "end", ...caller("sub"), call: "2", task: null, ...sample("10:10:02", 1_200_000) },
+				{ kind: "end", ...caller(null), call: "1", task: null, ...sample("10:10:30", 9_000_000) },
+				// Before the window, so no record holds it.
+				{ kind: "start", ...caller(null), call: "0", command: "old", ...sample("09:00:00", 0) },
+				{ kind: "end", ...caller(null), call: "0", task: null, ...sample("09:00:01", 10) },
+			],
+			repository: "acme/proj",
+			sessions: [main, sub, remote],
+			own: new Map([
+				[main, pull(1, "quest/m0/a", "09:00:00")],
+				[remote, pull(1, "quest/m0/a", "09:00:00")],
+			]),
+			reviewers: new Set(),
+			classifiers: new Set(),
+			waits: [gate("10:20:00", "10:21:00", "10:30:00", 1500), gate("10:40:00", null, "10:41:00", null)],
+			since: at("10:00:00"),
+		});
+		const of = (s: Session) => records.get(s)!;
+		expect(of(main).waits!.map((w) => [w.kind, w.start.slice(11, 16), w.end.slice(11, 16)])).toEqual([
+			["gate-queue", "10:20", "10:21"],
+			["gate-run", "10:21", "10:30"],
+			["gate-queue", "10:40", "10:41"],
+		]);
+		expect(of(main).gated).toEqual([
+			{
+				command: "just check",
+				start: "2026-11-06T10:20:00.000Z",
+				admitted: "2026-11-06T10:21:00.000Z",
+				end: "2026-11-06T10:30:00.000Z",
+				cpu: 1500,
+			},
+			{
+				command: "just check",
+				start: "2026-11-06T10:40:00.000Z",
+				admitted: null,
+				end: "2026-11-06T10:41:00.000Z",
+				cpu: null,
+			},
+		]);
+		// Each holds its own calls, so no session's commands reach another's record, and the group's CPU.
+		expect(of(main).shell).toEqual([
+			{
+				calls: [{ command: "cargo build", start: "2026-11-06T10:10:00.000Z", end: "2026-11-06T10:10:30.000Z" }],
+				cpu: 8000,
+				shared: true,
+			},
+		]);
+		expect(of(sub)).toMatchObject({
+			gated: [],
+			shell: [
+				{
+					calls: [{ command: "ls", start: "2026-11-06T10:10:01.000Z", end: "2026-11-06T10:10:02.000Z" }],
+					cpu: 8000,
+					shared: true,
+				},
+			],
+		});
+		expect(of(remote)).toMatchObject({ gated: null, shell: null });
+		expect(() => parseRecord(JSON.parse(JSON.stringify(of(main))))).not.toThrow();
 	});
 
 	test("a person's wait is windowed, and an unreadable transcript leaves waits unknown", () => {
@@ -549,6 +770,7 @@ describe("buildRecords", () => {
 			reviewers: new Set<string>(),
 			classifiers: new Set<string>(),
 			waits: [],
+			calls: [],
 			since: at("09:00:00"),
 		};
 		const records = buildRecords(input);

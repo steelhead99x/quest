@@ -3,6 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { constants, closeSync, existsSync, fstatSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import prompt from "../../assets/land-fix.md";
 import { discoveryEnv } from "./git";
 import { programEnvironment, requireProgram } from "./program";
@@ -10,6 +11,54 @@ import { programEnvironment, requireProgram } from "./program";
 export class FixerAgentError extends Error {
 	constructor(readonly exitCode: number) {
 		super(`fixer agent exited ${exitCode}`);
+	}
+}
+
+/** Claude Code's built-in plugin that injects the checkout's AGENTS.md as instructions, which the fixer must not load. */
+const AGENTS_PLUGIN = "cc-plugin-agents-md@builtin";
+
+/**
+ * The model and plugins Claude Code's `init` event names, read from its `stream-json` stdout. Only system
+ * events before the first conversation event count: anything the PRs' code prints arrives inside those.
+ */
+class Init {
+	model?: string;
+	plugins: string[] = [];
+	private decoder = new StringDecoder("utf8");
+	private carry = "";
+	private done = false;
+
+	read(chunk: Buffer): void {
+		if (this.done) return;
+		const lines = (this.carry + this.decoder.write(chunk)).split("\n");
+		this.carry = lines.pop()!;
+		// An init line runs to a few kilobytes; one this long is no event, and a truncated one would not parse.
+		if (this.carry.length > 1_000_000) this.done = true;
+		for (const line of lines) {
+			let event: unknown;
+			try {
+				event = JSON.parse(line);
+			} catch {
+				continue; // A wrapper's own output before the agent starts.
+			}
+			if (!event || typeof event !== "object") continue; // A wrapper's own output, too.
+			if ((event as { type?: unknown }).type !== "system") {
+				this.done = true;
+				return;
+			}
+			const { subtype, model, plugins } = event as { subtype?: unknown; model?: unknown; plugins?: unknown };
+			if (subtype !== "init") continue;
+			if (typeof model === "string" && /^[a-zA-Z0-9._/-]{1,100}$/.test(model)) this.model = model;
+			if (Array.isArray(plugins))
+				// Builds name a plugin by `name` and `path` or by `source`, so every one counts.
+				this.plugins = plugins.flatMap((plugin) =>
+					plugin && typeof plugin === "object"
+						? [plugin.name, plugin.source, plugin.path].filter((v): v is string => typeof v === "string")
+						: [],
+				);
+			this.done = true;
+			return;
+		}
 	}
 }
 
@@ -214,8 +263,8 @@ export function parseFixResult(text: string, numbers: number[], known: KnownFlak
 	return value as FixResult[];
 }
 
-/** Codex's reasoning efforts, for `model_reasoning_effort`. */
-export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh"];
+/** The efforts the fixer may run Claude Code at: every one but `max`, which no quest agent runs. */
+export const EFFORTS = ["low", "medium", "high", "xhigh"];
 /**
  * The variable a daemon sets for its fixer wrapper to pass on as `quest land fix --effort`, since the
  * wrapper's arguments are only the failure log and the PR numbers.
@@ -226,7 +275,7 @@ export async function fix(
 	root: string,
 	log: string,
 	numbers: number[],
-	agent = "codex",
+	agent = "claude",
 	args?: string[],
 	model?: string,
 	effort = "medium",
@@ -238,8 +287,8 @@ export async function fix(
 		new Set(numbers).size !== numbers.length
 	)
 		throw new Error("fix needs one or more distinct positive PR numbers");
-	if (!args && (!process.env.OPENAI_BASE_URL || !process.env.OPENAI_API_KEY))
-		throw new Error("fix needs OPENAI_BASE_URL and OPENAI_API_KEY from the container wrapper");
+	if (!args && (!process.env.ANTHROPIC_BASE_URL || !process.env.ANTHROPIC_API_KEY))
+		throw new Error("fix needs ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY from the container wrapper");
 	readFileSync(log); // Fail before starting an agent when the wrapper did not expose the log.
 	const flaky = knownFlaky(root);
 	// The daemon pinned each PR's head on its pr-<n> branch; name it so the agent need not look it up.
@@ -261,66 +310,76 @@ export async function fix(
 		...programEnvironment({ PATH: process.env.PATH }),
 		HOME: process.env.HOME,
 		LANG: "C.UTF-8",
-		OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
-		OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-		CODEX_API_KEY: process.env.OPENAI_API_KEY,
+		// The proxy's client key is the only credential, sent as an API key: --bare never reads a stored login.
+		ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
+		ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+		// The container reaches only the proxy and the dependency hosts, so no telemetry or update checks.
+		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+		// The wrapper's container is the sandbox; without this Claude Code refuses to skip permissions as root.
+		IS_SANDBOX: "1",
 		GIT_CONFIG_GLOBAL: "/dev/null",
 		GIT_CONFIG_NOSYSTEM: "1",
 		GIT_TERMINAL_PROMPT: "0",
 	};
+	// --bare and no setting sources load no CLAUDE.md, hook, plugin, or settings from HOME or the checkout,
+	// --strict-mcp-config no MCP server, and the disabled built-in no AGENTS.md, so the base's tree reaches
+	// the agent only as files it reads. The prompt goes in the system prompt, above the data in rank.
 	const argv = args ?? [
-		"exec",
-		"--ephemeral",
-		"--ignore-user-config",
-		"--ignore-rules",
-		"--dangerously-bypass-approvals-and-sandbox",
-		"-c",
-		"project_doc_max_bytes=0",
-		"-c",
-		`developer_instructions=${JSON.stringify(prompt)}`,
-		"-c",
-		'model_provider="quest-fixer"',
-		"-c",
-		'model_providers.quest-fixer.name="Host model proxy"',
-		"-c",
-		`model_providers.quest-fixer.base_url=${JSON.stringify(process.env.OPENAI_BASE_URL)}`,
-		"-c",
-		'model_providers.quest-fixer.env_key="OPENAI_API_KEY"',
-		"-c",
-		'model_providers.quest-fixer.wire_api="responses"',
-		// Without this, Codex runs the proxy's model with no reasoning at all ("reasoning effort: none").
-		"-c",
-		`model_reasoning_effort=${JSON.stringify(effort)}`,
+		"-p",
+		"--bare",
+		"--setting-sources",
+		"",
+		"--settings",
+		JSON.stringify({ enabledPlugins: { [AGENTS_PLUGIN]: false } }),
+		"--append-system-prompt",
+		prompt,
+		"--strict-mcp-config",
+		"--disable-slash-commands",
+		"--no-session-persistence",
+		"--dangerously-skip-permissions",
+		"--tools",
+		"Bash,Read,Edit,Write,Glob,Grep",
+		// Only the stream names the model before the agent's own output.
+		"--output-format",
+		"stream-json",
+		"--verbose",
+		"--effort",
+		effort,
 		...(model ? ["--model", model] : []),
-		"-",
 	];
-	// Codex names its model in the header it prints first, whether or not the command line does.
-	let header = "";
+	const init = new Init();
 	await new Promise<void>((done, reject) => {
 		// Relay the agent's output through pipes of its own rather than letting it inherit ours. Once Bun writes
-		// to a pipe it marks that pipe non-blocking, and an inheriting child shares the flag: Codex then panicked
-		// (exit 101) with EAGAIN as soon as one command's output outran the host's reader.
+		// to a pipe it marks that pipe non-blocking, and an inheriting child shares the flag: an agent then fails
+		// with EAGAIN as soon as one command's output outruns the host's reader.
 		const child = spawn(program, argv, { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] });
 		child.stdout.pipe(process.stdout, { end: false });
 		child.stderr.pipe(process.stderr, { end: false });
-		child.stderr.on("data", (chunk: Buffer) => {
-			if (header.length < 4096) header += chunk.toString("utf8");
+		let refused: Error | undefined;
+		child.stdout.on("data", (chunk: Buffer) => {
+			init.read(chunk);
+			// Fail loud rather than let a renamed or re-enabled built-in feed the agent the checkout's instructions.
+			if (!refused && init.plugins.some((plugin) => /agents-md/i.test(plugin))) {
+				refused = new Error("fixer agent loaded a plugin that injects the checkout's AGENTS.md");
+				child.kill("SIGTERM");
+			}
 		});
 		child.once("error", reject);
 		child.stdin.on("error", () => {});
-		child.stdin.end(
-			`${prompt}\n\nFailure log: ${JSON.stringify(log)}\nPRs:\n${prs.join("\n")}\n${flaky.length ? `Known flaky tests: ${JSON.stringify(flaky)}\n` : ""}`,
+		const data = `Failure log: ${JSON.stringify(log)}\nPRs:\n${prs.join("\n")}\n${flaky.length ? `Known flaky tests: ${JSON.stringify(flaky)}\n` : ""}`;
+		// A replaced command has no system prompt of its own, so it reads the prompt first.
+		child.stdin.end(args ? `${prompt}\n\n${data}` : data);
+		child.once("close", (code) =>
+			refused ? reject(refused) : code === 0 ? done() : reject(new FixerAgentError(code ?? 1)),
 		);
-		child.once("close", (code) => (code === 0 ? done() : reject(new FixerAgentError(code ?? 1))));
 	});
 	const results = parseFixResult(readFixResult(root), numbers, flaky);
 	const index = argv.findIndex((arg) => arg === "-m" || arg === "--model");
-	const ranModel =
-		(index >= 0 ? argv[index + 1] : argv.find((arg) => arg.startsWith("--model="))?.slice(8)) ??
-		/^model: ([a-zA-Z0-9._/-]{1,100})$/m.exec(header)?.[1];
+	const named = index >= 0 ? argv[index + 1] : argv.find((arg) => arg.startsWith("--model="))?.slice(8);
 	const identity = {
 		agent: basename(agent),
-		model: ranModel ?? "unknown",
+		// The init event names the model an alias such as `opus` resolved to.
+		model: init.model ?? named ?? "unknown",
 		// Replaced arguments may run the agent at any effort.
 		effort: args ? "unknown" : effort,
 	};

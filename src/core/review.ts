@@ -2,6 +2,9 @@
 
 import { markdown } from "./doc";
 
+/** The line that opens the record `quest review` writes, which only its rounds keep. */
+export const REVIEW_MARK = "Rewritten by `quest review` after each round.";
+
 /**
  * Where the body of the first `## Review` section runs: from after its heading's line to the next level-1
  * or level-2 heading's line, or the end. Only top-level headings count, as Markdown parses them, so an
@@ -21,9 +24,13 @@ export function reviewSection(body: string): { start: number; end: number } | nu
 	return start === undefined ? null : { start, end: body.length };
 }
 
-/** A review finding's severities, most severe first. */
+// The `## Review` record's reader, pure so the quest log Worker (cloudflare/) can share it; `quest review`'s
+// writer and the rest of the record live in src/cli/review-record.ts, which re-exports these.
+
+/** Each finding's severity, highest first. */
 export const SEVERITIES = ["high", "medium", "low"] as const;
-/** A count of findings by severity. */
+
+/** A count of findings per severity. */
 export type Findings = Record<(typeof SEVERITIES)[number], number>;
 
 /** A tally's counts, as the record's `Rounds:` line and `quest usage` write them. */
@@ -34,7 +41,7 @@ export interface Counts {
 	findings: Findings;
 	fixed: number;
 	refuted: number;
-	/** Open findings of a merged PR's last all-low round, which the review rule fixes or refutes before merge. */
+	/** Findings the maintainer accepted, or open ones of a merged PR's last all-low round, which the review rule once settled before merge. */
 	settled: number;
 	open: number;
 }
@@ -45,8 +52,10 @@ export interface ReviewSummary {
 	harness: string;
 	model: string;
 	effort: string;
-	/** Whether it is the shadow: the size's pick one effort lower, beside it on the same heads. */
+	/** Whether it is the shadow: the size's pick one effort away, beside it on the same heads. */
 	shadow: boolean;
+	/** Whether it is the second reviewer a high-risk head gets, from a vendor other than the pick's. */
+	second: boolean;
 	/** Its latest session, null when the record names none; its round, null when the latest run left it out. */
 	session: string | null;
 	round: number | null;
@@ -58,12 +67,9 @@ export interface ReviewSummary {
 	open: Findings;
 }
 
-/** The line after which `quest review`'s own record begins. */
-export const REVIEW_MARK = "Rewritten by `quest review` after each round.";
-
 /**
  * Each reviewer's latest round `body`'s `## Review` section records, or none when `quest review` wrote none
- * there, as when the section records a skipped review or only the land fixer's fixes.
+ * there, as for a low head's record or a section with only the land fixer's fixes.
  */
 export function parseReview(body: string): ReviewSummary[] {
 	const section = reviewSection(body);
@@ -71,20 +77,23 @@ export function parseReview(body: string): ReviewSummary[] {
 	const all = body.slice(section.start, section.end);
 	const at = all.indexOf(REVIEW_MARK);
 	if (at < 0) return [];
+	// Findings the maintainer accepted are settled, not open.
+	const accepted = /^- Accepted by the maintainer: /m.test(all);
 	// Each reviewer's block starts at its Reviewer line.
 	const blocks = all
 		.slice(at)
 		.split(/^(?=- Reviewer: )/m)
 		.slice(1);
-	if (blocks.length === 0) throw new Error("the ## Review record names no reviewer");
 	return blocks.map((text) => {
 		const match = (pattern: RegExp) => {
 			const found = pattern.exec(text);
 			if (!found) throw new Error(`the ## Review record has no line matching ${pattern.source}`);
 			return found;
 		};
-		const reviewer = match(/^- Reviewer: (.+?), (\S+), (\S+) effort(, shadow)?\r?$/m);
-		const tally = parseCounts(text);
+		const reviewer = match(/^- Reviewer: (.+?), (\S+), (\S+) effort(?:(, shadow)|(, second))?\r?$/m);
+		const counts = parseCounts(text);
+		const tally =
+			accepted && counts !== null ? { ...counts, settled: counts.settled + counts.open, open: 0 } : counts;
 		// A reviewer the latest run left out has its tally, and its session with no round once tallies name it.
 		const session =
 			tally !== null && !/^- Session: /m.test(text)
@@ -96,13 +105,15 @@ export function parseReview(body: string): ReviewSummary[] {
 					);
 		const score = /^- Score: (\d+)\/10,/m.exec(text);
 		const open = { high: 0, medium: 0, low: 0 };
-		for (const [, severity] of text.matchAll(/^  - (High|Medium|Low), /gm))
-			open[severity!.toLowerCase() as keyof typeof open]++;
+		if (!accepted)
+			for (const [, severity] of text.matchAll(/^  - (High|Medium|Low), /gm))
+				open[severity!.toLowerCase() as keyof typeof open]++;
 		return {
 			harness: reviewer[1]!,
 			model: reviewer[2]!,
 			effort: reviewer[3]!,
 			shadow: reviewer[4] !== undefined,
+			second: reviewer[5] !== undefined,
 			session: session && session[2]!,
 			round: session?.[3] === undefined ? null : Number(session[3]),
 			score: score ? Number(score[1]) : null,

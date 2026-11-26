@@ -16,10 +16,10 @@ import { dirname, join, relative } from "node:path";
 
 import { expect, test } from "vitest";
 
-import { check, formatFinding, ready } from "../src/core";
+import { AUDITS, check, formatFinding, ready } from "../src/core";
 import { CONTEXT_LIMIT, hook } from "../src/cli/hooks";
 import { REFERENCE_LINE, init, stubFindings, uninstall } from "../src/cli/setup";
-import { SKILLS } from "../src/cli/skills";
+import { CONTEXT, SKILLS } from "../src/cli/skills";
 import { checkout, load } from "../src/cli/tree";
 import { tempDir } from "./fixture";
 
@@ -481,6 +481,24 @@ test("stub check flags missing, outdated, and edited stubs, and the session hook
 	expect(context()[0].length).toBeLessThanOrEqual(CONTEXT_LIMIT);
 });
 
+test("stub check asks for no audit stubs without a quest tree", () => {
+	const dir = tempDir();
+	init(dir);
+	rmSync(join(dir, "quest"), { recursive: true });
+	expect(stubFindings(dir)).toEqual([]);
+});
+
+test("the session hooks load the rules when the stub check cannot read the tree", () => {
+	const dir = tempDir();
+	mkdirSync(join(dir, ".git"));
+	init(dir);
+	symlinkSync("loop.md", join(dir, "quest/loop.md"));
+	const context = JSON.parse(hook({ hook_event_name: "SessionStart", cwd: dir })).hookSpecificOutput
+		.additionalContext as string;
+	expect(context.startsWith(CONTEXT)).toBe(true);
+	expect(context).toContain("Quest could not compare the stubs here");
+});
+
 test("stub check adds nothing in a repository that does not use Quest", () => {
 	const dir = tempDir();
 	mkdirSync(join(dir, ".git"));
@@ -541,33 +559,28 @@ function findings(dir: string): string[] {
 
 const QUEST = "# [S] Work\n\n## Goal\n\nWork.\n";
 
+/** The stub paths init plants in milestone `m`, in AUDITS order. */
+const stubs = (m: string) => AUDITS.map((audit) => `quest/${m}/audit-${audit.name}.md`);
+
 test("a fresh init plants each audit after an empty m0, ready at once", () => {
 	const dir = tempDir();
 	const changed = init(dir);
-	expect(changed).toEqual(
-		expect.arrayContaining([
-			"quest/m0/README.md",
-			"quest/m1/README.md",
-			"quest/m1/audit-tree.md",
-			"quest/m1/audit-deps.md",
-		]),
-	);
+	expect(changed).toEqual(expect.arrayContaining(["quest/m0/README.md", "quest/m1/README.md", ...stubs("m1")]));
 	const stub = read(dir, "quest/m1/audit-deps.md");
 	expect(stub).toMatch(/^# \[M\] Audit dependencies\n\n## Goal\n\n.*`quest audit deps`.*\n\n## Audit\n\n- deps\n$/);
 	expect(findings(dir)).toEqual([]);
-	expect(ready(load(dir), "2026-11-10")).toEqual(["quest/m1/audit-deps.md", "quest/m1/audit-tree.md"]);
+	expect(ready(load(dir), "2026-11-10")).toEqual(stubs("m1").sort());
 	expect(init(dir)).toEqual([]);
 });
 
 test("init plants each audit in the milestone after the lowest one with work left, requiring it", () => {
 	const dir = tempDir();
 	init(dir);
-	for (const path of ["quest/m1/audit-tree.md", "quest/m1/audit-deps.md", "quest/m1/README.md"])
-		rmSync(join(dir, path));
+	for (const path of [...stubs("m1"), "quest/m1/README.md"]) rmSync(join(dir, path));
 	// m0 is finished; m1 holds work, so the stubs wait for it in a new m2.
 	write(dir, "quest/m1/README.md", "# Next\n\n## Goal\n\nNext.\n");
 	write(dir, "quest/m1/work.md", QUEST);
-	expect(init(dir)).toEqual(["quest/m2/README.md", "quest/m2/audit-tree.md", "quest/m2/audit-deps.md"]);
+	expect(init(dir)).toEqual(["quest/m2/README.md", ...stubs("m2")]);
 	expect(read(dir, "quest/m2/audit-tree.md")).toContain(
 		"\n## Required\n\n- [m1](/quest/m1/README.md) - the audit runs after it\n",
 	);
@@ -580,14 +593,18 @@ test("init plants no audit a quest names or the root skips, and never edits a pl
 	write(
 		dir,
 		"quest/README.md",
-		"# Quests\n\n## Goal\n\nWork.\n\n## Skipped audits\n\n- deps - nothing to depend on\n",
+		"# Quests\n\n## Goal\n\nWork.\n\n## Skipped audits\n\n- deps - nothing to depend on\n- code\n- cost\n- docs\n- tests\n- instructions\n",
 	);
 	write(dir, "quest/m0/README.md", "# Now\n\n## Goal\n\nNow.\n");
 	write(dir, "quest/m0/tree.md", `${QUEST}\n## Audit\n\n- tree\n`);
 	expect(init(dir).filter((path) => path.startsWith("quest/"))).toEqual([]);
 	expect(existsSync(join(dir, "quest/m1"))).toBe(false);
 
-	write(dir, "quest/README.md", "# Quests\n\n## Goal\n\nWork.\n");
+	write(
+		dir,
+		"quest/README.md",
+		"# Quests\n\n## Goal\n\nWork.\n\n## Skipped audits\n\n- code\n- cost\n- docs\n- tests\n- instructions\n",
+	);
 	expect(init(dir)).toEqual(["quest/m1/README.md", "quest/m1/audit-deps.md"]);
 	write(dir, "quest/m1/audit-deps.md", "# [L] Edited\n\n## Goal\n\nOurs.\n\n## Audit\n\n- deps\n");
 	expect(init(dir)).toEqual([]);
@@ -605,7 +622,7 @@ test("init refuses a stub's path that other work holds, writing nothing", () => 
 	expect(snapshot(dir)).toEqual(before);
 });
 
-test("a held audit path leaves the skill stub findings in place", () => {
+test("stub check reports a held audit path beside the skill stub findings", () => {
 	const dir = tempDir();
 	init(dir);
 	write(dir, "quest/m0/work.md", QUEST);
@@ -614,7 +631,38 @@ test("a held audit path leaves the skill stub findings in place", () => {
 	rmSync(join(dir, ".claude/skills/quest-start"), { recursive: true });
 	expect(stubFindings(dir)).toEqual([
 		".claude/skills/quest-start/SKILL.md: is missing; run the repository's pinned `quest init` and commit the result",
+		"quest/m1/audit-deps.md is in the way of the `deps` audit's stub, which no quest names; move it, or, if the maintainer declines the audit, list `deps` under `## Skipped audits` in `quest/README.md`, before running `quest init`",
 	]);
+});
+
+test("stub check flags a shipped audit without a stub until a quest names it or the root skips it", () => {
+	const dir = tempDir();
+	init(dir);
+	write(dir, "quest/m0/work.md", QUEST);
+	const stub = read(dir, "quest/m1/audit-instructions.md");
+	rmSync(join(dir, "quest/m1/audit-instructions.md"));
+	expect(stubFindings(dir)).toEqual([
+		"quest/m1/audit-instructions.md: is missing; run the repository's pinned `quest init` and commit the result, or, if the maintainer declines the audit, list `instructions` under `## Skipped audits` in `quest/README.md`",
+	]);
+
+	write(dir, "quest/m1/audit-instructions.md", stub);
+	expect(stubFindings(dir)).toEqual([]);
+
+	// A heading `quest check` flags as non-literal still names the audit, so nothing would plant a second stub.
+	write(dir, "quest/m1/audit-instructions.md", stub.replace("## Audit\n", "Audit\n-----\n"));
+	expect(stubFindings(dir)).toEqual([]);
+	expect(init(dir)).toEqual([]);
+	write(
+		dir,
+		"quest/m1/audit-instructions.md",
+		`# Instructions\n${stub.slice(stub.indexOf("\n"))}`.replace("## Audit\n", "## Au**dit**\n"),
+	);
+	expect(stubFindings(dir)).toEqual([]);
+	expect(init(dir)).toEqual([]);
+
+	rmSync(join(dir, "quest/m1/audit-instructions.md"));
+	write(dir, "quest/README.md", `${read(dir, "quest/README.md")}\n## *Skipped* _audits_\n\n- instructions\n`);
+	expect(stubFindings(dir)).toEqual([]);
 });
 
 test("init refuses a quest whose branch a new milestone would nest under", () => {

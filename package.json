@@ -3,7 +3,7 @@
 	"description": "Versioned Markdown quests: validate plans, find ready work, and name the branches a quest lands on.",
 	"license": "MIT OR Apache-2.0",
 	"author": "Luke Curley",
-	"repository": "github:moq-dev/quest",
+	"repository": "github:kixel-ai/quest",
 	"private": true,
 	"type": "module",
 	"workspaces": [
@@ -37,7 +37,7 @@
 	"devDependencies": {
 		"@types/mdast": "4.0.4",
 		"@types/node": "26.6.6",
-		"prettier": "3.9.10",
+		"prettier": "3.10.1",
 		"typescript": "7.0.2",
 		"vitest": "5.1.0"
 	},

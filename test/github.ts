@@ -32,6 +32,8 @@ export type Pull = Issue & {
 		url: string;
 		app?: number;
 		context?: boolean;
+		/** The account that posts it, `<app slug>[bot]` for a run; GitHub Actions' bot by default. */
+		poster?: string;
 		commit?: string;
 		/** The check suite of the workflow run that reported it. */
 		suite?: number;
@@ -267,9 +269,17 @@ export const ACTIONS_APP = 15368;
 /** One page of a head's check runs and commit statuses, as `statusCheckRollup.contexts` pages them. */
 function contextPage(repo: Repo, pull: Pick<Pull, "runs">, after: unknown) {
 	const start = typeof after === "string" ? Number(after) : 0;
+	const poster = (run: NonNullable<Pull["runs"]>[number]) => run.poster ?? "github-actions[bot]";
 	const all = (pull.runs ?? []).map((run, index) =>
 		run.context
-			? { __typename: "StatusContext", context: run.name, state: run.conclusion, targetUrl: run.url }
+			? {
+					__typename: "StatusContext",
+					context: run.name,
+					state: run.conclusion,
+					targetUrl: run.url,
+					isRequired: (repo.required ?? []).includes(run.name),
+					creator: actorOf(poster(run)),
+				}
 			: {
 					__typename: "CheckRun",
 					// GitHub numbers runs as they are created.
@@ -278,10 +288,11 @@ function contextPage(repo: Repo, pull: Pick<Pull, "runs">, after: unknown) {
 					status: "COMPLETED",
 					conclusion: run.conclusion,
 					detailsUrl: run.url,
+					isRequired: (repo.required ?? []).includes(run.name),
 					checkSuite: {
 						databaseId: run.suite ?? null,
 						status: run.running ? "IN_PROGRESS" : "COMPLETED",
-						app: { databaseId: run.app ?? ACTIONS_APP },
+						app: { databaseId: run.app ?? ACTIONS_APP, slug: poster(run).replace(/\[bot\]$/, "") },
 						workflowRun: run.workflow
 							? { file: { path: run.workflow, repositoryName: `${repo.owner}/${repo.name}` } }
 							: null,
@@ -296,6 +307,15 @@ function contextPage(repo: Repo, pull: Pick<Pull, "runs">, after: unknown) {
 }
 
 function graphql(repo: Repo, query: string, variables: Record<string, unknown>) {
+	// No commit here carries a `quest review` status.
+	if (query.includes("query ReviewTiers"))
+		return {
+			data: {
+				repository: {
+					pullRequest: { commits: { pageInfo: { hasPreviousPage: false, startCursor: null }, nodes: [] } },
+				},
+			},
+		};
 	if (query.includes("object(oid: $oid)")) {
 		const runs = repo.commitRuns?.[variables.oid as string];
 		if (runs)
@@ -691,7 +711,9 @@ export function fakeGitHub(world: World) {
 						}
 				return json({ errors: [{ type: "NOT_FOUND" }] });
 			}
-			const repo = world.repos.find((r) => r.owner === variables.owner && r.name === variables.name);
+			const repo = world.repos.find(
+				(r) => r.owner === variables.owner && r.name === (variables.name ?? variables.repo),
+			);
 			if (!repo || !scope.repositories.has(`${repo.owner}/${repo.name}`))
 				return json({ errors: [{ type: "NOT_FOUND", message: "Not Found" }] });
 			return json(graphql(repo, query, variables));
@@ -1070,6 +1092,28 @@ export function fakeGitHub(world: World) {
 			if (!current.includes(name)) return json({ message: "Label does not exist" }, 404);
 			pull.labels = current.filter((label) => label !== name);
 			return json(pull.labels.map((label) => ({ name: label })));
+		}
+		// A head's diff from its merge base with a base branch, as the landing review check reads it.
+		const branchCompare = tail.match(/^\/compare\/([^./][^/]*?)\.\.\.([0-9a-f]{40})$/);
+		if (branchCompare && !/^[0-9a-f]{40}$/.test(branchCompare[1]!) && method === "GET") {
+			const tip = repo.branches[decodeURIComponent(branchCompare[1]!)];
+			const head = branchCompare[2]!;
+			if (!tip || !repo.commits[head]) return notFound();
+			const ancestors = (from: string, seen = new Set<string>()): Set<string> => {
+				if (seen.has(from)) return seen;
+				seen.add(from);
+				for (const parent of repo.commits[from]?.parents ?? []) ancestors(parent, seen);
+				return seen;
+			};
+			const common = [...ancestors(head)].filter((sha) => ancestors(tip).has(sha));
+			const base = common.find((sha) => !common.some((other) => other !== sha && ancestors(other).has(sha)));
+			const tree = (sha: string | undefined) => (sha ? filesOf(repo, repo.commits[sha]?.tree ?? "") : {});
+			const [before, after] = [tree(base), tree(head)];
+			const files = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+				.filter((path) => before[path] !== after[path])
+				.sort()
+				.map((filename) => ({ filename }));
+			return json({ merge_base_commit: base ? { sha: base } : null, files });
 		}
 		const compare = tail.match(/^\/compare\/([0-9a-f]{40})\.\.\.([^/]+)$/);
 		if (compare && method === "GET") {

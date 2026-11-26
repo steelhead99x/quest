@@ -2,9 +2,30 @@
 // the work went by the PR's own record. token-max reads and prices the sessions, on this host and any SSH host
 // named; quest ties each to a PR by the branches and repositories token-max exports for it.
 import { spawnSync } from "node:child_process";
-import { type RecordedRisk, type Size, SIZES, TIERS, type Tier, handedBack, questBranch, recordedRisk } from "../core";
+import {
+	breakageKey,
+	type BreakageRecord,
+	handedBack,
+	questBranch,
+	type RecordedRisk,
+	recordedRisk,
+	type Repository,
+	type Role,
+	ROLES,
+	type Seat,
+	type SessionRecord,
+	type Size,
+	SIZES,
+	SPLIT_CATEGORIES,
+	type SplitUsage,
+	type Tier,
+	riskier,
+	TIERS,
+	type TimeSplit,
+	WAIT_KINDS,
+} from "../core";
 import type { Arm } from "./models";
-import { recorded } from "./models-record";
+import { canonicalModel, recorded } from "./models-record";
 import { type ClaimDependencies, upstream } from "./claims";
 import { repositoryPath } from "../github/client";
 import { git } from "./git";
@@ -12,7 +33,7 @@ import { culpritOf, culprits } from "./breakage";
 import { fixes } from "./land-fixer";
 import { MERGER } from "./land-watch-fix";
 import { githubRepository, requireRemote } from "./github";
-import { type GitHub, type ObjectValue, type Repository, link, object } from "../github/client";
+import { type GitHub, type GitHubReader, type ObjectValue, link, object } from "../github/client";
 import { type OnlineReview, readOnlineReviews } from "../github/online-review";
 import {
 	type Counts,
@@ -24,22 +45,11 @@ import {
 	severityText,
 } from "./review-record";
 import { SEVERITIES } from "./review";
-import {
-	type BreakageRecord,
-	ROLES,
-	breakageKey,
-	type Role,
-	SPLIT_CATEGORIES,
-	type Seat,
-	type SessionRecord,
-	type SplitUsage,
-	type TimeSplit,
-	WAIT_KINDS,
-} from "../core";
 import { type RecordInput, buildRecords } from "./records";
 import { stateDirectory } from "./send";
 import { keptSplit } from "./split";
 import { type LoggedWait, readWaits } from "./waits";
+import { type CallLine, readCalls } from "./calls";
 
 /** A session's tokens, and their cost at the model's API list price, which subscriptions do not bill. */
 export interface Tokens {
@@ -105,6 +115,8 @@ export interface PullRow {
 	review: ReviewSummary[];
 	/** The risk tier the record names for its head, null when it names none. */
 	risk: RecordedRisk | null;
+	/** Why part of its `## Review` record could not be read: its reviewers, its tier, or both, which it then lacks. */
+	unreadReview: string | null;
 	/** Who made each mechanical fix the land fixer recorded, or `quest land watch` for a base merge it made alone. */
 	landFixes: string[];
 	/** Later PRs that list it under `## Caused by`. */
@@ -168,6 +180,8 @@ export interface ReviewerRow {
 	model: string;
 	effort: string;
 	shadow: boolean;
+	/** The second reviewer a high-risk head gets, whose findings show what the second review catches. */
+	second: boolean;
 	/** PRs whose record tallies this reviewer, each branch counted once, and its findings across every round. */
 	reviewed: number;
 	tally: Omit<Counts, "first">;
@@ -185,15 +199,37 @@ export interface ArmRow extends Omit<AccuracyRow, "size" | "spent"> {
 	spend: Tokens;
 }
 
-/** The PRs of one risk tier, or of none (`tier` null): how many merged, how many a reviewer raised, and later fixed. */
+/**
+ * The PRs of one risk tier, or of none (`tier` null): how many merged, how many a reviewer raised, how many the
+ * maintainer overrode, how many were later fixed, and how long they waited on a person.
+ */
 export interface TierRow {
 	tier: Tier | null;
 	pulls: number;
 	merged: number;
 	/** PRs a reviewer judged riskier than the classifier did. */
 	raised: number;
+	/** PRs whose tier the maintainer overrode, a reading of how often the tier is wrong. */
+	overridden: number;
 	/** PRs a later PR names under `## Caused by`. */
 	culprits: number;
+	/** Milliseconds their sessions waited on a person's answer, a shared session's in its share. */
+	person: number;
+}
+
+/**
+ * The PRs whose classifier found them in a class, built in or the risk file's `## Automatic` one: how many merged, how many
+ * were later fixed, and how long they waited on a person, the numbers that argue for or against merging the class
+ * without a pick.
+ */
+export interface ClassRow {
+	class: string;
+	pulls: number;
+	/** Those whose tier is low, so the class lands them without a pick. */
+	low: number;
+	merged: number;
+	culprits: number;
+	person: number;
 }
 
 /** One online reviewer over the merged PRs reported. */
@@ -238,6 +274,7 @@ export interface Usage {
 	/** The writer A/B's arms, while it runs. */
 	arms: ArmRow[];
 	tiers: TierRow[];
+	classes: ClassRow[];
 	online: OnlineRow[];
 	/** Where each role's time went. */
 	splits: SplitRow[];
@@ -268,13 +305,15 @@ export interface UsageDependencies extends ClaimDependencies {
 	sessions(since: Date, ssh: string[]): Session[] | null;
 	/** The waits logged on this host that ended since an instant, epoch ms. */
 	waits(since: number): LoggedWait[];
+	/** The shell calls sampled on this host around an instant, epoch ms (see `readCalls`). */
+	calls(since: number): CallLine[];
 	/** A local session's time split from the labels the record sender kept, never asking a model. */
 	split: NonNullable<RecordInput["split"]>;
 }
 
 /** The install hint printed when token-max is missing. */
 export const TOKEN_MAX_MISSING =
-	"token-max is not installed, so no session tokens or cost are reported; install it with `cargo install --locked --git https://github.com/kixel-ai/token-max`";
+	"token-max is not installed, so no session tokens or cost are reported; install it with `cargo install --locked token-max`";
 
 /** The local date `days` before `now`, as `YYYY-MM-DD`. */
 export function daysBefore(now: Date, days: number): string {
@@ -282,10 +321,10 @@ export function daysBefore(now: Date, days: number): string {
 	return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
 }
 
-/** Run `token-max sessions` from PATH, or return null when it is not installed. */
+/** Run `token-max sessions` from PATH, or return null when it is not installed. It always reads this host. */
 export function runTokenMax(since: Date, ssh: string[]): Session[] | null {
 	const hosts = ssh.flatMap((host) => ["--ssh", host]);
-	const args = ["sessions", "--since", since.toISOString(), ...hosts, ...(ssh.length ? ["--include-local"] : [])];
+	const args = ["sessions", "--since", since.toISOString(), ...hosts];
 	const result = spawnSync("token-max", args, { encoding: "utf8", maxBuffer: 1 << 30 });
 	if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
 		if (ssh.length) throw new Error("token-max is not installed, so --ssh cannot read other hosts' sessions");
@@ -365,6 +404,42 @@ export function parseSessions(text: string): Session[] {
 				),
 			};
 		});
+}
+
+/**
+ * A lookup of the lowercase `owner/repo` that GitHub serves under `name` now, asking once per distinct name through
+ * `client`, its failure too, so the lookup fails fast for every caller. A name GitHub no longer serves at all stays as recorded, since a deleted checkout's sessions have no other
+ * repository to name.
+ */
+export function currentNamer(client: GitHubReader): (name: string) => Promise<string> {
+	const asked = new Map<string, Promise<string>>();
+	return (name) => {
+		let now = asked.get(name);
+		if (now === undefined) {
+			const [owner, repo] = name.split("/") as [string, string];
+			now = client.currentName({ owner, repo }).then((current) => current ?? name);
+			asked.set(name, now);
+		}
+		return now;
+	};
+}
+
+/**
+ * `sessions` with each repository named as `current` says it is now, so a transfer or rename strips no PR of the
+ * sessions that worked on it before.
+ */
+export async function currentNames(
+	current: (name: string) => Promise<string>,
+	sessions: Session[],
+): Promise<Session[]> {
+	const now = new Map<string, string>();
+	for (const name of new Set(sessions.flatMap((session) => session.repositories ?? [])))
+		now.set(name, await current(name));
+	return sessions.map((session) =>
+		session.repositories === null
+			? session
+			: { ...session, repositories: [...new Set(session.repositories.map((name) => now.get(name)!))] },
+	);
 }
 
 /**
@@ -498,7 +573,8 @@ const sized = (value: string | null | undefined): Size | null =>
 
 /**
  * A merged PR's reviews with its last round's open findings settled when all of them are low, since the review
- * rule fixes or refutes those before merge without another round; nothing records which, so they count as settled.
+ * rule once had those fixed or refuted before merge without another round; nothing records which, so they count as
+ * settled. Since that rule's retirement, such a PR merges only after another round or the maintainer's acceptance.
  */
 function settledOnMerge(reviews: ReviewSummary[], merged: boolean): ReviewSummary[] {
 	const settles =
@@ -521,30 +597,48 @@ function pullRows(pulls: Pull[], repository: Repository): PullRow[] {
 	for (const each of pulls.filter((pull) => pull.state === "merged"))
 		for (const cause of causes(each.body, repository))
 			if (cause !== each.number) fixedBy.set(cause, [...(fixedBy.get(cause) ?? []), each.number]);
-	return pulls.map((each) => {
-		const own = recorded(each.body);
-		return {
-			number: each.number,
-			url: each.url,
-			title: each.title,
-			branch: each.branch,
-			repository: each.repository,
-			state: each.state,
-			draft: each.draft,
-			handedBack: each.draft && handedBack(each.body),
-			size: own.sizes.map(sized).find((s) => s !== null) ?? null,
-			implementers: own.implementers.flatMap(({ fields }) =>
-				fields ? [{ ...fields, size: sized(fields.size) }] : [],
-			),
-			unread: own.implementers.filter(({ fields }) => fields === null).map(({ item }) => item),
-			review: settledOnMerge(parseReview(each.body), each.state === "merged"),
-			risk: recordedRisk(each.body),
-			landFixes: fixes(each.body),
-			fixedBy: (fixedBy.get(each.number) ?? []).sort((a, b) => a - b),
-			online: [],
-			sessions: [],
-		};
-	});
+	return pulls.map((each) => pullRow(each, fixedBy));
+}
+
+/** `each`'s record, given the merged PRs that name each culprit as `fixedBy`. */
+function pullRow(each: Pull, fixedBy: Map<number, number[]>): PullRow {
+	const own = recorded(each.body);
+	// The `## Review` record is its writer's text, at times edited by hand, so one this version cannot read is
+	// reported on its PR instead of stopping every other PR's. Its reviewers and its tier are read apart, so a
+	// garbled line in one keeps the other.
+	const unread: string[] = [];
+	let review: PullRow["review"] = [];
+	try {
+		review = settledOnMerge(parseReview(each.body), each.state === "merged");
+	} catch (error) {
+		unread.push(error instanceof Error ? error.message : String(error));
+	}
+	const named = recordedRisk(each.body);
+	if (named !== null && "malformed" in named) unread.push(named.malformed);
+	const risk = named === null || "malformed" in named ? null : named;
+	const unreadReview = unread.length ? unread.join("; ") : null;
+	return {
+		number: each.number,
+		url: each.url,
+		title: each.title,
+		branch: each.branch,
+		repository: each.repository,
+		state: each.state,
+		draft: each.draft,
+		handedBack: each.draft && handedBack(each.body),
+		size: own.sizes.map(sized).find((s) => s !== null) ?? null,
+		implementers: own.implementers.flatMap(({ fields }) =>
+			fields ? [{ ...fields, size: sized(fields.size) }] : [],
+		),
+		unread: own.implementers.filter(({ fields }) => fields === null).map(({ item }) => item),
+		review,
+		risk,
+		unreadReview,
+		landFixes: fixes(each.body),
+		fixedBy: (fixedBy.get(each.number) ?? []).sort((a, b) => a - b),
+		online: [],
+		sessions: [],
+	};
 }
 
 const add = (to: Tokens, from: Tokens) => {
@@ -579,36 +673,97 @@ function owners(sessions: Session[]): (session: Session) => string[] | null {
 	};
 }
 
+/** `pulls` by head branch, oldest first, as {@link headed} takes them. */
+function byBranch(pulls: Pull[]): Map<string, Pull[]> {
+	const branches = new Map<string, Pull[]>();
+	for (const each of [...pulls].sort((a, b) => a.created - b.created))
+		branches.set(each.branch, [...(branches.get(each.branch) ?? []), each]);
+	return branches;
+}
+
+/** A branch a session reached at `first`, epoch ms, in one of `repositories`, as matching it to a PR needs. */
+export interface Reached {
+	name: string;
+	first: number;
+	repositories: string[];
+}
+
 /**
- * The PR each session's own branch heads: the one whose head branch it last named, among those still open when the
- * session reached the branch and headed from a repository its host resolved for it. `evidence` holds every exported
- * copy, folded ones included, since a dropped copy may be the only one naming its directory's repository.
+ * The PR `reached` heads: the oldest still open when the session reached the branch and headed from one of its
+ * repositories, or null when none is, or when such PRs come from several repositories, since a checkout with remotes
+ * for both a fork and its upstream cannot tell which one's branch it was on.
+ */
+function headed(branches: Map<string, Pull[]>, reached: Reached): Pull | null {
+	const open = (branches.get(reached.name) ?? []).filter(
+		(each) =>
+			(each.closed === null || each.closed >= reached.first) &&
+			each.repository !== null &&
+			reached.repositories.includes(each.repository),
+	);
+	if (new Set(open.map((each) => each.repository)).size > 1) return null;
+	return open[0] ?? null;
+}
+
+/** Whether some PR among `pulls` heads a branch, by the rule that attributes a session's own PR. */
+export function heading(pulls: Pull[]): (reached: Reached) => boolean {
+	const branches = byBranch(pulls);
+	return (reached) => headed(branches, reached) !== null;
+}
+
+/**
+ * The PR `quest review` recorded a session it started on, by URL so a same-numbered PR in another repository never
+ * claims it, or null when it recorded on none; its branch; and its role.
+ */
+export interface Reviewed {
+	pull: string | null;
+	branch: string;
+	role: "classifying" | "reviewing";
+}
+
+/** The sessions `quest review` started, by `harness\0id`, with the repository of the checkout that queued each. */
+export type Pins = Map<string, Reviewed & { origin: string }>;
+
+const pinOf = (session: Session, pins: Pins | undefined) =>
+	session.id === null ? undefined : pins?.get(`${session.harness}\0${session.id}`);
+
+/**
+ * The branches a session reached, latest first, as matching it to a PR tries them: for a review that recorded on no
+ * PR, its pinned branch in its checkout's repository, so a PR opening on it later counts but a stranger fork's of the
+ * same name, which the review skipped, does not; then each its transcript named, which count only where its
+ * repository is known, since another repository may use the same branch name.
+ */
+function reaches(session: Session, known: string[] | null, pins: Pins | undefined): Reached[] {
+	const pin = pinOf(session, pins);
+	const pinned: Reached[] =
+		pin && pin.pull === null ? [{ name: pin.branch, first: session.start, repositories: [pin.origin] }] : [];
+	if (known === null) return pinned;
+	const seen = [...session.branches].sort((a, b) => b.last - a.last);
+	return [...pinned, ...seen.map((b) => ({ name: b.name, first: b.first, repositories: known }))];
+}
+
+/**
+ * The PR each session's own branch heads: for a review, the PR it recorded on; else the one {@link headed} finds for
+ * the first branch {@link reaches} gives that heads one. `evidence` holds every exported copy, folded ones included,
+ * since a dropped copy may be the only one naming its directory's repository.
  */
 function attribute(
 	sessions: Session[],
 	evidence: Session[],
 	pulls: Pull[],
+	pins?: Pins,
 ): { own: Map<Session, Pull>; known: (session: Session) => string[] | null } {
-	const byBranch = new Map<string, Pull[]>();
-	for (const each of [...pulls].sort((a, b) => a.created - b.created))
-		byBranch.set(each.branch, [...(byBranch.get(each.branch) ?? []), each]);
+	const branches = byBranch(pulls);
 	const own = new Map<Session, Pull>();
 	const owned = owners(evidence);
 	for (const session of sessions) {
-		// Another repository may use the same branch name, so a session counts only where its repository is known.
-		const known = owned(session);
-		if (known === null) continue;
-		for (const seen of [...session.branches].sort((a, b) => b.last - a.last)) {
-			// A branch can head a new PR after an earlier one closed: take the one open when the session reached it.
-			const open = (byBranch.get(seen.name) ?? []).filter(
-				(each) =>
-					(each.closed === null || each.closed >= seen.first) &&
-					each.repository !== null &&
-					known.includes(each.repository),
-			);
-			// A checkout with remotes for both a fork and its upstream cannot tell which one's branch it was on.
-			if (new Set(open.map((each) => each.repository)).size > 1) continue;
-			const found = open[0];
+		const url = pinOf(session, pins)?.pull?.toLowerCase();
+		const recorded = url === undefined ? undefined : pulls.find((each) => each.url.toLowerCase() === url);
+		if (recorded) {
+			own.set(session, recorded);
+			continue;
+		}
+		for (const reached of reaches(session, owned(session), pins)) {
+			const found = headed(branches, reached);
 			if (found) {
 				own.set(session, found);
 				break;
@@ -616,6 +771,23 @@ function attribute(
 		}
 	}
 	return { own, known: owned };
+}
+
+/**
+ * Each of `sessions` whose latest branch, its pinned one first, heads no PR among `pulls`, by the rule
+ * {@link attribute} uses, with that branch, so a PR that opens on it later can be noticed. A review that recorded on a
+ * PR, a session whose repository is unknown and that has no pin, or one that named no branch has none to wait for.
+ */
+export function unheaded(sessions: Session[], evidence: Session[], pulls: Pull[], pins?: Pins): Map<Session, Reached> {
+	const branches = byBranch(pulls);
+	const owned = owners(evidence);
+	const waiting = new Map<Session, Reached>();
+	for (const session of sessions) {
+		if ((pinOf(session, pins)?.pull ?? null) !== null) continue;
+		const reached = reaches(session, owned(session), pins)[0];
+		if (reached !== undefined && headed(branches, reached) === null) waiting.set(session, reached);
+	}
+	return waiting;
 }
 
 /** What `sessionRecords` builds from. */
@@ -630,17 +802,21 @@ export interface RecordSources {
 	pulls: Pull[];
 	/** The waits logged on this host. */
 	waits: LoggedWait[];
+	/** The shell calls sampled on this host. */
+	calls: CallLine[];
 	/** The sessions to build records for; by default, those on a PR. */
 	emit?: Set<Session>;
 	/** The window's start, epoch ms. */
 	since: number;
 	/** A local session's time split, or null while it has none. */
 	split?: RecordInput["split"];
+	/** The sessions `quest review` started, whose branch and role stand over what is inferred. */
+	pins?: Pins;
 }
 
 /** Each session's record, attributed to the PRs in the window, whose review records name their reviewers and classifier. */
 export function sessionRecords(sources: RecordSources): Map<Session, SessionRecord> {
-	const { repository, sessions, evidence, pulls, waits, emit, since, split } = sources;
+	const { repository, sessions, evidence, pulls, waits, calls, emit, since, split, pins } = sources;
 	// Only the reviewer sessions are read, so no PR author can stop every session's record with a body this version
 	// cannot parse.
 	const reviewers = new Set(pulls.flatMap((pull) => reviewSessions(pull.body)));
@@ -648,10 +824,12 @@ export function sessionRecords(sources: RecordSources): Map<Session, SessionReco
 	return buildRecords({
 		repository,
 		sessions,
-		...attribute(sessions, evidence, pulls),
+		...attribute(sessions, evidence, pulls, pins),
+		pins,
 		reviewers,
 		classifiers,
 		waits,
+		calls,
 		emit,
 		since,
 		split,
@@ -669,14 +847,15 @@ function spendRows(pulls: PullRow[]): SpendRow[] {
 	for (const each of pulls)
 		for (const session of each.sessions)
 			for (const spent of session.models) {
-				const id = JSON.stringify([each.size, session.role, session.harness, spent.model, spent.effort]);
+				const model = spent.model === null ? null : canonicalModel(spent.model);
+				const id = JSON.stringify([each.size, session.role, session.harness, model, spent.effort]);
 				let row = rows.get(id);
 				if (!row) {
 					row = {
 						size: each.size,
 						role: session.role,
 						harness: session.harness,
-						model: spent.model,
+						model,
 						effort: spent.effort,
 						sessions: 0,
 						...zero(),
@@ -748,12 +927,14 @@ export function share(
 		shares.set(seat, to);
 	};
 	const rest: Spent[] = [];
+	const canonical = (model: string | null) => (model === null ? null : canonicalModel(model));
 	for (const each of spent) {
 		if (each.seat !== undefined) {
 			into(each.seat, each);
 			continue;
 		}
-		const same = seats.flatMap((seat, i) => (seat.model === each.model ? [i] : []));
+		const model = canonical(each.model);
+		const same = seats.flatMap((seat, i) => (canonical(seat.model) === model ? [i] : []));
 		const effort = each.effort ?? "unknown";
 		const exact = same.filter((i) => seats[i]!.effort === effort);
 		const loose = same.filter((i) => seats[i]!.effort === "unknown" || effort === "unknown");
@@ -869,13 +1050,14 @@ function accuracyRows(pulls: PullRow[]): AccuracyRow[] {
 			each.state === "merged" ? share(writing, distinct) : new Map<number, Tokens & { split: number }>();
 		for (const [i, implementer] of distinct.entries()) {
 			const size = implementer.size;
-			const id = JSON.stringify([size, implementer.harness, implementer.model, implementer.effort]);
+			const { model } = implementer;
+			const id = JSON.stringify([size, implementer.harness, model, implementer.effort]);
 			let row = rows.get(id);
 			if (!row) {
 				row = {
 					size,
 					harness: implementer.harness,
-					model: implementer.model,
+					model,
 					effort: implementer.effort,
 					...noOutcomes(),
 					spent: noSpend(),
@@ -900,15 +1082,17 @@ function reviewerRows(pulls: PullRow[]): ReviewerRow[] {
 	const rows = new Map<string, ReviewerRow>();
 	const latest = tallied(pulls, () => true);
 	const row = (each: PullRow, review: ReviewSummary) => {
-		const id = JSON.stringify([each.size, review.harness, review.model, review.effort, review.shadow]);
+		const model = canonicalModel(review.model);
+		const id = JSON.stringify([each.size, review.harness, model, review.effort, review.shadow, review.second]);
 		let found = rows.get(id);
 		if (!found) {
 			found = {
 				size: each.size,
 				harness: review.harness,
-				model: review.model,
+				model,
 				effort: review.effort,
 				shadow: review.shadow,
+				second: review.second,
 				reviewed: 0,
 				tally: noCounts(),
 				firstRounds: noFirst(),
@@ -947,8 +1131,8 @@ function reviewerRows(pulls: PullRow[]): ReviewerRow[] {
 	}
 	return [...rows.values()].sort((a, b) =>
 		order(
-			[a.size, a.harness, a.model, a.effort, String(a.shadow)],
-			[b.size, b.harness, b.model, b.effort, String(b.shadow)],
+			[a.size, a.harness, a.model, a.effort, String(a.shadow), String(a.second)],
+			[b.size, b.harness, b.model, b.effort, String(b.shadow), String(b.second)],
 		),
 	);
 }
@@ -998,11 +1182,57 @@ function tierRows(pulls: PullRow[]): TierRow[] {
 				tier,
 				pulls: rows.length,
 				merged: rows.filter((each) => each.state === "merged").length,
-				raised: rows.filter((each) => each.risk !== null && each.risk.tier !== each.risk.classified).length,
+				raised: rows.filter(
+					(each) =>
+						each.risk !== null && riskier(each.risk.overridden ?? each.risk.tier, each.risk.classified),
+				).length,
+				overridden: rows.filter((each) => each.risk?.overridden != null).length,
 				culprits: rows.filter((each) => each.fixedBy.length > 0).length,
+				person: rows.reduce((sum, each) => sum + personWait(each.sessions), 0),
 			},
 		];
 	});
+}
+
+/** One row per class, built in or `## Automatic`, the PRs' classifiers named, by name. */
+function classRows(pulls: PullRow[]): ClassRow[] {
+	const names = [...new Set(pulls.flatMap((each) => each.risk?.class ?? []))].sort();
+	return names.map((name) => {
+		const rows = pulls.filter((each) => each.risk?.class === name);
+		return {
+			class: name,
+			pulls: rows.length,
+			low: rows.filter((each) => each.risk!.tier === "low").length,
+			merged: rows.filter((each) => each.state === "merged").length,
+			culprits: rows.filter((each) => each.fixedBy.length > 0).length,
+			person: rows.reduce((sum, each) => sum + personWait(each.sessions), 0),
+		};
+	});
+}
+
+/** How a record's tier came to differ from its classifier's: a reviewer's raise, the maintainer's override, or both. */
+function riskNote(risk: RecordedRisk): string {
+	const reviewed = risk.overridden ?? risk.tier;
+	return [
+		...(reviewed === risk.classified ? [] : [`raised from ${risk.classified} by a reviewer`]),
+		...(risk.overridden === null ? [] : [`overridden from ${risk.overridden} by the maintainer`]),
+	]
+		.map((note) => `; ${note}`)
+		.join("");
+}
+
+/** How long `sessions` waited on a person's answer, in milliseconds, a shared session's in its share. */
+function personWait(sessions: SessionRow[]): number {
+	return waitsByKind(sessions).get("person") ?? 0;
+}
+
+/** How long `sessions` waited, in milliseconds by kind, a shared session's waits counted in its share. */
+function waitsByKind(sessions: SessionRow[]): Map<string, number> {
+	const totals = new Map<string, number>();
+	for (const s of sessions)
+		for (const w of s.waits ?? [])
+			totals.set(w.kind, (totals.get(w.kind) ?? 0) + (Date.parse(w.end) - Date.parse(w.start)) / s.pulls.length);
+	return totals;
 }
 
 function onlineRows(pulls: PullRow[]): OnlineRow[] {
@@ -1070,7 +1300,8 @@ export async function usage(root: string, options: UsageOptions, deps: UsageDepe
 	const allRows = pullRows(all, repository);
 	const rows = allRows.filter((row) => pulls.some((each) => each.number === row.number));
 	const byNumber = new Map(rows.map((row) => [row.number, row]));
-	const exported = deps.sessions(new Date(since), options.ssh ?? []);
+	const read = deps.sessions(new Date(since), options.ssh ?? []);
+	const exported = read === null ? null : await currentNames(currentNamer(client), read);
 	const { kept, dropped } = fold(exported ?? []);
 	let unattributed: Usage["unattributed"] = null;
 	let incomplete: Session[] = [];
@@ -1083,6 +1314,7 @@ export async function usage(root: string, options: UsageOptions, deps: UsageDepe
 			evidence: exported,
 			pulls: all,
 			waits: deps.waits(since),
+			calls: deps.calls(since),
 			since,
 			split: deps.split,
 		});
@@ -1136,6 +1368,7 @@ export async function usage(root: string, options: UsageOptions, deps: UsageDepe
 		reviewers: reviewerRows(rows),
 		arms: armRows(rows),
 		tiers: tierRows(rows),
+		classes: classRows(rows),
 		online: onlineRows(rows),
 		splits: splitRows(rows),
 		breakages,
@@ -1286,13 +1519,8 @@ function splitTotals(sessions: SessionRow[]): string {
  * waits are unknown, as for those read on another host; empty when there is nothing to say.
  */
 function waitTotals(sessions: SessionRow[]): string {
-	const totals = new Map<string, number>();
-	let unknown = 0;
-	for (const s of sessions) {
-		if (s.waits === null) unknown++;
-		for (const w of s.waits ?? [])
-			totals.set(w.kind, (totals.get(w.kind) ?? 0) + (Date.parse(w.end) - Date.parse(w.start)) / s.pulls.length);
-	}
+	const totals = waitsByKind(sessions);
+	const unknown = sessions.filter((s) => s.waits === null).length;
 	const parts = WAIT_KINDS.filter((kind) => totals.has(kind)).map((kind) => `${kind} ${duration(totals.get(kind)!)}`);
 	if (unknown) parts.push(`unknown for ${unknown} session${unknown === 1 ? "" : "s"} on other hosts`);
 	return parts.join(", ");
@@ -1322,16 +1550,17 @@ export function usageLines(report: Usage): string[] {
 		);
 		if (row.risk)
 			lines.push(
-				`  risk: ${row.risk.tier}, ${row.risk.reason}${row.risk.tier === row.risk.classified ? "" : `; raised from ${row.risk.classified} by a reviewer`}`,
+				`  risk: ${row.risk.tier}, ${row.risk.reason}${riskNote(row.risk)}${row.risk.class === null ? "" : `; class ${row.risk.class}`}`,
 			);
 		for (const i of row.implementers) {
 			const notes = [i.size, i.arm && `arm ${i.arm}`].filter(Boolean).join(", ");
 			lines.push(`  implementer: ${i.harness}, ${i.model}, ${i.effort} effort${notes ? ` (${notes})` : ""}`);
 		}
 		for (const item of row.unread) lines.push(`  unread: ${item}`);
+		if (row.unreadReview) lines.push(`  unread review: ${row.unreadReview}`);
 		for (const r of row.review)
 			lines.push(
-				`  review: ${r.harness}, ${r.model}, ${r.effort} effort${r.shadow ? ", shadow" : ""}; ${r.round === null ? "not in the latest run" : `round ${r.round}, score ${r.score ?? "-"}/10`}; ${r.tally === null ? "no tally" : `rounds ${r.tally.rounds}, ${findingsText(r.tally)}`}`,
+				`  review: ${r.harness}, ${r.model}, ${r.effort} effort${r.shadow ? ", shadow" : r.second ? ", second" : ""}; ${r.round === null ? "not in the latest run" : `round ${r.round}, score ${r.score ?? "-"}/10`}; ${r.tally === null ? "no tally" : `rounds ${r.tally.rounds}, ${findingsText(r.tally)}`}`,
 			);
 		for (const o of row.online)
 			lines.push(`  online review: ${o.reviewer}, ${o.finalHead ? "" : "not "}at the final head; ${answers(o)}`);
@@ -1398,7 +1627,7 @@ export function usageLines(report: Usage): string[] {
 					r.size ?? "-",
 					r.harness,
 					r.model,
-					`${r.effort}${r.shadow ? ", shadow" : ""}`,
+					`${r.effort}${r.shadow ? ", shadow" : r.second ? ", second" : ""}`,
 					`${r.reviewed} reviewed: rounds ${mean(r.tally.rounds, r.reviewed)}, ${findingsText({ ...r.tally, first: null })}, ${firsts(r.firstRounds)}; ${per(r.spent, "PR reviewed")}`,
 				]),
 			),
@@ -1427,7 +1656,19 @@ export function usageLines(report: Usage): string[] {
 				report.tiers.map((t) => [
 					" ",
 					t.tier ?? "-",
-					`${t.pulls} PRs, ${t.merged} merged, ${t.raised} raised by a reviewer, ${t.culprits} later fixed`,
+					`${t.pulls} PRs, ${t.merged} merged, ${t.raised} raised by a reviewer, ${t.overridden} overridden, ${t.culprits} later fixed; waited on a person ${duration(t.person)}`,
+				]),
+			),
+		);
+	if (report.classes.length)
+		lines.push(
+			"",
+			"By automatic class:",
+			...table(
+				report.classes.map((c) => [
+					" ",
+					c.class,
+					`${c.pulls} PRs, ${c.low} low, ${c.merged} merged, ${c.culprits} later fixed; waited on a person ${duration(c.person)}`,
 				]),
 			),
 		);
@@ -1498,6 +1739,7 @@ export function usageDependencies(github: ClaimDependencies): UsageDependencies 
 		...github,
 		sessions: runTokenMax,
 		waits: (since) => readWaits(since),
+		calls: (since) => readCalls(since),
 		split: (session, waits, since) => keptSplit(state, session, waits, since),
 	};
 }

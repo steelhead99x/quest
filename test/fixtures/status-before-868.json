@@ -1,0 +1,26 @@
+{
+	"value": {
+		"url": "https://github.com/kixel-ai/quest/pull/867",
+		"state": "open",
+		"draft": false,
+		"head": "4f1c2b7e9a0d3c5e8b6a1f2d4c7e9b0a3d5f8c1e",
+		"mergeable": "MERGEABLE",
+		"mergeState": "CLEAN",
+		"reviewDecision": null,
+		"autoMerge": null,
+		"mergeQueue": null,
+		"landingStopped": null,
+		"checks": { "state": "success", "passed": 3, "failing": [], "pending": [] },
+		"reviews": [],
+		"checkpoints": [],
+		"reviewRecord": { "state": "current", "head": "4f1c2b7e9a0d3c5e8b6a1f2d4c7e9b0a3d5f8c1e" },
+		"risk": { "tier": "low", "reason": "docs only", "classified": "low", "class": "docs", "state": "current" },
+		"reactions": [],
+		"threads": [],
+		"signals": [],
+		"holds": [],
+		"starterHold": null,
+		"duplicates": []
+	},
+	"asOf": "2026-11-25T04:10:00Z"
+}

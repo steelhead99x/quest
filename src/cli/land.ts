@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
-import { isQuest, remove } from "../core";
+import { isQuest, remove, type Repository } from "../core";
 import { LAND_CHECK, type Reason, pin, pinned } from "../github/land";
 import { programEnvironment } from "./program";
 import {
@@ -10,7 +10,6 @@ import {
 	type GitHubDependencies,
 	object,
 	type ObjectValue,
-	type Repository,
 	type RequiredCheck,
 	array,
 	currentChecks,
@@ -22,7 +21,7 @@ import type { WorkflowRun } from "../github/checks";
 import { appOf } from "../github/checks";
 import { classifyCheck, reported, type Needs } from "../github/status";
 import { type Carried, describe, readSignals } from "../github/signals";
-import type { Method } from "./hold";
+import type { Method } from "../core";
 import { committedSources } from "./tree";
 
 /** How the watcher's own queue lands each PR: as a squash commit, or as a merge commit keeping its ancestry. */

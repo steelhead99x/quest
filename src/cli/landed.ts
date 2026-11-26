@@ -8,9 +8,9 @@ import { accessSync, constants, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { type Finding, branchQuest, check } from "../core";
+import { type Finding, branchQuest, check, parse } from "../core";
 import { discoveryEnv } from "./git";
-import { snapshot } from "./tree";
+import { committedSources, hasQuests } from "./tree";
 
 /**
  * A finding when `branch` (default: the current branch) is a quest's branch
@@ -21,14 +21,7 @@ import { snapshot } from "./tree";
  */
 export function landed(root: string, base: string, options: { branch?: string; head?: string } = {}): Finding[] {
 	const name = options.branch ?? currentBranch(root);
-	const head = options.head ?? "HEAD";
-	const mergeBase = git(root, ["merge-base", base, head]);
-	if (mergeBase.status !== 0) {
-		throw new Error(
-			`no merge base between ${base} and ${head}: ${mergeBase.stderr.trim() || "unrelated histories"}`,
-		);
-	}
-	const commit = mergeBase.stdout.trim();
+	const commit = forkPoint(root, base, options.head ?? "HEAD");
 	// Without a head, the pathspec and `<rev>:./path` are relative to the root,
 	// which may sit below the repository's top level; a bare repository has no
 	// work tree to be relative to.
@@ -72,8 +65,10 @@ export type LandingCheck = (head: LandingHead) => Promise<Finding[]>;
  * `root`, writing no ref, so Git sends only what that repository lacks and an interrupted run leaves
  * nothing behind. A checkout it cannot write, or a shallow one whose history could hide the merge
  * base, gives way to a temporary bare repository, as does no checkout.
- * A finding the base already has is not the head's, as the land daemon screens a head, and a
- * repository with no quests on either side does not use them.
+ * A finding the head's merge base or the base already has, in an entry or line the head left
+ * unchanged, is not the head's, so being behind the base adds none; an entry the head edits owns
+ * its findings. A head with no quest documents skips the check when the base or its merge base
+ * has none either.
  */
 export function landingCheck(root: string): LandingCheck {
 	return async (head) => {
@@ -93,10 +88,8 @@ export function landingCheck(root: string): LandingCheck {
 			return result.stdout.trim();
 		};
 		// Findings and errors name the scratch directory and the base's SHA, which the refusal need not show.
-		const tidy = (finding: Finding): Finding => ({
-			...finding,
-			message: finding.message.replaceAll(`${dir}/`, "").replaceAll(base, `origin/${head.base}`),
-		});
+		const tidy = (text: string) => text.replaceAll(`${dir}/`, "").replaceAll(base, `origin/${head.base}`);
+		const tidied = (finding: Finding): Finding => ({ ...finding, message: tidy(finding.message) });
 		try {
 			if (!borrowed) run(["init", "--quiet", "--bare"]);
 			// The token rides in the environment, after any configuration the user's environment already passes.
@@ -110,28 +103,46 @@ export function landingCheck(root: string): LandingCheck {
 				[`GIT_CONFIG_KEY_${count + 1}`]: "http.https://github.com/.extraheader",
 				[`GIT_CONFIG_VALUE_${count + 1}`]: `Authorization: basic ${basic}`,
 			});
-			const quests = (ref: string) => run(["ls-tree", "--name-only", ref, "quest"]) !== "";
-			const based = quests(base);
-			if (!based && !quests(tip)) return [];
-			// A finding the base already has is not this PR's, such as one a `quest` older than the tree's
-			// format reports; one more of the same in the head is.
-			const known = based ? treeCheck(dir, base) : [];
-			const findings = treeCheck(dir, tip).filter((finding) => {
-				const index = known.findIndex((old) => old.path === finding.path && old.message === finding.message);
-				if (index === -1) return true;
-				known.splice(index, 1);
-				return false;
-			});
+			const [based, headed] = [hasQuests(dir, base), hasQuests(dir, tip)];
+			if (!based && !headed) return [];
+			let fork: string;
 			let accurate: Finding[];
 			try {
+				fork = forkPoint(dir, base, tip);
 				accurate = landed(dir, base, { branch: head.branch, head: tip });
 			} catch (error) {
-				throw new Error(
-					tidy({ path: "", line: null, message: String(error instanceof Error ? error.message : error) })
-						.message,
+				throw new Error(tidy(error instanceof Error ? error.message : String(error)), { cause: error });
+			}
+			const forked = fork === base ? based : fork === tip ? headed : hasQuests(dir, fork);
+			// A head that branched before the base adopted quests and adds none leaves them to the merge.
+			if (!headed && !forked) return accurate.map(tidied);
+			let tree: Keyed[];
+			try {
+				tree = treeCheck(dir, tip);
+			} catch (error) {
+				// An unreadable head hides what else it adds, so it is the head's to fix.
+				return [{ path: "quest", line: null, message: String((error as Error).message) }, ...accurate].map(
+					tidied,
 				);
 			}
-			return [...findings, ...accurate].map(tidy);
+			// A finding the head branched with is not this PR's, such as a dangling link or an old format the
+			// base fixed since, whose fix the merge takes; nor is one the base tip has, as when the head
+			// carries a base commit it did not merge, such as a squash-landed branch it was stacked on. One
+			// more of the same in the head is.
+			const known = new Map<string, number>();
+			for (const ref of tree.length ? new Set([fork, base]) : []) {
+				const counts = new Map<string, number>();
+				for (const { key } of readable(dir, ref)) counts.set(key, (counts.get(key) ?? 0) + 1);
+				for (const [key, count] of counts) known.set(key, Math.max(known.get(key) ?? 0, count));
+			}
+			const findings = tree
+				.filter(({ key }) => {
+					const left = known.get(key) ?? 0;
+					known.set(key, left - 1);
+					return left <= 0;
+				})
+				.map(({ finding }) => finding);
+			return [...findings, ...accurate].map(tidied);
 		} finally {
 			if (!borrowed) rmSync(dir, { recursive: true, force: true });
 		}
@@ -148,13 +159,43 @@ function writable(dir: string): boolean {
 	}
 }
 
-/** `quest check`'s findings on `commit`; a tree it cannot read, such as one with no quests left, is one. */
-function treeCheck(dir: string, commit: string): Finding[] {
+/**
+ * A finding, keyed by its file, its message, and the source it points at: the whole entry holding its
+ * line, continuation lines included, or else that line, split at line endings as the parser splits
+ * them. The key survives edits elsewhere and changes of line ending.
+ */
+interface Keyed {
+	finding: Finding;
+	key: string;
+}
+
+/** `quest check`'s findings on `commit`, failing on a tree it cannot read, such as one with no quests. */
+function treeCheck(dir: string, commit: string): Keyed[] {
+	const { sources, exists } = committedSources(dir, commit, null);
+	const docs = sources.map((source) => parse(source.path, source.text));
+	const files = new Map(
+		sources.map((source, index) => [
+			source.path,
+			{ lines: source.text.split(/\r\n?|\n/), entries: docs[index].entries },
+		]),
+	);
+	// As `--no-stubs` does: a head may ship an audit this binary does not, with its stub.
+	return check(docs, exists, { auditNames: false }).map((finding) => {
+		const file = files.get(finding.path);
+		const line = finding.line;
+		if (line === null || file === undefined) return { finding, key: `${finding.path}\0${finding.message}\0` };
+		const entry = file.entries.find(({ line: start, end }) => start <= line && line <= end);
+		const text = file.lines.slice((entry?.line ?? line) - 1, entry?.end ?? line).join("\n");
+		return { finding, key: `${finding.path}\0${finding.message}\0${text}` };
+	});
+}
+
+/** `treeCheck` on a commit the head is screened against, where an unreadable tree screens nothing. */
+function readable(dir: string, commit: string): Keyed[] {
 	try {
-		const tree = snapshot(dir, commit, null);
-		return check(tree.docs, tree.exists);
-	} catch (error) {
-		return [{ path: "quest", line: null, message: error instanceof Error ? error.message : String(error) }];
+		return treeCheck(dir, commit);
+	} catch {
+		return [];
 	}
 }
 
@@ -165,9 +206,18 @@ function questAt(root: string, commit: string, branch: string, relative: string)
 	return git(root, ["cat-file", "-e", `${commit}:${relative}${path}`]).status === 0 ? path : null;
 }
 
-function currentBranch(root: string): string {
+/** The commit where `head` branched from `base`, failing on unrelated histories. */
+function forkPoint(root: string, base: string, head: string): string {
+	const result = git(root, ["merge-base", base, head]);
+	if (result.status !== 0)
+		throw new Error(`no merge base between ${base} and ${head}: ${result.stderr.trim() || "unrelated histories"}`);
+	return result.stdout.trim();
+}
+
+/** The branch checked out at `root`, failing on a detached HEAD with a hint to pass `flag`. */
+export function currentBranch(root: string, flag = "--branch"): string {
 	const head = git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-	if (head.status !== 0) throw new Error("HEAD is not on a branch; pass --branch with the PR's head branch");
+	if (head.status !== 0) throw new Error(`HEAD is not on a branch; pass ${flag} with the PR's head branch`);
 	return head.stdout.trim();
 }
 

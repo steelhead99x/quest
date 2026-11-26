@@ -4,7 +4,8 @@ import { createPrivateKey, createSign } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { array, GitHub, type GitHubDependencies, type Repository, object, string } from "../github/client";
+import { array, GitHub, type GitHubDependencies, object, string } from "../github/client";
+import type { Repository } from "../core";
 import { git } from "./land";
 
 /** A request to GitHub's API as the App itself, signed with its key. */

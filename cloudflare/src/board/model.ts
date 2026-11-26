@@ -146,7 +146,8 @@ export function board(tree: Tree, now: number, zone: string): Board {
 			return quest && quest.status === "ready" ? [{ ...r, quest }] : [];
 		});
 		const drafts = tree.pulls.filter((p) => p.draft).map((p) => ({ url: p.url, branch: p.branch, body: p.body }));
-		waits = waiting(docs, date, drafts);
+		// As `quest waiting` with no flags: every party's items, from any computer.
+		waits = waiting(docs, date, { drafts });
 	}
 
 	return { tree, zone, docs, findings, quests, counts, sizes, milestones, ranked, waiting: waits };
