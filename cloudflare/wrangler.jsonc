@@ -14,6 +14,8 @@
 	"vars": {
 		// The App's slug, for its install link; each deploy registers its own (GITHUB.md).
 		"GITHUB_APP_SLUG": "",
+		// The calendar Scheduled dates are read on; the CLI uses its machine's, so set the maintainer's.
+		"SCHEDULE_TIMEZONE": "UTC",
 	},
 	"secrets": { "required": ["AUTH_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"] },
 }

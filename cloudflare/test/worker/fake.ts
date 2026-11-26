@@ -8,6 +8,7 @@ export const env: Env = {
 	GITHUB_CLIENT_ID: "Iv23test",
 	GITHUB_CLIENT_SECRET: "test-client-secret",
 	GITHUB_APP_SLUG: "quest-test",
+	SCHEDULE_TIMEZONE: "UTC",
 };
 
 export type Route = (request: Request) => Response | Promise<Response> | undefined;

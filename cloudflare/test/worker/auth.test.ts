@@ -52,6 +52,12 @@ describe("signed out", () => {
 		expect(await response.text()).toBe("this deploy is missing GITHUB_CLIENT_SECRET, GITHUB_APP_SLUG");
 	});
 
+	test("a deploy with an unknown scheduling timezone says so", async () => {
+		const response = await harness().request("/", {}, { ...env, SCHEDULE_TIMEZONE: "Mars/Olympus" });
+		expect(response.status).toBe(500);
+		expect(await response.text()).toContain("SCHEDULE_TIMEZONE is not an IANA timezone");
+	});
+
 	test("an unknown path is a themed 404", async () => {
 		const response = await harness().request("/nowhere");
 		expect(response.status).toBe(404);

@@ -242,6 +242,20 @@ const WORKFLOWS = {
 			type: "blob",
 			object: { text: "name: Release\non: push\n# workflow_dispatch is off\n" },
 		},
+		{
+			name: "named.yml",
+			type: "blob",
+			object: { text: 'name: "Run workflow_dispatch by hand"\non: push\n' },
+		},
+		{
+			name: "tag.yaml",
+			type: "blob",
+			object: {
+				text: "name: Tag\non:\n  workflow_dispatch:\n    inputs:\n      tag:\n        required: true\n      dry:\n        required: true\n        default: false\n",
+			},
+		},
+		{ name: "list.yml", type: "blob", object: { text: "name: List\non: [push, workflow_dispatch]\n" } },
+		{ name: "broken.yml", type: "blob", object: { text: "name: [unclosed\n" } },
 		{ name: "notes.txt", type: "blob", object: { text: "workflow_dispatch" } },
 	],
 };
@@ -304,12 +318,21 @@ describe("CI", () => {
 		expect(html).toContain("Check 20");
 		expect(html).toContain('action="/repos/moq-dev/quest/workflows/check.yml/dispatch"');
 		expect(html).not.toContain("release.yml/dispatch");
+		expect(html).not.toContain("named.yml/dispatch");
+		// A required input with no default can't be given by the form, so the row links to GitHub.
+		expect(html).not.toContain("tag.yaml/dispatch");
+		expect(html).toContain('href="https://github.com/moq-dev/quest/actions/workflows/tag.yaml"');
+		expect(html).toContain("Needs inputs");
 	});
 
-	test("reads workflow names and triggers, ignoring a commented trigger", () => {
+	test("reads workflow names and triggers from the YAML, not from its text", () => {
 		expect(workflows(WORKFLOWS.entries)).toEqual([
-			{ file: "check.yml", name: "Check", dispatch: true },
-			{ file: "release.yml", name: "Release", dispatch: false },
+			{ file: "broken.yml", name: "broken.yml", dispatch: false, inputs: false },
+			{ file: "check.yml", name: "Check", dispatch: true, inputs: false },
+			{ file: "list.yml", name: "List", dispatch: true, inputs: false },
+			{ file: "named.yml", name: "Run workflow_dispatch by hand", dispatch: false, inputs: false },
+			{ file: "release.yml", name: "Release", dispatch: false, inputs: false },
+			{ file: "tag.yaml", name: "Tag", dispatch: true, inputs: true },
 		]);
 		expect(workflows(undefined)).toEqual([]);
 	});
@@ -411,6 +434,10 @@ describe("CI", () => {
 		expect(await ok.text()).toContain("GitHub queued Check on main.");
 		expect(body).toEqual({ ref: "main" });
 		expect((await post("release.yml")).status).toBe(409);
+		expect((await post("named.yml")).status).toBe(409);
+		const inputs = await post("tag.yaml");
+		expect(inputs.status).toBe(409);
+		expect(await inputs.text()).toContain("needs inputs");
 	});
 });
 

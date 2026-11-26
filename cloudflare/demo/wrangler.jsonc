@@ -16,5 +16,6 @@
 		"GITHUB_CLIENT_ID": "Iv23demo",
 		"GITHUB_CLIENT_SECRET": "demo",
 		"GITHUB_APP_SLUG": "quest-demo",
+		"SCHEDULE_TIMEZONE": "UTC",
 	},
 }

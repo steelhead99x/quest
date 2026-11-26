@@ -115,10 +115,18 @@ export function Dispatch(props: { workflows: Workflow[]; repository: string; bra
 					<li class="entry plain">
 						<span class="entry-title">{w.name}</span>
 						<span class="entry-meta">
-							<form method="post" action={`/repos/${props.repository}/workflows/${w.file}/dispatch`}>
-								<input type="hidden" name="next" value={props.next} />
-								<button class="button quiet">Run</button>
-							</form>
+							{w.inputs ? (
+								<a
+									href={`https://github.com/${props.repository}/actions/workflows/${encodeURIComponent(w.file)}`}
+								>
+									Needs inputs: run on GitHub
+								</a>
+							) : (
+								<form method="post" action={`/repos/${props.repository}/workflows/${w.file}/dispatch`}>
+									<input type="hidden" name="next" value={props.next} />
+									<button class="button quiet">Run</button>
+								</form>
+							)}
 						</span>
 					</li>
 				))}

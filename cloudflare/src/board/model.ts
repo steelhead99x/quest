@@ -51,6 +51,8 @@ export interface MilestoneRow {
 /** Everything a board page shows. */
 export interface Board {
 	tree: Tree;
+	/** The timezone whose calendar day decides Scheduled dates. */
+	zone: string;
 	docs: Doc[];
 	/** Structural mistakes `quest check` would report; when any, nothing is ranked. */
 	findings: string[];
@@ -71,9 +73,19 @@ export function name(doc: Doc): string {
 	return (doc.title?.text ?? doc.path).replace(/^\[(XS|S|M|L|XL)\]\s+/, "");
 }
 
-/** The YYYY-MM-DD of `now`, in UTC, for Scheduled dates. */
-export function today(now: number): string {
-	return new Date(now).toISOString().slice(0, 10);
+/**
+ * The YYYY-MM-DD of `now` in `zone`, for Scheduled dates. The CLI reads them on
+ * its machine's calendar; the site has no machine, so the deploy names the
+ * zone its maintainer plans in (SCHEDULE_TIMEZONE).
+ */
+export function today(now: number, zone: string): string {
+	// en-CA formats dates as YYYY-MM-DD.
+	return new Intl.DateTimeFormat("en-CA", {
+		timeZone: zone,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	}).format(new Date(now));
 }
 
 /** The claim each quest branch carries: the earliest open PR on it, or the bare branch. */
@@ -86,8 +98,8 @@ function claims(tree: Tree): Map<string, Pull | null> {
 }
 
 /** Read a tree into a board as of `now`. */
-export function board(tree: Tree, now: number): Board {
-	const date = today(now);
+export function board(tree: Tree, now: number, zone: string): Board {
+	const date = today(now, zone);
 	const docs = [...tree.documents]
 		.sort((a, b) => comparePaths(a.path, b.path))
 		.map(({ path, content }) => parse(path, content));
@@ -137,13 +149,13 @@ export function board(tree: Tree, now: number): Board {
 		waits = waiting(docs, date, drafts);
 	}
 
-	return { tree, docs, findings, quests, counts, sizes, milestones, ranked, waiting: waits };
+	return { tree, zone, docs, findings, quests, counts, sizes, milestones, ranked, waiting: waits };
 }
 
 /** What holds back one quest, as `quest unblocked <path>` prints it. */
-export function holdsBack(b: Board, path: string, now: number): Blocker[] {
+export function holdsBack(b: Board, path: string, now: number, zone: string): Blocker[] {
 	const doc = b.docs.find((d) => d.path === path);
-	return doc ? blockers(b.docs, doc, today(now)) : [];
+	return doc ? blockers(b.docs, doc, today(now, zone)) : [];
 }
 
 /** The document for a page path, which is the quest's branch: `quest/m0/foo` or `quest/m0/epic/README`. */

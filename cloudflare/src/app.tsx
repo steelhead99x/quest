@@ -24,6 +24,8 @@ export interface Env {
 	GITHUB_CLIENT_ID: string;
 	GITHUB_CLIENT_SECRET: string;
 	GITHUB_APP_SLUG: string;
+	/** The IANA timezone whose calendar day decides Scheduled dates, such as America/Los_Angeles. */
+	SCHEDULE_TIMEZONE: string;
 }
 
 /** What the app takes from outside, so tests can fake GitHub and the clock. */
@@ -56,13 +58,18 @@ class Misconfigured extends Error {}
 
 /** Check the environment, naming every missing setting at once. */
 export function configure(env: Env, origin: string): { config: Config; install: string } {
-	const missing = (["AUTH_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "GITHUB_APP_SLUG"] as const).filter(
-		(k) => !env[k],
-	);
+	const missing = (
+		["AUTH_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "GITHUB_APP_SLUG", "SCHEDULE_TIMEZONE"] as const
+	).filter((k) => !env[k]);
 	if (missing.length) throw new Misconfigured(`this deploy is missing ${missing.join(", ")}`);
 	if (env.AUTH_SECRET.length < 32) throw new Misconfigured("AUTH_SECRET must be at least 32 characters");
 	if (!/^[a-z0-9][a-z0-9-]*$/.test(env.GITHUB_APP_SLUG))
 		throw new Misconfigured("GITHUB_APP_SLUG is not an App slug");
+	try {
+		new Intl.DateTimeFormat("en-CA", { timeZone: env.SCHEDULE_TIMEZONE });
+	} catch {
+		throw new Misconfigured(`SCHEDULE_TIMEZONE is not an IANA timezone: ${env.SCHEDULE_TIMEZONE}`);
+	}
 	return {
 		config: { clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET, origin },
 		install: `https://github.com/apps/${env.GITHUB_APP_SLUG}/installations/new`,
@@ -219,9 +226,14 @@ export function app(deps: Deps): App {
 		const b = await boardFor(c, deps);
 		if (b instanceof Response) return b;
 		const file = c.req.param("file") ?? "";
-		const workflow = b.tree.workflows.find((w) => w.file === file && w.dispatch);
+		const workflow = b.tree.workflows.find((w) => w.file === file && w.dispatch && !w.inputs);
 		if (!workflow)
-			return page(c, 409, "Not startable", `${file} has no workflow_dispatch trigger on ${b.tree.branch}.`);
+			return page(
+				c,
+				409,
+				"Not startable",
+				`${file} has no workflow_dispatch trigger on ${b.tree.branch}, or needs inputs this form cannot give.`,
+			);
 		const next = local(String((await c.req.parseBody()).next ?? ""));
 		const ok = await act(c, () =>
 			dispatch(c.get("github").withToken(s.token), b.tree.repository, workflow.file, b.tree.branch),
@@ -371,7 +383,7 @@ async function boardFor(c: Context, deps: Deps) {
 	const key = `board ${s.id} ${owner}/${name}`.toLowerCase();
 	const { value: tree, hit } = await cached<Tree>(await deps.cache(), key, () => load(github, owner, name));
 	if (hit && tree.private) await readable(github, tree.repository);
-	return board(tree, deps.now());
+	return board(tree, deps.now(), c.env.SCHEDULE_TIMEZONE);
 }
 
 /** Confirm the person can still read a private repository before showing a cached copy of it. */

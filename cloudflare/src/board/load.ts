@@ -2,6 +2,7 @@
 // branch's quest tree with every file's text, the open pull requests, and the
 // quest branches. One request keeps any tree within the page's budget.
 
+import { parse as parseYaml } from "yaml";
 import type { GitHub } from "../github/client.ts";
 
 /** How many directories below `quest/` the query reads; deeper files are reported, not dropped silently. */
@@ -36,6 +37,8 @@ export interface Workflow {
 	name: string;
 	/** It has a `workflow_dispatch` trigger, so the site can start it. */
 	dispatch: boolean;
+	/** Dispatching it needs an input with no default, which the site's form cannot give; it starts on GitHub. */
+	inputs: boolean;
 }
 
 /** A repository's quest tree and what claims it, at one commit. */
@@ -241,17 +244,36 @@ export function tree(value: unknown): Tree {
 	};
 }
 
-/** The workflow files, read for their names and whether they can be dispatched. */
+/** The workflow files, read for their names, whether they can be dispatched, and whether that needs inputs. */
 export function workflows(list: unknown): Workflow[] {
 	if (!Array.isArray(list)) return [];
 	return list
 		.filter((e) => e?.type === "blob" && /\.ya?ml$/.test(String(e.name)) && typeof e.object?.text === "string")
-		.map((e) => {
-			const text: string = e.object.text;
-			const name = /^name:\s*["']?(.+?)["']?\s*$/m.exec(text)?.[1] ?? String(e.name);
-			// A trigger key outside comments; GitHub answers for anything this misreads, and the page shows it.
-			const dispatch = /^[^#\n]*\bworkflow_dispatch\b/m.test(text);
-			return { file: String(e.name), name, dispatch };
-		})
+		.map((e) => ({ file: String(e.name), ...triggers(e.object.text, String(e.name)) }))
 		.sort((a, b) => a.file.localeCompare(b.file));
+}
+
+/** A workflow's name and dispatch trigger, read from its YAML; a file that does not parse cannot be dispatched. */
+export function triggers(text: string, file: string): Omit<Workflow, "file"> {
+	let doc: Record<string, unknown>;
+	try {
+		const parsed = parseYaml(text, { maxAliasCount: 50 }) as unknown;
+		if (typeof parsed !== "object" || parsed === null) return { name: file, dispatch: false, inputs: false };
+		doc = parsed as Record<string, unknown>;
+	} catch {
+		return { name: file, dispatch: false, inputs: false };
+	}
+	const name = typeof doc.name === "string" && doc.name ? doc.name : file;
+	// YAML 1.1 readers turn the bare key `on` into true; accept either.
+	const on = doc.on ?? doc.true;
+	if (on === "workflow_dispatch") return { name, dispatch: true, inputs: false };
+	if (Array.isArray(on)) return { name, dispatch: on.includes("workflow_dispatch"), inputs: false };
+	if (typeof on !== "object" || on === null || !("workflow_dispatch" in on))
+		return { name, dispatch: false, inputs: false };
+	const spec = (on as Record<string, unknown>).workflow_dispatch as { inputs?: Record<string, unknown> } | null;
+	const inputs = Object.values(spec?.inputs ?? {}).some((input) => {
+		const i = input as { required?: unknown; default?: unknown } | null;
+		return i?.required === true && i.default === undefined;
+	});
+	return { name, dispatch: true, inputs };
 }

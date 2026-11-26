@@ -26,7 +26,7 @@ hostname and App).
   `moq-dev` repositories is the maintainer's call.
 - Set `AUTH_SECRET` (`openssl rand -hex 32`) and the App's client ID and
   secret with `wrangler secret`, then
-  `wrangler deploy --var GITHUB_APP_SLUG:<slug> --domain quest.moq-bench.dev`.
+  `wrangler deploy --var GITHUB_APP_SLUG:<slug> --var SCHEDULE_TIMEZONE:<maintainer's zone> --domain quest.moq-bench.dev`.
   The zone must be on the same Cloudflare account. Never commit
   `.github-app.json`, `.dev.vars`, or a token.
 - Validate on the live site: sign in, open `/repos/steelhead99x/quest`, a
