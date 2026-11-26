@@ -116,11 +116,21 @@ export function removeQuest(root: string, arg: string, recursive: boolean): Repo
 
 	const gone = new Set(doomed.map((doc) => doc.path));
 	const edited = remove(docs, (path) => gone.has(path));
-	git(root, ["rm", "-q", ...(whole ? ["-r"] : []), "--", whole ? epic! : target]);
+	// Only the quest documents go: notes, designs, and other files beside them stay.
+	git(root, ["rm", "-q", "--", ...doomed.map((doc) => doc.path)]);
 	write(root, edited);
+	const kept = whole
+		? git(root, ["ls-files", "-z", "--", epic!])
+				.split("\0")
+				.filter(Boolean)
+				.map(
+					(path) =>
+						`${path} is not a quest document, so rm kept it; delete it with git rm if it should go too`,
+				)
+		: [];
 	return {
 		changes: [...doomed.map((doc) => `D ${doc.path}`), ...modified(edited)],
-		warnings: mentions(root, whole ? epic! : target),
+		warnings: [...kept, ...mentions(root, whole ? epic! : target)],
 		findings: findings(root),
 	};
 }

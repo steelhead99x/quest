@@ -247,6 +247,20 @@ describe("quest mv", () => {
 		);
 	});
 
+	test("removes only an epic's quest documents, keeping and naming the files beside them", async () => {
+		const tree = committed(
+			Tree.baseline()
+				.write("quest/m0/solo/README.md", "# [S] Solo\n\n## Goal\n\nAlone.\n")
+				.write("quest/m0/solo/design.txt", "Sketches.\n"),
+		);
+		const out = await quest(tree, "rm", "quest/m0/solo");
+		expect(out.code).toBe(0);
+		expect(out.stdout).toBe("D quest/m0/solo/README.md\n");
+		expect(out.stderr).toContain("quest/m0/solo/design.txt is not a quest document, so rm kept it");
+		expect(existsSync(join(tree.path, "quest/m0/solo/design.txt"))).toBe(true);
+		expect(staged(tree)).toEqual(["D  quest/m0/solo/README.md"]);
+	});
+
 	test("refuses the root epic and milestones", async () => {
 		const tree = Tree.baseline().write("quest/m1/README.md", "# M1\n\n## Goal\n\nNext.\n");
 		committed(tree);
@@ -335,6 +349,20 @@ describe("quest rm", () => {
 			);
 		}
 		expect(staged(tree)).toEqual([]);
+	});
+
+	test("removes only an epic's quest documents, keeping and naming the files beside them", async () => {
+		const tree = committed(
+			Tree.baseline()
+				.write("quest/m0/solo/README.md", "# [S] Solo\n\n## Goal\n\nAlone.\n")
+				.write("quest/m0/solo/design.txt", "Sketches.\n"),
+		);
+		const out = await quest(tree, "rm", "quest/m0/solo");
+		expect(out.code).toBe(0);
+		expect(out.stdout).toBe("D quest/m0/solo/README.md\n");
+		expect(out.stderr).toContain("quest/m0/solo/design.txt is not a quest document, so rm kept it");
+		expect(existsSync(join(tree.path, "quest/m0/solo/design.txt"))).toBe(true);
+		expect(staged(tree)).toEqual(["D  quest/m0/solo/README.md"]);
 	});
 
 	test("refuses the root epic and milestones", async () => {
