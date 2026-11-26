@@ -229,7 +229,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           TAG: v${{ needs.plan.outputs.version }}
-        run: ./scripts/install-check.ps1 -Method archive -Target $env:TARGET -Tag $env:TAG -ReleaseDirectory (Resolve-Path release).Path
+        run: ./scripts/install-check.ps1 -Method archive -Target $env:TARGET -Tag $env:TAG -Repository $env:GITHUB_REPOSITORY -ReleaseDirectory (Resolve-Path release).Path
 
   publish:
     needs: [plan, check, macos, gate-macos, windows]
