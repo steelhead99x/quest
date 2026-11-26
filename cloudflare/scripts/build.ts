@@ -41,7 +41,7 @@ for (const [pkg, files] of Object.entries(FONTS)) {
 	cpSync(join(dir, "LICENSE"), join(fonts, `${pkg.split("/")[1]}-OFL.txt`));
 }
 // The site's social image (brand/README.md).
-cpSync(join(worker, "brand", "og.png"), join(out, "og.png"));
+cpSync(join(root, "design", "theme", "og.png"), join(out, "og.png"));
 for (const file of ["site.css", "app.js", "manifest.webmanifest"]) cpSync(join(worker, "src", file), join(out, file));
 const sw = readFileSync(join(worker, "src", "sw.js"), "utf8");
 if (!sw.includes("__VERSION__")) throw new Error("src/sw.js lost its __VERSION__ placeholder");

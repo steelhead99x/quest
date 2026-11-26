@@ -2,7 +2,7 @@ import type { Repositories } from "./github/repos.ts";
 import { Difficulty, Entry, Heading, Layout, type User } from "./layout.tsx";
 
 const description =
-	"A quest log for your repo and your agents, on your phone: what is ready to start, what is in review, and each pull request's checks.";
+	"Find the next ready quest, see what it unblocks, and follow its pull request from your phone. Quest keeps the plan in your Git repository.";
 
 /** The home page: sign-in, or the signed-in person's repositories. */
 export function Home(props: { user: User | null; install: string; repos: Repositories | null; origin: string }) {
@@ -19,11 +19,11 @@ function Pitch(props: { install: string }) {
 		<>
 			<section class="wrap hero">
 				<div class="hero-copy">
-					<h1>A quest log for your repo and your agents</h1>
-					<p class="lede">Readable plans. Explicit dependencies. Reviewable Git changes.</p>
+					<h1>Find your next quest.</h1>
+					<p class="lede">A shared quest log for you and your coding agents.</p>
 					<p>
-						This site shows your repository's quest tree on your phone: what's ready to start, what's in
-						review, and each pull request's checks.
+						Pick the change that unblocks the most work. Follow its pull request and check the build from
+						your phone. Your plan lives alongside the code in Git.
 					</p>
 					<p class="actions">
 						<a class="button primary" href="/sign-in?next=%2F">
@@ -34,7 +34,16 @@ function Pitch(props: { install: string }) {
 						</a>
 					</p>
 				</div>
-				{/* The social image's sample quests, drawn as a chain: one unblocks the next. */}
+				<img class="route-art" src="/theme/route.svg" width="640" height="440" alt="" />
+			</section>
+			<section class="wrap board-preview">
+				<div>
+					<h2>Read the work in order</h2>
+					<p>
+						The download button needs a CSV endpoint. Quest puts the endpoint first and shows the button it
+						unlocks. Work already in review has its own place on the board.
+					</p>
+				</div>
 				<figure class="sample">
 					<ol class="chain" aria-label="Example quests">
 						<Entry title="Add the CSV endpoint" status="ready" size="S">
@@ -55,11 +64,11 @@ function Pitch(props: { install: string }) {
 							<span>#41, checks passed</span>
 						</Entry>
 					</ul>
-					<figcaption class="muted">Example quests, as a board lists them.</figcaption>
+					<figcaption class="muted">Example board for a CSV export feature.</figcaption>
 				</figure>
 			</section>
 			<section class="wrap pitch">
-				<h2>What you see</h2>
+				<h2>From plan to pull request</h2>
 				<dl class="features">
 					<div>
 						<dt>What to start next</dt>
@@ -76,7 +85,7 @@ function Pitch(props: { install: string }) {
 						</dd>
 					</div>
 					<div>
-						<dt>How quests merged</dt>
+						<dt>Look back at merged work</dt>
 						<dd>
 							For the last 30 days: size, the model that wrote it, review score and rounds, and hours from
 							claim to merge.
@@ -85,7 +94,7 @@ function Pitch(props: { install: string }) {
 				</dl>
 			</section>
 			<section class="wrap pitch">
-				<h2>Set it up</h2>
+				<h2>Connect your first repository</h2>
 				<ol class="steps">
 					<li>
 						<span>

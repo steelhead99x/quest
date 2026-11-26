@@ -5,7 +5,7 @@ import type { Child } from "hono/jsx";
 // surfaces, ink, and accent are moq-dev's, and the type is Atkinson Hyperlegible
 // (src/site.css), served from /fonts.
 
-export const repo = "https://github.com/moq-dev/quest";
+export const repo = "https://github.com/steelhead99x/quest";
 
 /** The signed-in person, as the header shows them. */
 export type User = { login: string };
@@ -28,7 +28,7 @@ export type Page = {
 
 /** The page shell. */
 export function Layout(props: Page & { children: Child }) {
-	const title = props.title ? `${props.title} · Quest` : "Quest: a quest log for your repo and your agents";
+	const title = props.title ? `${props.title} · Quest` : "Quest · Find your next quest";
 	return (
 		<html lang="en">
 			<head>
@@ -62,7 +62,7 @@ export function Layout(props: Page & { children: Child }) {
 						<meta property="og:image:height" content="640" />
 						<meta
 							property="og:image:alt"
-							content="Quest's mark beside two quests, the first unblocking the second: a quest log for your repo and your agents."
+							content="Find your next quest. An amber route branches across a slate contour map."
 						/>
 						<meta name="twitter:card" content="summary_large_image" />
 					</>

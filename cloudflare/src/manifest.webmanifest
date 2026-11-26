@@ -1,7 +1,7 @@
 {
 	"name": "Quest",
 	"short_name": "Quest",
-	"description": "A quest log for your repo and your agents: what is ready to start, what is in review, and each pull request's checks.",
+	"description": "Find the next ready quest, see what it unblocks, and follow its pull request from your phone. Quest keeps the plan in your Git repository.",
 	"start_url": "/",
 	"scope": "/",
 	"display": "standalone",

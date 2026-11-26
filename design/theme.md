@@ -23,9 +23,9 @@ binary.
 
 ## Voice
 
-Hook, then substance. Lead with "a quest log for your repo and your agents",
-then deliver the pitch: readable plans, explicit dependencies, and reviewable
-Git changes.
+Lead with “Find your next quest.” Describe Quest as a shared quest log for you
+and your coding agents. Show a concrete dependency and the pull request that
+delivers the change.
 
 Plain copy with a light game flavour. "Quest" and "quest log" are the product,
 so they stay, along with the markers and size colours. Everything else reads
@@ -101,17 +101,19 @@ and `?`, the rarity ladder with its labels, and the amber square.
 
 ## Social image
 
-[`theme/og.svg`](theme/og.svg) is the source and
-[`theme/og.png`](theme/og.png) the 1280 by 640 export. The SVG imports
-Barlow Condensed and Inter from Google Fonts, so export it with network
-access. Headless Chrome can silently fall back to system fonts on a cold font
-cache, so re-run the export if the fonts look wrong:
+The landing page uses [an original route map](theme/route.svg). The amber line
+connects commit nodes and branches across slate contours. The board beneath
+it explains the real dependency using text and labeled statuses.
+
+The [social card](theme/og.svg) pairs the map with the mark and headline.
+Both the README and the site use its 1280 × 640 PNG. From the repository
+root, install the locked dependencies for Atkinson and render locally:
 
 ```sh
-google-chrome --headless=new --hide-scrollbars --virtual-time-budget=10000 \
-  --window-size=1280,640 --screenshot=design/theme/og.png \
-  "file://$PWD/design/theme/og.svg"
+google-chrome --headless=new --allow-file-access-from-files --hide-scrollbars \
+  --virtual-time-budget=5000 --window-size=1280,640 \
+  --screenshot="$PWD/design/theme/og.png" "file://$PWD/design/theme/og.svg"
 ```
 
-A maintainer uploads `og.png` by hand under the repository's Settings, General,
+The repository owner can also select this PNG under Settings → General →
 Social preview.
