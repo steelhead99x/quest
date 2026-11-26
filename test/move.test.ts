@@ -261,6 +261,20 @@ describe("quest mv", () => {
 		expect(staged(tree)).toEqual(["D  quest/m0/solo/README.md"]);
 	});
 
+	test("treats a quest's file name literally, never as a pattern matching its siblings", async () => {
+		// As a pattern, `[S] x.md` also matches `S x.md`.
+		const tree = committed(
+			Tree.baseline()
+				.write("quest/m0/epic/[S] x.md", "# [S] Brackets\n\n## Goal\n\nLiteral.\n")
+				.write("quest/m0/epic/S x.md", "# [S] Sibling\n\n## Goal\n\nThe pattern matches it.\n"),
+		);
+		const out = await quest(tree, "rm", "quest/m0/epic/[S] x.md");
+		expect(out.code).toBe(0);
+		expect(out.stdout).toBe("D quest/m0/epic/[S] x.md\n");
+		expect(staged(tree)).toEqual(['D  "quest/m0/epic/[S] x.md"']);
+		expect(git(tree.path, "ls-files", "--", ":(literal)quest/m0/epic/S x.md")).toBe("quest/m0/epic/S x.md\n");
+	});
+
 	test("refuses the root epic and milestones", async () => {
 		const tree = Tree.baseline().write("quest/m1/README.md", "# M1\n\n## Goal\n\nNext.\n");
 		committed(tree);
@@ -363,6 +377,19 @@ describe("quest rm", () => {
 		expect(out.stderr).toContain("quest/m0/solo/design.txt is not a quest document, so rm kept it");
 		expect(existsSync(join(tree.path, "quest/m0/solo/design.txt"))).toBe(true);
 		expect(staged(tree)).toEqual(["D  quest/m0/solo/README.md"]);
+	});
+
+	test("treats a quest's file name literally, never as a pattern matching its siblings", async () => {
+		const tree = committed(
+			Tree.baseline()
+				.write("quest/m0/epic/[ab].md", "# [S] Brackets\n\n## Goal\n\nLiteral.\n")
+				.write("quest/m0/epic/a.md", "# [S] A\n\n## Goal\n\nA sibling the pattern matches.\n"),
+		);
+		const out = await quest(tree, "rm", "quest/m0/epic/[ab].md");
+		expect(out.code).toBe(0);
+		expect(out.stdout).toBe("D quest/m0/epic/[ab].md\n");
+		expect(staged(tree)).toEqual(['D  "quest/m0/epic/[ab].md"'].map((l) => l.replace(/"/g, "")));
+		expect(existsSync(join(tree.path, "quest/m0/epic/a.md"))).toBe(true);
 	});
 
 	test("refuses the root epic and milestones", async () => {
