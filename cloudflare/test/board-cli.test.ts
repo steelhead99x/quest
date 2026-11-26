@@ -46,6 +46,7 @@ function documents(dir: string): Tree["documents"] {
 function tree(dir: string): Tree {
 	return {
 		repository: "o/r",
+		upstream: "o/r",
 		url: "https://github.com/o/r",
 		private: false,
 		branch: "main",

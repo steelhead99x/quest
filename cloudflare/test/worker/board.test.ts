@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { DEPTH, tree, workflows } from "../../src/board/load.ts";
+import { claims, DEPTH, merge, tree, upstreamOf, workflows } from "../../src/board/load.ts";
 import { SESSION, seal } from "../../src/session.ts";
 import { env, harness, json, type Route } from "./fake.ts";
 
@@ -452,5 +452,123 @@ describe("private data", () => {
 		await h.request("/repos/moq-dev/quest", { cookies: [cookie] });
 		await h.request("/repos/moq-dev/quest", { cookies: [cookie] });
 		expect(h.requests.filter((r) => r.url.endsWith("/repos/moq-dev/quest"))).toHaveLength(0);
+	});
+});
+
+describe("claims, as the CLI reads them", () => {
+	const UPSTREAM_PR = {
+		number: 77,
+		url: "https://github.com/moq-dev/quest/pull/77",
+		title: "Alpha upstream",
+		isDraft: true,
+		headRefName: "quest/m0/a",
+		headRefOid: "e".repeat(40),
+		createdAt: "2026-11-19T00:00:00Z",
+		body: "",
+		author: { login: "kixelated" },
+	};
+
+	/** The fork steelhead99x/quest, whose parent moq-dev/quest keeps the quest tree. */
+	function fork(extra: Record<string, unknown> = {}) {
+		return repository(FILES, {
+			nameWithOwner: "steelhead99x/quest",
+			url: "https://github.com/steelhead99x/quest",
+			parent: { nameWithOwner: "moq-dev/quest", tree: { id: "x" }, parent: null },
+			pullRequests: { totalCount: 0, nodes: [] },
+			refs: { totalCount: 0, nodes: [] },
+			...extra,
+		});
+	}
+
+	test("a fork's board counts its upstream's claims", async () => {
+		let upstreamAsked = false;
+		const h = harness({
+			...routes(),
+			[GRAPHQL]: async (r) => {
+				const { query, variables } = (await r.json()) as { query: string; variables: { owner: string } };
+				if (query.includes("query Upstream")) {
+					upstreamAsked = true;
+					expect(variables.owner).toBe("moq-dev");
+					return json({
+						data: {
+							repository: {
+								pullRequests: { totalCount: 1, nodes: [UPSTREAM_PR] },
+								refs: { totalCount: 0, nodes: [] },
+							},
+						},
+					});
+				}
+				return json({ data: { repository: fork() } });
+			},
+			"GET https://api.github.com/repos/steelhead99x/quest/actions/runs": () =>
+				json({ total_count: 0, workflow_runs: [] }),
+		});
+		const html = await (await h.request("/repos/steelhead99x/quest", { cookies: [await signedIn()] })).text();
+		expect(upstreamAsked).toBe(true);
+		const ready = html.slice(html.indexOf("Ready to start"), html.indexOf("<h2>Waiting"));
+		expect(ready).not.toContain("Alpha");
+		expect(html).toContain('href="https://github.com/moq-dev/quest/pull/77">#77</a>');
+	});
+
+	test("a parent without a quest tree is not an upstream", () => {
+		expect(upstreamOf(fork({ parent: { nameWithOwner: "someone/quest", tree: null, parent: null } }))).toBe(
+			"steelhead99x/quest",
+		);
+		expect(
+			upstreamOf(
+				fork({
+					parent: {
+						nameWithOwner: "moq-dev/quest",
+						tree: { id: "x" },
+						parent: { nameWithOwner: "kixel-ai/quest", tree: { id: "y" }, parent: null },
+					},
+				}),
+			),
+		).toBe("kixel-ai/quest");
+	});
+
+	test("a retained branch whose tip landed holds nothing", () => {
+		const tip = "f".repeat(40);
+		const t = tree(
+			repository(FILES, {
+				pullRequests: { totalCount: 0, nodes: [] },
+				refs: {
+					totalCount: 2,
+					nodes: [
+						{
+							name: "m0/a",
+							target: { oid: tip },
+							associatedPullRequests: { nodes: [{ headRefOid: tip }] },
+						},
+						// Pushed to again after its PR merged: its new tip is work that has not landed.
+						{
+							name: "m0/c",
+							target: { oid: "1".repeat(40) },
+							associatedPullRequests: { nodes: [{ headRefOid: tip }] },
+						},
+					],
+				},
+			}),
+		);
+		expect(t.branches).toEqual(["quest/m0/c"]);
+		expect(t.upstream).toBe("moq-dev/quest");
+	});
+
+	test("the earliest open PR across the fork and its upstream holds the claim", () => {
+		const own = {
+			...UPSTREAM_PR,
+			number: 3,
+			url: "https://github.com/steelhead99x/quest/pull/3",
+			createdAt: "2026-11-21T00:00:00Z",
+		};
+		const t = tree(fork({ pullRequests: { totalCount: 1, nodes: [own] } }));
+		const merged = merge(
+			t,
+			claims(
+				{ pullRequests: { totalCount: 1, nodes: [UPSTREAM_PR] }, refs: { totalCount: 0, nodes: [] } },
+				"moq-dev/quest",
+			),
+		);
+		expect(merged.pulls.map((p) => p.number)).toEqual([77, 3]);
 	});
 });
