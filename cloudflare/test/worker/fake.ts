@@ -2,6 +2,9 @@
 // request, and answers 404 for anything a test did not expect.
 
 import { app, type Env } from "../../src/app.tsx";
+import { refreshOnce } from "../../src/auth.ts";
+import { GitHub } from "../../src/github/client.ts";
+import { type Ledger, rotationName, Rotator } from "../../src/rotation.ts";
 
 export const env: Env = {
 	AUTH_SECRET: "test-only-secret-that-is-at-least-32-characters",
@@ -17,23 +20,68 @@ export type Route = (request: Request) => Response | Promise<Response> | undefin
 export const json = (body: unknown, status = 200) =>
 	new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
+/**
+ * Coordinators by name, standing in for the Durable Object namespace: one
+ * object per refresh token, reached from every location. Pass one to two
+ * harnesses to stand for two Cloudflare locations with separate caches.
+ */
+export class Coordinators {
+	readonly objects = new Map<string, Rotator>();
+	readonly ledgers = new Map<string, string>();
+	/** Make keeping a rotation fail, as a storage write can. */
+	failWrites = false;
+
+	get(name: string, perform: ConstructorParameters<typeof Rotator>[2]): Rotator {
+		let rotator = this.objects.get(name);
+		if (!rotator) {
+			const ledger: Ledger = {
+				get: async () => this.ledgers.get(name),
+				put: async (sealed) => {
+					if (this.failWrites) throw new Error("storage write failed");
+					this.ledgers.set(name, sealed);
+				},
+			};
+			rotator = new Rotator(ledger, env.AUTH_SECRET, perform);
+			this.objects.set(name, rotator);
+		}
+		return rotator;
+	}
+
+	/** Drop every object, as an eviction would, keeping what their storage holds. */
+	evict() {
+		this.objects.clear();
+	}
+}
+
 /** The Worker with a fake GitHub and a clock tests can move. */
-export function harness(routes: Record<string, Route> = {}) {
+export function harness(routes: Record<string, Route> = {}, coordinators = new Coordinators()) {
 	const requests: Request[] = [];
 	let now = Date.UTC(2026, 10, 25, 12);
 	// Each harness gets its own cache, so no test sees another's boards.
 	const store = caches.open(`test-${crypto.randomUUID()}`);
+	const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+		const request = new Request(input, init);
+		requests.push(request.clone());
+		const url = new URL(request.url);
+		const route = routes[`${request.method} ${url.origin}${url.pathname}`];
+		const answer = route ? await route(request) : undefined;
+		return answer ?? json({ message: `unexpected ${request.method} ${request.url}` }, 404);
+	};
 	const worker = app({
 		now: () => now,
 		cache: () => store,
-		fetch: async (input, init) => {
-			const request = new Request(input, init);
-			requests.push(request.clone());
-			const url = new URL(request.url);
-			const route = routes[`${request.method} ${url.origin}${url.pathname}`];
-			const answer = route ? await route(request) : undefined;
-			return answer ?? json({ message: `unexpected ${request.method} ${request.url}` }, 404);
-		},
+		fetch,
+		rotate: async (e, s) =>
+			coordinators
+				.get(await rotationName(s.refresh), (t) =>
+					refreshOnce(
+						new GitHub(fetch, null),
+						{ clientId: e.GITHUB_CLIENT_ID, clientSecret: e.GITHUB_CLIENT_SECRET },
+						t,
+						now,
+					),
+				)
+				.rotate(s),
 	});
 	return {
 		requests,

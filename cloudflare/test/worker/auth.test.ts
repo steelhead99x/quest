@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { tokens } from "../../src/auth.ts";
 import { bounded, GitHub, Spent } from "../../src/github/client.ts";
 import { local, open, seal, SESSION, STATE } from "../../src/session.ts";
-import { cookies, env, harness, issued, json, type Route } from "./fake.ts";
+import { Coordinators, cookies, env, harness, issued, json, type Route } from "./fake.ts";
 
 const TOKEN = "POST https://github.com/login/oauth/access_token";
 const USER = "GET https://api.github.com/user";
@@ -196,27 +196,32 @@ describe("signed in", () => {
 		expect(cookies(response).get(SESSION)!.attributes).toContain("Max-Age=0");
 	});
 
-	test("two tabs refreshing the same token at once both stay signed in", async () => {
+	test("two locations refreshing the same session at once spend its token once and both stay signed in", async () => {
 		const h = harness(signedInRoutes);
 		const { session } = await signIn(h);
 		let calls = 0;
-		const later = harness({
+		const routes: Record<string, Route> = {
 			...signedInRoutes,
-			// GitHub's refresh tokens are single-use: the first request rotates it, the second is refused.
+			// GitHub's refresh tokens are single-use: a second use is refused.
 			[TOKEN]: async () => {
 				calls++;
 				if (calls > 1) return json({ error: "bad_refresh_token" });
 				await new Promise((r) => setTimeout(r, 50));
 				return json(issued("ghu_two", "ghr_two"));
 			},
-		});
-		later.advance(8 * 3_600_000);
+		};
+		// Two locations: separate caches and clocks, one coordinator namespace.
+		const shared = new Coordinators();
+		const [east, west] = [harness(routes, shared), harness(routes, shared)];
+		for (const at of [east, west]) at.advance(8 * 3_600_000);
 		const cookie = [`${SESSION}=${session!.value}`];
 		const [a, b] = await Promise.all([
-			later.request("/", { cookies: cookie }),
-			later.request("/", { cookies: cookie }),
+			east.request("/", { cookies: cookie }),
+			west.request("/", { cookies: cookie }),
 		]);
-		for (const response of [a, b]) {
+		// A request arriving after the rotation, still carrying the old cookie, gets the same session.
+		const late = await west.request("/", { cookies: cookie });
+		for (const response of [a, b, late]) {
 			expect(response.status).toBe(200);
 			expect(await response.text()).toContain('<span class="muted">octo</span>');
 			const renewed = cookies(response).get(SESSION)!;
@@ -225,7 +230,37 @@ describe("signed in", () => {
 				"ghu_two",
 			);
 		}
-		expect(calls).toBe(2);
+		expect(calls).toBe(1);
+	});
+
+	test("a rotation GitHub made is kept even when storing it fails, and survives an eviction once stored", async () => {
+		const h = harness(signedInRoutes);
+		const { session } = await signIn(h);
+		let calls = 0;
+		const routes: Record<string, Route> = {
+			...signedInRoutes,
+			[TOKEN]: () => (calls++ ? json({ error: "bad_refresh_token" }) : json(issued("ghu_two", "ghr_two"))),
+		};
+		const shared = new Coordinators();
+		shared.failWrites = true;
+		const later = harness(routes, shared);
+		later.advance(8 * 3_600_000);
+		const cookie = [`${SESSION}=${session!.value}`];
+		const token = async (r: Response) =>
+			((await open(env.AUTH_SECRET, "session", cookies(r).get(SESSION)!.value)) as { token: string }).token;
+		// The write failed, but GitHub already spent the old token: the new session is still handed out.
+		expect(await token(await later.request("/", { cookies: cookie }))).toBe("ghu_two");
+		expect(await token(await later.request("/", { cookies: cookie }))).toBe("ghu_two");
+		expect(calls).toBe(1);
+		// Once stored, an evicted coordinator answers from storage without asking GitHub.
+		const again = new Coordinators();
+		const fresh = harness(routes, again);
+		fresh.advance(8 * 3_600_000);
+		calls = 0;
+		expect(await token(await fresh.request("/", { cookies: cookie }))).toBe("ghu_two");
+		again.evict();
+		expect(await token(await fresh.request("/", { cookies: cookie }))).toBe("ghu_two");
+		expect(calls).toBe(1);
 	});
 
 	test("a GitHub outage keeps the session, using the token while it is valid", async () => {
@@ -326,6 +361,28 @@ describe("sign-out", () => {
 		expect(cookies(response).get(SESSION)!.attributes).toContain("Max-Age=0");
 		expect(revoked!.headers.get("authorization")).toBe(`Basic ${btoa("Iv23test:test-client-secret")}`);
 		expect(await revoked!.json()).toEqual({ access_token: "ghu_one" });
+	});
+
+	test("signs out with an expired token while GitHub is down", async () => {
+		const h = harness(signedInRoutes);
+		const { session } = await signIn(h);
+		const down = harness({
+			[TOKEN]: () => new Response("Service unavailable", { status: 503 }),
+			"DELETE https://api.github.com/applications/Iv23test/token": () => new Response("down", { status: 503 }),
+		});
+		down.advance(9 * 3_600_000);
+		const response = await down.request("/sign-out", {
+			method: "POST",
+			headers: { origin: "https://quest.test" },
+			cookies: [`${SESSION}=${session!.value}`],
+		});
+		expect(response.status).toBe(303);
+		expect(cookies(response).get(SESSION)!.attributes).toContain("Max-Age=0");
+		expect(response.headers.get("clear-site-data")).toBe('"cache", "storage"');
+		// Signing out never tried to refresh the token.
+		expect(down.requests.map((r) => r.method + " " + new URL(r.url).pathname)).toEqual([
+			"DELETE /applications/Iv23test/token",
+		]);
 	});
 });
 

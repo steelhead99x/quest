@@ -5,12 +5,19 @@
 
 import snapshot from "./snapshot.gen.js";
 import { app, type Env } from "../src/app.tsx";
+import { rotationName, rotationsClass } from "../src/rotation.ts";
 import { github } from "./github.ts";
 
 const AUTHORIZE = "https://github.com/login/oauth/authorize";
 
 // Built on the first request: outside one, a Worker's clock reads 1970.
 let real: ReturnType<typeof app> | null = null;
+let stand: ReturnType<typeof github> | null = null;
+const standIn = () => (stand ??= github(snapshot, () => Date.now()));
+
+/** The real coordinator, reaching the stand-in GitHub. */
+export const Rotations = rotationsClass(() => standIn().fetch);
+type Deployed = Env & { ROTATIONS: DurableObjectNamespace<InstanceType<typeof Rotations>> };
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -22,9 +29,13 @@ export default {
 			return Response.redirect(back.href, 302);
 		}
 		real ??= app({
-			fetch: github(snapshot, () => Date.now()).fetch,
+			fetch: standIn().fetch,
 			now: () => Date.now(),
 			cache: async () => null,
+			rotate: async (env, s) => {
+				const ns = (env as Deployed).ROTATIONS;
+				return ns.get(ns.idFromName(await rotationName(s.refresh))).rotate(s);
+			},
 		});
 		const response = await real.fetch(request, env, ctx);
 		const location = response.headers.get("location");

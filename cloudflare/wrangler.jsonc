@@ -17,5 +17,8 @@
 		// The calendar Scheduled dates are read on; the CLI uses its machine's, so set the maintainer's.
 		"SCHEDULE_TIMEZONE": "UTC",
 	},
+	// One coordinator per refresh token, so two locations refreshing a session spend its token once (src/rotation.ts).
+	"durable_objects": { "bindings": [{ "name": "ROTATIONS", "class_name": "Rotations" }] },
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Rotations"] }],
 	"secrets": { "required": ["AUTH_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"] },
 }

@@ -1,6 +1,6 @@
 import { type Context as HonoContext, Hono } from "hono";
 import { getCookie } from "hono/cookie";
-import { authorizeUrl, type Config, exchange, type Rotations, refreshed, revoke } from "./auth.ts";
+import { authorizeUrl, type Config, exchange, type Refreshed, refreshed, revoke } from "./auth.ts";
 import { CALLBACK } from "./github/app.ts";
 import { type Fetch, GitHub, GitHubError, Spent } from "./github/client.ts";
 import { repositories } from "./github/repos.ts";
@@ -34,6 +34,8 @@ export interface Deps {
 	now: () => number;
 	/** Where GitHub answers are cached briefly, or null for none. */
 	cache: () => Promise<Cache | null>;
+	/** Rotate an expiring session's refresh token through its coordinator, once for every caller (rotation.ts). */
+	rotate: (env: Env, s: Session) => Promise<Refreshed>;
 }
 
 type Vars = {
@@ -106,7 +108,9 @@ export function app(deps: Deps): App {
 		const { config, install } = configure(c.env, origin);
 		c.set("config", config);
 		c.set("install", install);
-		await loadSession(c, deps);
+		// Signing out must work whatever GitHub's state, so it reads the cookie without refreshing it.
+		const signingOut = c.req.method === "POST" && c.req.path === "/sign-out";
+		await loadSession(c, deps, !signingOut);
 		c.set("rendered", c.get("session") !== null);
 		await next();
 		const github = c.get("github").meter;
@@ -293,7 +297,11 @@ export function app(deps: Deps): App {
 		c.set("session", null);
 		// Drop the cached pages the service worker kept for this person.
 		c.header("Clear-Site-Data", '"cache", "storage"');
-		if (s) await revoke(c.get("github"), c.get("config"), s.token);
+		// Revoking is a courtesy to GitHub: the session ends here whether or not GitHub answers.
+		if (s)
+			await revoke(c.get("github"), c.get("config"), s.token).catch((error) =>
+				console.error("revoking a signed-out token failed", error),
+			);
 		return c.redirect("/", 303);
 	});
 
@@ -404,7 +412,7 @@ export function sameOrigin(request: Request): string | null {
 	return origin === new URL(request.url).origin ? null : "This form was sent from another site.";
 }
 
-async function loadSession(c: Context, deps: Deps) {
+async function loadSession(c: Context, deps: Deps, refresh: boolean) {
 	const raw = getCookie(c, SESSION);
 	const was = session(await open(c.env.AUTH_SECRET, "session", raw));
 	if (!was) {
@@ -412,7 +420,8 @@ async function loadSession(c: Context, deps: Deps) {
 		c.set("session", null);
 		return;
 	}
-	const result = await refreshed(c.get("github"), c.get("config"), was, deps.now(), await rotations(c, deps));
+	if (!refresh) return c.set("session", was);
+	const result = await refreshed(was, deps.now(), (s) => deps.rotate(c.env, s));
 	if (result.kind === "revoked") {
 		c.get("cookies").push(cookie(SESSION, null, 0));
 		c.set("session", null);
@@ -429,29 +438,6 @@ async function loadSession(c: Context, deps: Deps) {
 
 /** GitHub's token endpoint failed and the current token has expired; the session is kept for a retry. */
 class Unavailable extends Error {}
-
-/** Rotations shared through the Cache API for two minutes, sealed, under a hash of the old refresh token. */
-async function rotations(c: Context, deps: Deps): Promise<Rotations> {
-	const store = await deps.cache();
-	const secret = c.env.AUTH_SECRET;
-	const url = async (refresh: string) => {
-		const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(refresh));
-		const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-		return `https://cache.quest.internal/rotation/${hex}`;
-	};
-	return {
-		find: async (refresh) => {
-			const hit = await store?.match(await url(refresh));
-			return hit ? session(await open(secret, "rotation", await hit.text())) : null;
-		},
-		keep: async (refresh, next) => {
-			await store?.put(
-				await url(refresh),
-				new Response(await seal(secret, "rotation", next), { headers: { "cache-control": "max-age=120" } }),
-			);
-		},
-	};
-}
 
 async function setSession(c: Context, s: Session, deps: Deps) {
 	c.set("session", s);

@@ -63,50 +63,45 @@ export async function exchange(github: GitHub, config: Config, code: string, now
 	return { id: user.id, login: user.login, ...issued };
 }
 
-/** Where a rotation is shared between requests carrying the same old refresh token. */
-export interface Rotations {
-	/** The session another request rotated `refresh` into, if any. */
-	find(refresh: string): Promise<Session | null>;
-	/** Share the session `refresh` was rotated into, briefly. */
-	keep(refresh: string, session: Session): Promise<void>;
-}
-
 /** What refreshing a session came to. */
 export type Refreshed =
-	/** The token is current, or was just rotated, here or by a concurrent request. */
+	/** The token is current, or was just rotated, by this request or a concurrent one. */
 	| { kind: "fresh"; session: Session; changed: boolean }
-	/** GitHub refused the refresh token: it was revoked, expired, or used without a rotation to share. */
+	/** GitHub refused the refresh token: it was revoked or expired. */
 	| { kind: "revoked" }
 	/** GitHub could not be asked or answered oddly: the session stays, and its token is used while valid. */
 	| { kind: "unavailable" };
 
 /** GitHub's answer for a refresh token that will never work again. */
 const REVOKED = "bad_refresh_token";
-/** How long a request that lost a rotation race waits for the winner to share it. */
-const WAIT = 3_000;
-const POLL = 250;
-
-/** A refresh GitHub refused outright, as opposed to one it could not answer. */
-class Refused extends Error {}
 
 /**
- * The session with a fresh token if it is about to expire. GitHub's refresh
- * tokens are single-use, so two tabs refreshing at once race: the winner shares
- * its rotation through `rotations`, and the loser waits briefly for it rather
- * than signing a valid person out.
+ * The session with a fresh token if it is about to expire. `rotate` asks
+ * GitHub through the token's coordinator (rotation.ts), so concurrent
+ * refreshes of one session, from any location, spend its token once.
  */
 export async function refreshed(
-	github: GitHub,
-	config: Config,
 	s: Session,
 	now: number,
-	rotations: Rotations,
-	sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)),
+	rotate: (s: Session) => Promise<Refreshed>,
 ): Promise<Refreshed> {
 	if (s.expires - EARLY > now) return { kind: "fresh", session: s, changed: false };
 	if (s.refreshExpires <= now) return { kind: "revoked" };
-	const shared = await rotations.find(s.refresh);
-	if (shared) return { kind: "fresh", session: shared, changed: true };
+	try {
+		return await rotate(s);
+	} catch (error) {
+		console.error("the rotation coordinator failed", error);
+		return { kind: "unavailable" };
+	}
+}
+
+/** Ask GitHub once to rotate a session's refresh token. Only `bad_refresh_token` counts as refused. */
+export async function refreshOnce(
+	github: GitHub,
+	config: Pick<Config, "clientId" | "clientSecret">,
+	s: Session,
+	now: number,
+): Promise<Refreshed> {
 	try {
 		const answer = (await post(github, {
 			client_id: config.clientId,
@@ -114,19 +109,10 @@ export async function refreshed(
 			grant_type: "refresh_token",
 			refresh_token: s.refresh,
 		})) as Record<string, unknown>;
-		if (answer?.error === REVOKED) throw new Refused();
-		const session = { ...s, ...tokens(answer, now) };
-		await rotations.keep(s.refresh, session);
-		return { kind: "fresh", session, changed: true };
-	} catch (error) {
-		if (!(error instanceof Refused)) return { kind: "unavailable" };
-		// Refused: if a concurrent request rotated this token, its result arrives shortly.
-		for (let waited = 0; waited < WAIT; waited += POLL) {
-			await sleep(POLL);
-			const later = await rotations.find(s.refresh);
-			if (later) return { kind: "fresh", session: later, changed: true };
-		}
-		return { kind: "revoked" };
+		if (answer?.error === REVOKED) return { kind: "revoked" };
+		return { kind: "fresh", session: { ...s, ...tokens(answer, now) }, changed: true };
+	} catch {
+		return { kind: "unavailable" };
 	}
 }
 
