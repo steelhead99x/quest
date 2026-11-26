@@ -189,12 +189,17 @@ function sender(
 				return json({ login: "me", repositories: served });
 			}
 			expect(String(input)).toBe(ENDPOINT);
+			// A redirect must reach the sender, never be followed into a GET.
+			expect(init?.redirect).toBe("manual");
 			uploads.push({
 				token: String((init?.headers as Record<string, string>).authorization),
 				body: JSON.parse(String(init?.body)),
 			});
 			during();
-			return new Response("", { status: typeof status === "number" ? status : status() });
+			const code = typeof status === "number" ? status : status();
+			return code >= 300 && code < 400
+				? new Response(null, { status: code, headers: { location: "https://records.example/login" } })
+				: new Response("", { status: code });
 		}) as typeof fetch,
 	};
 	return { deps, uploads, asked, windows, slept, clock };
@@ -535,6 +540,25 @@ test("a token a new sign-in replaced during the pass keeps the queue for the new
 	const { deps, uploads } = sender(env, 200, sessions);
 	await sendPass(deps);
 	expect(uploads.map((upload) => upload.token)).toEqual(["Bearer fresh"]);
+	expect(pending(env)).toEqual([]);
+});
+
+test("a redirected upload keeps the queue and its cursor, since the endpoint received nothing", async () => {
+	const env = home();
+	const root = checkout();
+	queue(stopped(root), env);
+	for (const code of [301, 302, 307]) {
+		const moved = sender(env, code, [session("s1", "quest/m0/a")]);
+		await expect(sendPass(moved.deps)).rejects.toThrow(
+			`answered a redirect (${code} to https://records.example/login), so nothing was sent`,
+		);
+		moved.clock.now += 24 * 3_600_000;
+		expect(pending(env)).toHaveLength(1);
+	}
+	const ok = sender(env, 200, [session("s1", "quest/m0/a")]);
+	expect(await sendPass(ok.deps)).toEqual([
+		{ endpoint: ENDPOINT, repository: "acme/proj", records: 1, breakages: 0, refused: false },
+	]);
 	expect(pending(env)).toEqual([]);
 });
 

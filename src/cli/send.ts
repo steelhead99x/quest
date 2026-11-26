@@ -684,11 +684,19 @@ async function post(
 	} catch (error) {
 		throw new Error(`this quest built an upload its own parseUpload refuses: ${(error as Error).message}`);
 	}
-	return fetch(endpoint, {
+	// A redirect would turn the POST into a GET on some other page, whose 200 would settle records the
+	// endpoint never received, so the endpoint must answer at the URL it is configured with.
+	const response = await fetch(endpoint, {
 		method: "POST",
 		headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
 		body: JSON.stringify(upload),
+		redirect: "manual",
 	});
+	if (response.type === "opaqueredirect" || response.redirected || (response.status >= 300 && response.status < 400))
+		throw new Error(
+			`${endpoint} answered a redirect (${response.status}${response.headers.get("location") ? ` to ${response.headers.get("location")}` : ""}), so nothing was sent; set the records endpoint to the URL that takes the upload`,
+		);
+	return response;
 }
 
 /** The longest a failing group waits between tries. */
