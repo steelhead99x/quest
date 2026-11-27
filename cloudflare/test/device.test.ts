@@ -265,6 +265,7 @@ describe("bench", () => {
 		);
 		expect(md).toContain("- Not measured: text size: by hand");
 		expect(md).toContain("No regressions");
+		expect(markdown([report], null)).toContain("No baseline comparison was run.");
 		// A page that opens offline only as the site's notice doesn't count as opening offline.
 		const pages = report.pages.map((p) => ({
 			...p,
