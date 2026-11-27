@@ -64,13 +64,21 @@ remaining choices, marked "agent's choice" below):
 
 ## Waiting
 
-- Maintainer: approve or reject bringing back part of kix. kix was
-  deleted on 2026-11-08 because it never ran on a real repository, and
-  the benchmark epic says the dashboard belongs to Kixel Code. Options:
-  keep this cut-down kix here, since it adds nothing to the CLI and reads
-  only what `quest/core` and GitHub already give it (recommended); move
-  it to its own repository; drop the epic. An agent cannot settle this
-  because it reverses a recorded maintainer decision.
+- Maintainer: decide where the quest log site lives. Upstream has moved on
+  since this epic was planned from fe7f02a (2026-11-16): on 2026-11-22
+  ([kixel-ai/kixel.quest#104](https://github.com/kixel-ai/kixel.quest/pull/104))
+  the maintainer made kixel.quest "a public website and dashboard", and
+  kixel-ai/quest's root quest now lists "storage, dashboards, and the merge
+  queue, which kixel-ai/kixel.quest owns" as non-goals; its benchmark epic's
+  report is kixel.quest's factory page, and its telemetry epic signs people
+  in at kixel.quest with a free GitHub sign-in (`quest login`). This site is
+  a dashboard with its own GitHub App sign-in. Options: move it into
+  kixel-ai/kixel.quest as its phone view, on that sign-in and its factory
+  data (recommended: it matches both decisions, and drops this site's App
+  and sessions); keep it as the contributor's own site in this fork only;
+  or bring it into kixel-ai/quest, which reverses the 2026-11-22 non-goal.
+  An agent cannot settle this: it is the maintainer's product decision, and
+  kixel-ai/kixel.quest is private to this contributor's sessions.
 - Maintainer: choose the Cloudflare account and hostname it deploys to
   upstream (quest.moq.dev was retired with kix). Until then the
   contributor's fork is planned to serve at `quest.moq-bench.dev`; it does
@@ -96,5 +104,9 @@ remaining choices, marked "agent's choice" below):
 
 ## Related
 
-- [Development as a benchmark](/quest/m0/benchmark/README.md) - its
-  records endpoint is the long-term source for the bench page
+- [Development as a benchmark](/quest/m0/benchmark/README.md) - its report
+  is kixel.quest's factory page, built from Kixel Quest's records, which
+  [the merged-quests page](/quest/m2/mobile/bench.md) is to read too
+- kixel-ai/quest's `quest/m0/telemetry/login.md` - `quest login` signs a
+  machine in to Kixel Quest; the sign-in this site would use if it moves
+  there
