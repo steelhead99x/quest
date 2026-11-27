@@ -64,7 +64,7 @@ nobody holds.
 
 You review each change: `/quest-review` has a model no weaker than its latest writer review a
 draft locally and marks it ready, and `/quest-merge` (`$quest-merge` in Codex)
-queues it to land once a review covers its head and checks pass.
+queues it once a review covers its head, and the merge queue lands it once its checks pass.
 `/quest-run` queues a writer's PR that changes no user-facing behavior,
 such as one editing only quests or tests, without asking, unless your
 `CONTRIBUTING.md` opts out, and the same way a trivial PR, such as a

@@ -2,7 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 
-import { chmodSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -166,6 +166,40 @@ describe("quest merge's landing check", () => {
 		const findings = await inspect(tree, "fix/link");
 		expect(findings.map((finding) => finding.path)).toEqual(["quest/m0/epic/one.md"]);
 	});
+
+	test.skipIf(process.platform === "win32")(
+		"reports a malformed quest.toml in the head's tree, and Nix tasks without its flake.nix",
+		async () => {
+			const tree = repo("fix/manifest");
+			tree.write("quest.toml", '[tasks.a]\ntier = "pr"\nrun = "x"\nbogus = 1\n');
+			commit(tree, "manifest");
+			expect((await inspect(tree, "fix/manifest")).map((finding) => [finding.path, finding.message])).toEqual([
+				["quest.toml", "[tasks.a]: unknown key `bogus`"],
+			]);
+			tree.write("quest.toml", '[tasks.a]\ntier = "pr"\nrun = "x"\n');
+			commit(tree, "valid manifest");
+			expect((await inspect(tree, "fix/manifest")).map((finding) => finding.message)).toEqual([
+				expect.stringContaining("a run in the Nix dev shell, but there is no flake.nix"),
+			]);
+			symlinkSync("missing.nix", join(tree.path, "flake.nix"));
+			commit(tree, "dangling flake");
+			expect((await inspect(tree, "fix/manifest")).map((finding) => finding.message)).toEqual([
+				expect.stringContaining("a run in the Nix dev shell, but flake.nix is a symlink, not a regular file"),
+			]);
+			rmSync(join(tree.path, "flake.nix"));
+			tree.write("flake.nix", "{}\n");
+			commit(tree, "flake");
+			expect(await inspect(tree, "fix/manifest")).toEqual([]);
+			// The commit holds a symlink as its target's path, which quest check refuses too.
+			tree.write("ci/tasks.toml", '[tasks.a]\ntier = "pr"\nrun = "x"\n');
+			rmSync(join(tree.path, "quest.toml"));
+			symlinkSync("ci/tasks.toml", join(tree.path, "quest.toml"));
+			commit(tree, "linked manifest");
+			expect((await inspect(tree, "fix/manifest")).map((finding) => finding.message)).toEqual([
+				"must be a regular file, not a symlink",
+			]);
+		},
+	);
 
 	/** A tree whose `main` had a dangling link when `branch` left it, checked out on `branch`. */
 	function brokenAtFork(branch: string): Tree {

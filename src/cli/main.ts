@@ -2,8 +2,9 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
+import { createInterface } from "node:readline";
 
 import { Argument, Command, CommanderError, InvalidArgumentError, Option } from "commander";
 
@@ -33,8 +34,12 @@ import {
 	waiting,
 	waitLine,
 	handBackProblems,
+	HOST,
+	type Host,
 	InputError,
 	Refusal,
+	TASK_TIERS,
+	type TaskTier,
 } from "../core";
 import {
 	AgentInputError,
@@ -60,8 +65,10 @@ import {
 } from "./forge";
 import { PENDING_MS } from "./admission";
 import { gate } from "./gate";
+import { manifestProblems, nativeOs, run as runTasks, workingTree } from "./run";
 import { gitHubDependencies, pullRequest, readRemote, remoteRepository, requireRemote } from "./github";
 import { type GitHubDependencies, mergedHolds } from "../github/client";
+import { GitHubForge } from "../github/forge";
 import { setTimeout as sleep } from "node:timers/promises";
 import { LAND_CHECK } from "../github/land";
 import { audit } from "./audits";
@@ -76,7 +83,9 @@ import {
 	ARM_NAMES,
 	type Arm,
 	CLASSIFIERS,
+	COHORT,
 	DEFAULT_SIZE,
+	type Model,
 	SPLITTERS,
 	SPLIT_CHECKERS,
 	REVIEWERS,
@@ -95,7 +104,7 @@ import {
 	nextStep,
 	roundLines,
 } from "./review";
-import { type Recorded, pullModels, recordRounds } from "./review-record";
+import { type Recorded, pullModels, recordRounds, requirePosting } from "./review-record";
 import {
 	BASH_MAX_TIMEOUT_MS,
 	CLAUDE_HOOKS,
@@ -114,6 +123,7 @@ import { SEND_INTERVAL, background, parseInstant, queue, reportIncident, runSend
 import { installSender, uninstallSender } from "./service";
 import { heal, init, stubFindings, uninstall } from "./setup";
 import { describe, notUpstream, releaseQuest, startQuest } from "./start";
+import { login, logout } from "./login";
 import { KIXEL_QUEST_URL, kixelUrl, tokensPath } from "./tokens";
 import { CONTEXT, GUIDE, GUIDE_SECTIONS, SKILLS, guideSections, sectionHeading, skill } from "./skills";
 import { CONTEXT_PACKS, contextPack, contextPacks } from "./context";
@@ -189,14 +199,14 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 	const FORGE_WRITES =
 		"On GitHub, uses GH_TOKEN, GITHUB_TOKEN, or gh auth token. On a repository Kixel Quest hosts, named by a " +
 		"Kixel Quest PR URL (<url>/<owner>/<repo>/pull/<number>) or an origin remote there (<url>/<owner>/<repo>.git), " +
-		"it writes to Kixel Quest with the token $XDG_CONFIG_HOME/quest/records.json pairs with it, and holds are " +
+		"it writes to Kixel Quest with the token quest login stored for it, and holds are " +
 		"Kixel Quest's records rather than labels; QUEST_KIXEL_URL names another Kixel Quest. ";
 	const FORGE_READS =
-		"Where Kixel Quest serves the repository and $XDG_CONFIG_HOME/quest/records.json pairs a token with it, " +
+		"Where this host signed in to Kixel Quest with quest login and Kixel Quest serves the repository, " +
 		"these reads go to Kixel Quest's index instead, sparing the GitHub quota, and its failure fails the command; " +
 		"QUEST_FORGE=github reads GitHub, on your quota, to rerun a command Kixel Quest failed, and QUEST_KIXEL_URL " +
 		"names another Kixel Quest. A repository Kixel Quest " +
-		"hosts, named by a Kixel Quest PR URL or origin remote, is read there alone. ";
+		"hosts, named by a Kixel Quest PR URL or origin remote, is read there alone, and fails until quest login signs in. ";
 
 	const program = new Command("quest")
 		.description(description)
@@ -222,8 +232,10 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 		.command("gate")
 		.summary("Run a CPU-heavy command once the host has room for it")
 		.description(
-			"Wait while the 1-minute load average exceeds the host's CPU count or available memory is below " +
-				"min(4 GiB, RAM/4). Each admission in the last minute counts as one more unit of load and one " +
+			"Wait while the host's CPU load exceeds its CPU count or available memory is below min(4 GiB, RAM/4). " +
+				"On Linux the load is the CPUs busy over about the last 5 seconds, from /proc/stat, leaving out I/O " +
+				"wait, and less than one idle CPU counts as over the limit; elsewhere it is the 1-minute load " +
+				"average. Each admission in the last minute counts as one more unit of load and one " +
 				"budget less memory: commands start at once while those still fit, and 5 seconds apart while " +
 				"only the raw measures do. The load limit applies only while a gated command still runs. Where a " +
 				"systemd scope owns each running command, the load counts as at least the sum of their peak CPU " +
@@ -261,6 +273,88 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 		});
 
 	program
+		.command("run")
+		.summary("Run the CI tasks quest.toml declares that a change affects")
+		.description(
+			"Run the tasks the repository's quest.toml declares for a tier, each through quest gate, and in the " +
+				"repository's Nix dev shell unless the task sets nix = false. A task starts once every task it runs " +
+				"after passed, so independent tasks run at once, and each line it prints is prefixed with its name.\n\n" +
+				"Without --all, it diffs the working tree, untracked files included, against the merge base of HEAD " +
+				"and a base ref: --base, else $QUEST_LAND_BASE, else origin/ and [repo] merge (main unless set). A " +
+				"task runs when a changed path matches one of its paths or inputs, or any path when it declares no " +
+				"paths, and none of its exclude patterns; a change to quest.toml, or to a path [repo] invalidate_all " +
+				"matches, runs every task of the tier. The tiers are pr, gate, nightly, release-gate, and release: a " +
+				"run of one of the first four also runs the tiers before it, and a release run only release tasks. " +
+				"--only runs the named tasks whatever their tier or the change. A picked task also runs every task it " +
+				"runs after.\n\n" +
+				"Each task runs its run script with bash -eo pipefail -c from the repository root, with QUEST_TIER, " +
+				"QUEST_BASE (the merge base, unless --all), and its environment table exported. A Nix task needs " +
+				"flake.nix there, a regular file; inside the repository's dev shell, where QUEST_DEV_SHELL names its " +
+				"root, it runs directly, and otherwise through nix develop --command. quest and bash must be on PATH, " +
+				"env when a task run outside nix develop has an environment table, and nix outside that dev shell.\n\n" +
+				"A task that passes must write the junit and metrics files it declares, and metrics must hold a JSON " +
+				"object; --report copies them to <dir>/<task>/junit.xml and <dir>/<task>/metrics.json, where <dir> " +
+				"must not exist yet. A run executes only this host's tasks, and fails while another run in the checkout " +
+				"writes a report path one of its tasks declares. A failed task skips the tasks after it, and with " +
+				"--fail-fast also stops every " +
+				"running task. Exits 1 when a task fails.\n\n" +
+				"--query prints the picked tasks as JSON for a CI runner's matrix and runs nothing: " +
+				"{include: [{task, os, tier, after, nix, capabilities, caches}]}, one entry per task and operating " +
+				"system, each picking its own tasks and what they run after.",
+		)
+		.addOption(new Option("--tier <tier>", "The tier to run").choices(TASK_TIERS).default("pr"))
+		.addOption(new Option("--all", "Run every task of the tier, whatever changed").conflicts("base"))
+		.option(
+			"--only <task>",
+			"Run this task whatever its tier or the change (repeatable)",
+			(value: string, previous: string[]) => [...previous, value],
+			[],
+		)
+		.option("--base <ref>", "Diff against the merge base of HEAD and this ref")
+		.option(
+			"--os <os>",
+			`Pick the tasks for this operating system, one of ${HOST.join(", ")} (repeatable; default: this host's); a run executes only this host's, --query any`,
+			(value: string, previous: Host[]) => {
+				if (!HOST.includes(value as Host)) throw new InvalidArgumentError(`expected one of ${HOST.join(", ")}`);
+				return [...previous, value as Host];
+			},
+			[],
+		)
+		.option("--fail-fast", "Stop every running task once one fails")
+		.option("--query", "Print the picked tasks as JSON instead of running them")
+		.option("--report <dir>", "Copy each task's JUnit XML and metrics into <dir>/<task>/")
+		.action(
+			(options: {
+				tier: TaskTier;
+				all?: boolean;
+				only: string[];
+				base?: string;
+				os: Host[];
+				failFast?: boolean;
+				query?: boolean;
+				report?: string;
+			}) => {
+				pending = runTasks(
+					{
+						root: root(),
+						tier: options.tier,
+						all: options.all ?? false,
+						only: options.only.length === 0 ? null : options.only,
+						base: options.base,
+						os: options.os.length === 0 ? [nativeOs()] : [...new Set(options.os)],
+						failFast: options.failFast ?? false,
+						query: options.query ?? false,
+						report: options.report,
+					},
+					{ stdout: out.stdout, stderr: out.stderr, env: process.env, now: Date.now },
+				).catch((error: unknown) => {
+					warn(error instanceof Error ? error.message : String(error));
+					return 1;
+				});
+			},
+		);
+
+	program
 		.command("check")
 		.summary("Report every structural mistake in the tree; exit non-zero if any")
 		.description(
@@ -281,7 +375,8 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"any, as quest review reads the base's, and reports each item of its ## High list that is not a " +
 				"backticked path pattern, ` - `, and a reason, and each item of its ## Automatic list that is not a " +
 				"backticked class name, an optional scope of backticked path patterns joined by `, ` in parentheses, " +
-				"` - `, and a rule.\n\n" +
+				"` - `, and a rule. It also reads the repository's quest.toml, if any, as quest run does, and reports " +
+				"each problem with it, and Nix tasks in a repository without flake.nix.\n\n" +
 				"With --fix, first drop every Required, Related, or Closes entry that links to a quest deleted in " +
 				"the history of HEAD, and of MERGE_HEAD during a merge, that the working tree lacks, as quest rm " +
 				"does, such as the quests a merged base finished, and every epic's Required entry naming a quest in " +
@@ -321,6 +416,7 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 			const repository = [
 				...(options.stubs && own ? stubFindings(root()) : []),
 				...(own && existsSync(risk) ? parseRiskFile(readFileSync(risk, "utf8")).problems : []),
+				...(own ? manifestProblems(workingTree(root())) : []),
 			];
 			if (findings.length === 0 && repository.length === 0) {
 				const count = collect(root()).length;
@@ -406,12 +502,13 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"section, a ## Parked item, or a ## Scheduled date after today's local date. Counts exclude structural epic membership " +
 				"but include the quests an epic's ## Required holds back. Other prerequisites may remain for dependents. " +
 				"Invalid trees fail before printing a ranking. Prints a count and path per line; --json prints an " +
-				"ordered array of {path, dependents, hosts, arm, models} objects, where hosts lists the operating systems " +
-				"(linux, macos, windows) under the quest's ## Hosts, empty when it runs anywhere, and models ranks the {harness, model, effort} " +
+				"ordered array of {path, dependents, hosts, arm, cohort, models} objects, where hosts lists the operating systems " +
+				"(linux, macos, windows) under the quest's ## Hosts, empty when it runs anywhere, and models ranks the {harness, model, effort, advisor?} " +
 				"entries that write the quest: its size's list, or the next size's while a Maintainer: item other than an " +
 				"action under its ## Waiting leaves a decision open (quest models lists them). While the writer A/B runs, arm is A or B for " +
-				"a size that runs one, and null for M, XL, or a quest routed up for an open decision, and models opens with that arm's entry; the agent that runs it " +
-				"records the arm on its Implementer line.\n\n" +
+				"a size that runs one, and null for a quest routed up for an open decision, cohort names the A/B's cohort beside an arm, " +
+				"and models opens with that arm's entry; the agent that runs it " +
+				"records the arm, cohort, and any advisor on its Implementer line.\n\n" +
 				"--unclaimed ranks the fetched upstream default branch's tree instead of the checkout, then drops " +
 				"quests someone holds: a quest branch upstream, or an open PR from that branch in any repository. A " +
 				"branch whose tip is a merged PR's head holds nothing; a closed, unmerged PR's branch still does. A " +
@@ -711,13 +808,14 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"in one call. It reports facts; it does not decide whether the PR is ready.\n\n" +
 				"Plain output prints one record per line, its type first and any free text (a check name or path) last: " +
 				"url, state, draft, head, mergeable, merge-state, review-decision, review-record, risk, class, auto-merge, merge-queue, " +
-				"landing-stopped, and checks, whose state and counts follow the checks that count, pending while an open PR's base requires a check or workflow nothing reports; review-record gives whether the PR body's ## Review record " +
-				"covers the head, as current, diff-identical (git diff <base>...<head> prints the same as for the head it names), " +
-				"stale, also once the PR is open and RISK.md at the base's tip is not the file the record names, with a warning, since its tier decided how much review the head got, or unknown when GitHub cannot compare them, or - when the section holds no record quest review wrote, then the head it names last, then local-review or no-local-review for whether a local reviewer's round passed it; " +
-				"it counts the record only when the latest quest review commit status on that head is success, set by a user with write access to the repository, " +
-				"targets the diff from the head's merge base with the PR's base, and attests the record's risk tier, class, and risk file (else -, with a warning saying why, and risk and class print - too); risk gives the record's risk " +
+				"landing-stopped, and checks, whose state and counts follow the checks that count, pending while an open PR's base requires a check or workflow nothing reports; review-record gives whether the review that counts " +
+				"covers the head, as current, diff-identical (git diff <base>...<head> prints the same as for the head it reviewed), " +
+				"stale, or unknown when the forge cannot compare them, or - when none counts, then the head it reviewed, then local-review or no-local-review for whether a local reviewer's round passed it. " +
+				"The review that counts is the newest passing run quest review posted to Kixel Quest from someone who can push, which Kixel Quest answers; " +
+				"read from GitHub, it is only a PR body's ## Review record an earlier quest review wrote, with a warning saying so, counted only when the latest quest review commit status on the head it names is success, set by a user with write access to the repository, " +
+				"targets the diff from the head's merge base with the PR's base, and attests the record's risk tier, class, and risk file (else -, with a warning saying why, and risk and class print - too), and stale, with a warning, once the PR is open and RISK.md at the base's tip is not the file the record names; risk gives the review's risk " +
 				"tier, the same state for its head, the tier its classifier set, and the " +
-				"reason last, - when the record names none or does not count, or - malformed - and why when its risk lines do not parse; class gives the built-in or RISK.md ## Automatic class the record's classifier named, or -; auto-merge gives its method, who enabled it and when, and the head it was " +
+				"reason last, - when none counts, or - malformed - and why when a body record's risk lines do not parse; class gives the built-in or RISK.md ## Automatic class the review's classifier named, or -; auto-merge gives its method, who enabled it and when, and the head it was " +
 				"enabled on, which differs from head once a push follows, as GitHub keeps auto-merge across a writer's " +
 				"push (- when it cannot be told: a quest land pin names it, and otherwise the head branch's push " +
 				"activity, which GitHub lists up to minutes late); landing-stopped is the latest exit from the merge queue, auto-merge, or " +
@@ -746,7 +844,14 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 		.action((value: string, options: { json?: boolean }) => {
 			const { pull: pr, hosted } = locatePull(value, root(), process.env);
 			pending = forgeFor(pr, forgeDependencies(), Infinity, hosted)
-				.then((forge) => forge.status(pr))
+				.then((forge) => {
+					// `quest review` posts its runs to Kixel Quest alone, so GitHub holds no review newer than a body record.
+					if (forge instanceof GitHubForge)
+						warn(
+							"read from GitHub, which holds no review quest review posted to Kixel Quest: review-record, risk, and class show only a PR body's ## Review record an earlier quest wrote",
+						);
+					return forge.status(pr);
+				})
 				.then(
 					({ value: status }) => {
 						if (options.json) print(JSON.stringify(status));
@@ -815,7 +920,7 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"lacks (GitHub's review decision is review_required or changes_requested), it only arms auto-merge, which waits " +
 				"for it, and refuses where nothing would wait, since an admin's token merges or enqueues past the requirement. It refuses a head on which quest check " +
 				"--no-stubs --base <base> --branch <head branch> finds anything, read from git objects fetched from the base repository, " +
-				"so nothing from the head runs, except findings the base or the head's merge base with it already has in a list entry or line the head left unchanged; a head without quests skips it when the base or its merge base has none, and one whose quest documents cannot be read is refused. It refuses a body whose ## Review record's risk lines do not parse, until quest review rewrites it. It also refuses while an unanswered finding on the head from an online reviewer " +
+				"so nothing from the head runs, except findings the base or the head's merge base with it already has in a list entry or line the head left unchanged; a head without quests skips it when the base or its merge base has none, and one whose quest documents cannot be read is refused. It also refuses while an unanswered finding on the head from an online reviewer " +
 				"whose check the base requires, or a newer comment opening with 'Maintainer decision', holds it. It uses the method --squash or --rebase names, refusing one " +
 				"the repository disallows; otherwise the only method the repository allows, or else a merge commit. " +
 				"On a base with GitHub's merge queue, which applies its own method, it enqueues that head, or arms " +
@@ -1313,7 +1418,9 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"a batch shim such as npm's claude.cmd runs through System32's cmd.exe, and stop ends the agent's process tree at once.\n\n" +
 				"The agent runs in <worktree> with the user's environment minus every CLAUDE* (except CLAUDE_CONFIG_DIR), " +
 				"ANTHROPIC*, CODEX_* (except CODEX_HOME), OP_*, OPENAI_API_KEY, QUEST_GATE_ADMITTED, QUEST_GATE_PRIORITY, " +
-				"and MBX_SCHEDULER_PRIORITY when QUEST_GATE_PRIORITY=1, so it uses the CLI's stored login rather than the coordinating session's.\n\n" +
+				"and MBX_SCHEDULER_PRIORITY when QUEST_GATE_PRIORITY=1, so it uses the CLI's stored login rather than the coordinating session's. " +
+				"--advisor turns on Claude Code's advisor tool with that model, setting CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1, " +
+				"without which Claude Code drops the tool silently on an account its rollout has not reached; it is refused for Codex.\n\n" +
 				"Start and resume first wait until the host can carry the agent, as agent admit describes, " +
 				"before claiming the worktree.\n\n" +
 				"Prints `session <id>` as soon as the id is known, then `outcome finished|failed|limited|logged-out|stopped`, " +
@@ -1326,6 +1433,10 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 			.addOption(new Option("--harness <name>", "Agent CLI to run").choices(HARNESSES).makeOptionMandatory())
 			.requiredOption("--model <model>", "Model the agent runs")
 			.requiredOption("--effort <level>", "Reasoning effort the agent runs at, never max", effortLevel)
+			.option(
+				"--advisor <model>",
+				"Model Claude Code's advisor tool consults, as quest models prints it; claude only",
+			)
 			.requiredOption(
 				"--permission-mode <mode>",
 				"Claude Code's --permission-mode, or Codex's sandbox mode; the agent cannot prompt",
@@ -1370,10 +1481,12 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 		.description(
 			"Wait until this host can carry one more agent, for a coordinator to run before it starts or resumes " +
 				"an agent of its own, such as a sub-agent; start and resume do the same themselves. The host has room " +
-				"while quest gate would admit a command at once, counting every queued command and, as one recent " +
-				`admission each, every agent admitted in the last ${PENDING_MS / 60_000} minutes, since an agent adds ` +
-				"no gated load until its first build; an agent start or resume runs counts only until it exits. Agents " +
-				"already running are never paused.\n\n" +
+				"while its memory would admit a gated command at once, counting as one recent admission each every " +
+				`agent admitted in the last ${PENDING_MS / 60_000} minutes, since an agent adds no gated work until ` +
+				"its first build; an agent start or resume runs counts only until it exits. CPU load and commands " +
+				"queued for quest gate do not count, except on macOS, where the gate reads no memory: there the " +
+				"host has room while quest gate would admit a command at once, counting every queued command and " +
+				"each such agent as one recent admission. Agents already running are never paused.\n\n" +
 				"Exits 0 once admitted, 128 plus the signal number when interrupted, and 1 otherwise.",
 		)
 		.action(() => {
@@ -1397,28 +1510,31 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 			);
 		});
 
+	const entryText = (e: Model) =>
+		`${e.harness} ${e.model} ${e.effort}${e.advisor === undefined ? "" : ` advised by ${e.advisor}`}`;
 	program
 		.command("models")
 		.summary("Print the harnesses, models, and efforts that write work of a size, ranked")
 		.description(
 			"Print the ranked entries that write work of a size, the same for every repository unless its AGENTS.md " +
 				"names others: " +
-				SIZES.map(
-					(size) =>
-						`${size} ${WRITERS[size].map((e) => `${e.harness} ${e.model} ${e.effort}`).join(", then ")}`,
-				).join("; ") +
+				SIZES.map((size) => `${size} ${WRITERS[size].map(entryText).join(", then ")}`).join("; ") +
 				". A spawn starts a quest on the first entry that can run, as quest unblocked --json lists them. " +
 				"--writer prints the one entry that runs that model on the work instead, for an iterate, which stays " +
 				"on its PR's writer: the size's own entry for the model, else its entry at the nearest size that " +
 				"lists it, the larger on a tie, so an XS iterate on an Opus PR runs Opus at S's effort. A model no " +
-				"list names is an error. While the writer A/B runs, each armed size's quests split by a hash of their " +
+				"list names is an error. While the writer A/B runs, cohort " +
+				COHORT +
+				", each armed size's quests split by a hash of their " +
 				"path between arm A, the size's first entry, and arm B: " +
 				Object.entries(ARMS)
-					.map(([size, arms]) => `${size} B ${arms.B.harness} ${arms.B.model} ${arms.B.effort}`)
+					.map(([size, arms]) => `${size} B ${entryText(arms.B)}`)
 					.join("; ") +
-				". --arm prints that arm's entry at the PR's size instead, for an iterate on a PR whose first " +
-				"Implementer line names the arm. Prints harness, model, and effort per line, tab-separated; --json prints an " +
-				"array of {harness, model, effort} objects.",
+				". An iterate on a PR whose first Implementer line names an arm runs the model, effort, and advisor that " +
+				"line records; --arm with --cohort prints that arm's entry at the PR's size instead, for the effort such a " +
+				"line leaves out, and refuses a cohort that has ended. Prints harness, model, and effort per line, tab-separated, " +
+				"then the advisor model for an entry that pairs one; --json prints an " +
+				"array of {harness, model, effort, advisor?} objects.",
 		)
 		.addArgument(new Argument("<size>", "The work's size").choices(SIZES))
 		.option("--writer <model>", "Print only the entry that runs this model, the PR's first Implementer")
@@ -1427,16 +1543,22 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				ARM_NAMES,
 			),
 		)
+		.option("--cohort <cohort>", "The writer A/B cohort the PR's first Implementer line names, with --arm")
 		.option("--json", "Print a JSON array")
-		.action((size: Size, options: { writer?: string; arm?: Arm; json?: boolean }) => {
+		.action((size: Size, options: { writer?: string; arm?: Arm; cohort?: string; json?: boolean }) => {
 			let entries = WRITERS[size];
+			if ((options.arm === undefined) !== (options.cohort === undefined))
+				throw new UsageError("give --arm and --cohort together");
 			if (options.arm !== undefined) {
 				if (options.writer !== undefined) throw new UsageError("give --writer or --arm, not both");
 				const arms = ARMS[size];
-				if (!arms)
+				const earlier =
+					"an iterate on a PR an earlier arm wrote runs the model, effort, and advisor its Implementer line records";
+				if (options.cohort !== COHORT)
 					throw new UsageError(
-						`${size} runs no writer arms; an iterate on a PR an earlier arm wrote runs the model and effort its Implementer line records`,
+						`cohort ${options.cohort} has ended, the writer A/B runs ${COHORT}; ${earlier}`,
 					);
+				if (!arms) throw new UsageError(`${size} runs no writer arms; ${earlier}`);
 				entries = [arms[options.arm]];
 			} else if (options.writer !== undefined) {
 				const entry = writerAt(size, canonicalModel(options.writer));
@@ -1444,7 +1566,9 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				entries = [entry];
 			}
 			if (options.json) print(JSON.stringify(entries));
-			else for (const e of entries) print(`${e.harness}\t${e.model}\t${e.effort}`);
+			else
+				for (const e of entries)
+					print([e.harness, e.model, e.effort, ...(e.advisor ? [e.advisor] : [])].join("\t"));
 		});
 
 	program
@@ -1477,7 +1601,7 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"review thread it opens or a [P<n>] line in its review body, and its first answer's first word takes or " +
 				"declines it. Rollups follow: spend by size, role, harness, model, and " +
 				"effort, accuracy by size and implementer, summing each branch's tallies but the shadow's once, where an Implementer line's own size, as (iterate, XS), wins " +
-				"over the PR's, with its writing cost over the merged PRs it was found on, the writer A/B by size and arm, counting a sized PR whose every Implementer line names the same arm, as (arm B), under its first line's writer with the spend of every session on it, local reviewers by size, harness, model, effort, and shadow or second, with their " +
+				"over the PR's, with its writing cost over the merged PRs it was found on, the writer A/B by size, cohort, and arm, counting a sized PR whose every Implementer line names the same arm, cohort, harness, model, effort (unknown matching any), and advisor, as (arm B, cohort advisor-2026-11, advisor claude-opus-5-5), under its first line's writer with the spend of every session on it, its advisor's included, local reviewers by size, harness, model, effort, and shadow or second, with their " +
 				"tallies and reviewing cost per PR, each risk tier's PRs, merged PRs, tiers a reviewer raised, tiers the maintainer overrode, PRs a later one fixed, and time waited on a person, the same for each RISK.md ## Automatic class the classifiers named, with how many were low, each online reviewer's coverage and findings over the merged PRs, and each breakage a merged PR in the window names under ## Caused by: its culprit's tier, size, writers, and local reviewers, read from GitHub when older than the window, who found it and the incident it closes when the line ends with (found by check|reviewer|queue|canary|person|customer; incident <id>), either part alone allowed, and how long after the culprit merged the fix opened. Without token-max on PATH, it says how to install it and reports the PRs' records alone. " +
 				"--json prints the same report as one object.\n\n" +
 				"Uses GH_TOKEN, GITHUB_TOKEN, or gh auth token. Exits 0 when done, 2 for invalid arguments, and 1 for " +
@@ -1509,6 +1633,65 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 			);
 		});
 
+	program
+		.command("login")
+		.summary("Sign this host in to Kixel Quest, so it can post records and read through Kixel Quest")
+		.description(
+			`Sign this host in to Kixel Quest (https://kixel.quest, or the one ${KIXEL_QUEST_URL} names). It first asks ` +
+				"whether to upload this host's agent transcripts with its session records, reading one line from stdin, " +
+				"where only y or yes agrees, so `echo n | quest login` answers no. It then shows a code to enter at " +
+				"Kixel Quest's /login page, signed in with GitHub, and waits until someone approves it or it expires, " +
+				`then stores the token Kixel Quest issues, named after this host's hostname, in ${tokensPath()}, ` +
+				"readable only by this user. Signing in again replaces this host's earlier token there and on Kixel " +
+				"Quest. The record sender, quest review, forge reads, and quest records incident use the token, and a " +
+				"command that needs Kixel Quest fails without it, naming quest login.",
+		)
+		.action(() => {
+			const ask = (question: string) =>
+				new Promise<string | null>((answered) => {
+					out.stdout(question);
+					const lines = createInterface({ input: process.stdin });
+					let line: string | null = null;
+					lines.once("line", (text) => {
+						line = text;
+						// A piped answer echoes nowhere, so end the question's line.
+						if (!process.stdin.isTTY) out.stdout("\n");
+						lines.close();
+					});
+					lines.once("close", () => answered(line));
+				});
+			settle(
+				login({
+					env: process.env,
+					fetch: globalThis.fetch,
+					now: Date.now,
+					sleep,
+					hostname: hostname(),
+					ask,
+					say: print,
+				}),
+				(signedIn) =>
+					print(
+						`signed in to ${signedIn.url} as ${signedIn.label}; transcript uploads ${signedIn.transcripts ? "agreed" : "declined"}`,
+					),
+			);
+		});
+	program
+		.command("logout")
+		.summary("Remove this host's Kixel Quest token")
+		.description(
+			`Remove the token quest login stored for Kixel Quest (https://kixel.quest, or the one ${KIXEL_QUEST_URL} ` +
+				"names) from this host. Kixel Quest still takes it until it is revoked on its Tokens page.",
+		)
+		.action(() => {
+			const { url, removed } = logout(process.env);
+			print(
+				removed
+					? `removed this host's token for ${url}; revoke it at ${url}/tokens`
+					: `this host held no token for ${url}`,
+			);
+		});
+
 	const recordsCommand = program.command("records").summary("Send agent sessions' records to Kixel Quest");
 	recordsCommand
 		.command("sender")
@@ -1516,14 +1699,14 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 		.description(
 			"Send each session record the stop hook queued, with the records of its sub-agents on this host, to " +
 				`Kixel Quest's /records (https://kixel.quest, or the one ${KIXEL_QUEST_URL} names), posting {"records": [...], "breakages": [...]}, the breakages the merged PRs among them name under ## Caused by, with the token ` +
-				`${tokensPath()} pairs with its URL as a bearer token, one upload per repository, ` +
+				"the token quest login stored for its URL as a bearer token, one upload per repository, " +
 				`then again every ${SEND_INTERVAL / 1000} seconds until stopped, at low priority. A record is built as quest usage ` +
 				"builds it, from token-max's sessions on this host since the earliest queued session's first instant and " +
 				"the PRs updated since then, and replaces its earlier copy, so a resend never doubles. A repository Kixel " +
 				"Quest does not serve, as it says on GET /forge, has its sessions dropped, said once. A sent session whose " +
 				"latest branch, or a sub-agent's, heads no PR yet is sent again, with its sub-agents, once a pass for its " +
 				"repository reads a PR opened on that branch, until its transcript is gone. A Kixel Quest that " +
-				"refuses the token (401 or 403) is sent nothing more until the token changes; any other failure keeps the " +
+				"refuses the token (401 or 403) is sent nothing more until quest login signs in again; any other failure keeps the " +
 				"sessions queued, retried after a minute and then twice as long each time up to six hours, and the next " +
 				"stop hook says so once. Before a record is built, a cheap model, " +
 				`${SPLITTERS.map((e) => `${e.harness} ${e.model} ${e.effort}`).join(", then ")}, labels each step of its session's ` +
@@ -1564,7 +1747,7 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 		)
 		.description(
 			"Post one breakage to Kixel Quest's /records " +
-				`(https://kixel.quest, or the one ${KIXEL_QUEST_URL} names), with the token ${tokensPath()} pairs with its URL, as {"records": [], "breakages": [...]}. ` +
+				`(https://kixel.quest, or the one ${KIXEL_QUEST_URL} names), with the token quest login stored for it, as {"records": [], "breakages": [...]}. ` +
 				"Without --pr the incident is open, its culprit unknown; report the same ID again with --pr to close it on " +
 				"its culprit, whose tier, size, writers, and local reviewers are read from its PR body, or name it on the " +
 				"culprit's ## Caused by line of the fix, as (incident <id>), whose record then replaces it. It posts at once " +
@@ -1777,15 +1960,16 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"RISK.md names, read from the base's tip so a change cannot lower its own tier. Each item of that list is a " +
 				"backticked path from the repository's root, where `*` and `?` stay within one segment and a whole `**` " +
 				"segment spans any number, then ` - ` and why its change is high; a RISK.md that cannot be read is a usage " +
-				"error. A base with no RISK.md makes every other change medium unless a built-in class's scope holds every " +
-				"changed path. Otherwise a classifier, " +
+				"error. Otherwise a classifier, " +
 				`${classifiers}, reads the diff and the base's RISK.md, if any, which says what is customer-facing, ` +
 				"in one read-only turn and replies with a tier and its reason. One that is logged out, whose login the " +
 				"API rejects, or at its usage limit passes the turn to the next; when none is left, the run fails on the " +
 				"limit that resets first if every one whose CLI is installed hit its own, else as a usage error naming why each failed. A later round on the same head, base " +
 				"RISK.md, and built-in defaults reuses the tier unless --new. Reviewers never judge it. " +
+				"A change that adds or changes a line under quest/, a new quest or a move included, is at least medium whatever " +
+				"RISK.md says, since agents start that work unattended: the classifier may answer only medium or high and is offered no class. " +
 				"The classifier also names the class every changed file falls in, or none: the built-in `quest` (`quest/**`), " +
-				"for plans alone, unless RISK.md lists a class by that name, which replaces it, and RISK.md's ## Automatic list, " +
+				"for a change that only removes or cuts plans, unless RISK.md lists a class by that name, which replaces it, and RISK.md's ## Automatic list, " +
 				"offered only the classes whose scope, backticked patterns in parentheses after the class's name, holds " +
 				"every changed path, either side of a rename: each path must match one pattern whole, so a directory " +
 				"needs a trailing / or /**, and a change that touches no path falls in no class. " +
@@ -1798,7 +1982,7 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"tier grows riskier than the one overridden, other than to the override's own tier.\n\n" +
 				"Prints the size and where it came from, base, and head, its risk tier and reason, the classifier's tier, " +
 				"an overridden line with the tier the maintainer overrode, " +
-				"how it was set (model, paths, or default), and reason, a class line naming the class, and for a model a classifier line (harness, model, " +
+				"how it was set (model or paths), and reason, a class line naming the class, and for a model a classifier line (harness, model, " +
 				"effort, session) and its usage line, a skipped line (harness, model, effort, reason) for each reviewer passed over, then for each reviewer its harness, model, and " +
 				"effort, followed by second for the second reviewer, session, round, an " +
 				"unchanged line for a repeated round, or an accepted line for a round --accept repeats, a usage line per turn (input tokens, the " +
@@ -1809,25 +1993,26 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"fixing them as recommended, accepting them, or dropping the PR, `next respond` to fix or refute the findings, or `next done`, which for a low head no reviewer ran says so, and for --accept `next done` or `next stop`. A reply without a valid score " +
 				"fails as any malformed reply does. --json prints " +
 				"one object: `rounds`, one per reviewer, `tallies`, every reviewer's findings across the branch's rounds, `risk`, the head's tier with its classification, `skipped`, each reviewer passed over with its reason, `accepted`, the maintainer's reason under --accept or null, `record`, and `next`.\n\n" +
-				"When quest runs from the source of the checkout it judges (bun src/cli/bin.ts, or a build there), the round still runs but writes no record and sets no status: it prints `record skipped: ...` " +
+				"When quest runs from the source of the checkout it judges (bun src/cli/bin.ts, or a build there), the round still runs but posts nothing and sets no status: it prints `record skipped: ...` " +
 				"telling you to rerun with an installed quest, and `next stop` where the round found nothing to fix, so a PR can exercise its own review changes without marking itself reviewed.\n\n" +
-				"After each round, it rewrites the `## Review` section of the branch's open PR into the base, the one from the repository the base's remote pushes to, else the only one from another repository whose pushed head `HEAD` contains, as the " +
-				"user the GitHub token names, keeping the rest of the body, and prints `record <url>`: the reviewed " +
-				"head, named in full only once no reviewer reports a finding, the base, the head's risk tier and reason, " +
-				"an `- Overridden:` line, the classifier's tier and who set it, a `- Class:` line, a `- Risk file:` line naming the base's RISK.md it read by its blob's first 12 characters or none, a `- Local review: none` line for a low head no reviewer ran on, a `- Skipped:` line for each reviewer passed over, and each reviewer, its Reviewer line ending in `, second` for the second reviewer, its " +
-				"session and round, score, a `- Recommendation:` line with the approach it would build instead, its tally of findings across the branch's rounds, each finding with its disposition, and its notes. " +
-				"On GitHub it then sets the `quest review` commit status on the head, on the same token, so push the head first: success once no finding is open, else failure, " +
-				"its description the head's risk tier, class, and risk file and whether a local reviewer ran, its target the diff from the head's merge base with the PR's base, which `quest status` counts only from a user who can push. " +
+				"Every run that records needs this host signed in with quest login, and Kixel Quest serving the repository of the branch's open PR, both checked before any reviewer runs. " +
+				"After each run it finds the branch's open PR into the base: the one from the repository the base's remote pushes to, else the only one from another repository whose pushed head `HEAD` contains. " +
+				"On GitHub it first sets the `quest review` commit status on the head, on the GitHub token, so push the head first: failure, which a run with no finding open sets to success once the post below is stored, " +
+				"its description the head's risk tier, class, and risk file and whether a local reviewer ran, its target the diff from the head's merge base with the PR's base, which the land gate counts only from a user who can push. " +
 				"For a token that cannot push, it sets none and prints `; status skipped: <why>` after the record's URL; a status GitHub refuses otherwise prints `; status refused: <why>` and exits 1. " +
+				"It then posts the run to Kixel Quest (POST /reviews, QUEST_KIXEL_URL naming another), and prints `record <url>`: the head, the base and merge base, the risk tier and reason, the classifier's tier, class, and who set it, " +
+				"and each reviewer's round, its seat (pick or second), session, round number, score and rationale, and findings with their file, line, and severity, " +
+				"with the outcome of each finding of an earlier posted round that this run fixed or refuted, sent to the PR that round was posted on, and kept for the branch's next post when the post fails. Notes are not posted. A low head no reviewer ran on posts its classification alone. " +
+				"Kixel Quest counts a run toward merging only when its poster can push, and quest status reads the review from there; the PR body is left as is. " +
 				"--accept <reason> runs no reviewer or classifier: it repeats each reviewer's last round of the same head, base, and merge base, failing as a usage error " +
-				"when none classified and reviewed it, when a high head lacks its second reviewer's round, or when no finding is open; sets the status to success " +
-				"described `findings accepted`; then records the rounds with `- Accepted by the maintainer: <reason>` and their findings as accepted, naming the head " +
-				"in full, and prints `next done`. When no status is set, as for a token that cannot push, it records nothing, prints `next stop`, and exits 1. With no " +
-				"such PR, several from other repositories that `HEAD` contains, or a remote off GitHub, it prints `record skipped: <why>` and changes nothing.\n\n" +
+				"when none classified and reviewed it, when a high head lacks its second reviewer's round, or when no finding is open; sets the status to failure " +
+				"described `findings accepted`; posts the rounds as accepted, their findings deferred with the reason; sets the status to success once the post is stored; " +
+				"and prints `next done`. When no status is set, as for a token that cannot push, or the post fails, it prints `next stop` and exits 1. With no " +
+				"such PR, several from other repositories that `HEAD` contains, or a remote off GitHub and Kixel Quest, it prints `record skipped: <why>` and changes nothing.\n\n" +
 				"Exits 0 once the round finishes, whatever it found, 2 for invalid arguments " +
 				"or a checkout that cannot be reviewed, 3 when no eligible reviewer could run, each not installed, logged " +
-				"out, its login rejected, at its usage limit, or unable to run on this host, and 1 for other failures, including a PR GitHub will not show or a record it " +
-				"refuses or a status it refuses. A malformed `## Models` field the round reads, such as a Size line naming no size or an " +
+				"out, its login rejected, at its usage limit, or unable to run on this host, and 1 for other failures, including a PR GitHub will not show, a post Kixel Quest " +
+				"refuses, or a status GitHub refuses. A malformed `## Models` field the round reads, such as a Size line naming no size or an " +
 				"Implementer line naming no model it can read, is a usage error, unless --size or --exclude-model replaces it. A usage limit of the only " +
 				"eligible reviewer prints one line, " +
 				"`error: <harness> hit its usage limit; resets <time>`, where <time> is the reset as an ISO 8601 UTC " +
@@ -1936,6 +2121,11 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				};
 				// Decided once, before the round: a PR's own build never records its own review, whatever it finds.
 				const own = runsFromCheckout(root(), out.entry);
+				// Every run that records posts to Kixel Quest, so a host that cannot post spends no reviewer's round.
+				const posting = own
+					? undefined
+					: (dir: string, base: string, branch: string) =>
+							requirePosting(dir, base, branch, { ...forgeDependencies(), ...github });
 				const run = review(
 					{
 						...options,
@@ -1950,6 +2140,7 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 					{
 						env: process.env,
 						models: (dir, base, branch) => pullModels(dir, base, branch, github),
+						posting,
 						queue: (session) => started.push(session),
 					},
 				);
@@ -1960,7 +2151,9 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 						let record: Recorded | undefined;
 						let failure: unknown;
 						try {
-							record = own ? { skipped: OWN_REVIEW } : await recordRounds(root(), reviewed, github);
+							record = own
+								? { skipped: OWN_REVIEW }
+								: await recordRounds(root(), reviewed, { ...github, env: process.env, fetch });
 						} catch (error) {
 							failure = error;
 						}
@@ -1976,7 +2169,9 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 								: nextStep(rounds)
 							: attested
 								? "next done: the maintainer accepted the findings left open on this head"
-								: "next stop: an acceptance counts only once a maintainer's token sets the quest review status on the pushed head";
+								: failure !== undefined
+									? "next stop: the acceptance was not recorded; fix what the error names, then accept again"
+									: "next stop: an acceptance counts only once a maintainer's token sets the quest review status on the pushed head";
 						if (options.json)
 							print(
 								JSON.stringify({

@@ -69,13 +69,18 @@ checkpoints and outages to count by hand:
   Points too thin for the run's variance estimate stay on the chart,
   marked thin in their label, never dropped. Cells whose
   `Implementer:` effort is `unknown` stay separate points. The charts:
-  - Writers, one point per `accuracy` row (size, model, effort): cost per
+  - Writers, one point per `accuracy` row (size, model, effort, advisor): cost per
     merged PR, `spent.cost / spent.pulls`, against each quality measure
     on its own chart. The measures are first-round findings per PR
     (`firstRounds.findings` over `firstRounds.pulls`), review rounds per
     reviewed PR (`tally.rounds / reviewed`), hand-backs per PR
     (`handedBack / pulls`, merged PRs included), and later
-    `## Caused by` escapes per merged PR (`fixes / merged`).
+    `## Caused by` escapes per merged PR (`fixes / merged`). A row whose
+    `spent` is incomplete, as an advised writer's is while token-max leaves
+    advisor iterations unpriced
+    ([kixel-ai/token-max#281](https://github.com/kixel-ai/token-max/pull/281)),
+    marks its cost `or more`, as `quest usage` does, in its label and
+    table, so no reader takes it for a point on the cost frontier.
   - Local reviewers, one point per `reviewers` row (PR size, harness,
     model, effort, shadow): cost per PR reviewed, `spent.cost /
     spent.pulls`, against findings per reviewed PR (`tally.findings` over

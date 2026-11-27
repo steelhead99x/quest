@@ -1,5 +1,6 @@
 // Host-wide command admission, sized from the host itself: every platform waits
-// for CPU load and free memory before starting the command. The gate then owns
+// for CPU load and free memory before starting the command. Linux measures the
+// CPUs busy; elsewhere the 1-minute load average stands in for them. The gate then owns
 // the command's descendants until they stop, and holds nothing else while it runs.
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -14,6 +15,7 @@ import {
 	readlinkSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	statSync,
 	writeFileSync,
@@ -57,8 +59,12 @@ export interface Ledger {
 
 /** The machine-wide inputs to load admission, replaceable in tests. */
 export interface Host {
-	/** The 1-minute load average. */
-	load(): number;
+	/**
+	 * The host's CPU load in CPUs, or undefined until it can be measured: on Linux the CPUs busy
+	 * lately (see `busyCpus`), which each call also samples for every gate on the host, elsewhere
+	 * the 1-minute load average.
+	 */
+	load(): number | undefined;
 	/** Bytes available to a new command without swapping. */
 	memory(): number;
 	/** Wall-clock milliseconds, shared by every process on the host. */
@@ -90,7 +96,7 @@ export interface Footprint {
 }
 
 export interface Limits {
-	/** The highest 1-minute load average that still admits a command. */
+	/** The highest CPU load that still admits a command. */
 	load: number;
 	/** The least available memory, in bytes, that still admits a command. */
 	memory: number;
@@ -100,7 +106,8 @@ export type Waiting = "load" | "memory" | "queue";
 
 /**
  * Admissions that only fit the host's raw load and memory, not its headroom,
- * start at least this far apart, so each one's load can begin to show.
+ * start at least this far apart, so each one's load can begin to show. Linux
+ * measures busy CPUs over about this long.
  */
 export const SETTLE_MS = 5000;
 
@@ -109,6 +116,9 @@ export const SETTLE_MS = 5000;
  * average and available memory take about this long to reflect a new command.
  */
 export const RECENT_MS = 60_000;
+
+/** The shortest span busy CPUs are measured over; a caller with no sample this old waits this long for one. */
+export const CPU_SAMPLE_MS = 1000;
 
 /**
  * How a caller is admitted ahead of the rest.
@@ -133,9 +143,9 @@ function usableMemory(uid?: number): number {
 }
 
 /**
- * Derive the limits from the host: no configuration. The load average counts
- * runnable threads on every CPU, including ones outside this process's
- * affinity, so its limit is one per host CPU. Each admission reserves one
+ * Derive the limits from the host: no configuration. The load counts every
+ * CPU of the host, including ones outside this process's affinity, so its
+ * limit is one per host CPU. Each admission reserves one
  * command's memory, though never more than a quarter of a small host's RAM.
  */
 export function hostLimits(
@@ -231,6 +241,78 @@ export function linuxMemory(
 	if (uid !== undefined && existsSync(join(cgroups, "cgroup.controllers")) && existsSync(join(cgroups, slice)))
 		bound(resolve(cgroups), slice, true);
 	return { total, available };
+}
+
+/** One reading of `/proc/stat`'s aggregate CPU time, in clock ticks, at wall-clock `at`. */
+interface CpuSample {
+	at: number;
+	busy: number;
+	total: number;
+}
+
+/**
+ * The CPUs busy over the span closest to SETTLE_MS, from `proc`'s `stat` and the samples every gate on
+ * the host shares in `file`, which this call adds to: user, nice, system, IRQ, and steal time count,
+ * idle and I/O wait do not, so tasks blocked on disk leave their CPUs free. Undefined while no
+ * sample is at least CPU_SAMPLE_MS old.
+ *
+ * Busy CPUs top out at the CPU count however much more work is runnable, so less than one idle CPU
+ * reads as unbounded load: the host may be oversubscribed by any amount, and has no CPU for one
+ * more command.
+ */
+export function busyCpus(proc: string, file: string, now: number): number | undefined {
+	const stat = readFileSync(join(proc, "stat"), "utf8");
+	// user nice system idle iowait irq softirq steal; guest time is already in user and nice.
+	const fields = /^cpu +(\d+(?: +\d+){7})/m.exec(stat)?.[1]?.split(/ +/).map(Number);
+	const cpus = stat.match(/^cpu\d+ /gm)?.length ?? 0;
+	if (fields === undefined || cpus === 0)
+		throw new Error(`gate cannot read Linux CPU time from ${join(proc, "stat")}`);
+	const total = fields.reduce((sum, ticks) => sum + ticks, 0);
+	const current: CpuSample = { at: now, busy: total - fields[3]! - fields[4]!, total };
+	// A clock stepped backward dates samples in the future; they are dropped with the stale ones.
+	const samples = readSamples(file).filter((sample) => sample.at <= now && sample.at > now - 2 * SETTLE_MS);
+	// The sample closest to SETTLE_MS old, so the span is about SETTLE_MS wherever samples allow.
+	const base = samples
+		.filter((sample) => sample.at <= now - CPU_SAMPLE_MS)
+		.reduce<CpuSample | undefined>(
+			(best, sample) =>
+				best === undefined || Math.abs(now - sample.at - SETTLE_MS) < Math.abs(now - best.at - SETTLE_MS)
+					? sample
+					: best,
+			undefined,
+		);
+	const newest = samples.at(-1);
+	if (newest === undefined || newest.at <= now - CPU_SAMPLE_MS) {
+		mkdirSync(dirname(file), { recursive: true });
+		const draft = `${file}.${randomUUID()}.tmp`;
+		writeFileSync(draft, JSON.stringify([...samples, current]));
+		// Concurrent callers each replace the file whole, so a lost sample only shortens the history.
+		renameSync(draft, file);
+	}
+	if (base === undefined) return undefined;
+	const ticks = current.total - base.total;
+	const busy = current.busy - base.busy;
+	// Counters that ran backward, as in a sample from another boot, measure nothing.
+	if (ticks <= 0 || busy < 0) return undefined;
+	const used = (busy / ticks) * cpus;
+	return cpus - used < 1 ? Infinity : used;
+}
+
+/** The CPU samples in `file`, oldest first, or none where it is missing or malformed. */
+function readSamples(file: string): CpuSample[] {
+	let value: unknown;
+	try {
+		value = JSON.parse(readFileSync(file, "utf8"));
+	} catch (error) {
+		if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
+	}
+	const valid =
+		Array.isArray(value) &&
+		value.every((sample: Partial<CpuSample>) =>
+			[sample?.at, sample?.busy, sample?.total].every((number) => Number.isFinite(number)),
+		);
+	return valid ? (value as CpuSample[]) : [];
 }
 
 /**
@@ -408,6 +490,9 @@ function remove(file: string) {
 	}
 }
 
+/** The file in the ledger's directory holding the host's recent CPU samples (see `busyCpus`). */
+const CPU_FILE = "cpu";
+
 /**
  * The ledger is a directory of numbered versions, each the JSON list of recent
  * admissions. A caller publishes version N + 1 by linking a complete draft to
@@ -448,7 +533,7 @@ export function fileHost(directory: string, now = Date.now, uid?: number): Host 
 		}
 	};
 	return {
-		load: () => loadavg()[0],
+		load: () => (process.platform === "linux" ? busyCpus("/proc", join(directory, CPU_FILE), now()) : loadavg()[0]),
 		// macOS counts reclaimable cache as used, so only its load is gated.
 		memory: () =>
 			process.platform === "darwin"
@@ -515,19 +600,14 @@ export function fileHost(directory: string, now = Date.now, uid?: number): Host 
 }
 
 /**
- * The load and memory a caller is admitted against while the `running` admissions hold the host
- * and the `recent` ones are not yet reflected in it: the load counts as at least the CPUs the
- * running ones kept busy, and without one the raw load counts as having room (see `admit`). A
- * priority caller counts no load.
- *
- * `memory` is the host's available memory less what each running command's peak adds beyond what
- * it holds now, which available memory already reflects. `reserved` is what the recent admissions
- * take from it on top: one command's memory each, or for a measured one, what the larger of that
- * and its peak adds beyond what it holds now, less what `memory` already took.
+ * The memory a caller is admitted against while the `running` admissions hold the host and the
+ * `recent` ones are not yet reflected in it. `memory` is the host's available memory less what each
+ * running command's peak adds beyond what it holds now, which available memory already reflects.
+ * `reserved` is what the recent admissions take from it on top: one command's memory each, or for
+ * a measured one, what the larger of that and its peak adds beyond what it holds now, less what
+ * `memory` already took.
  */
-function standing(limits: Limits, host: Host, running: Admission[], recent: Admission[], priority = false) {
-	const used = priority ? 0 : running.reduce((sum, admission) => sum + (admission.cores ?? 0), 0);
-	const load = priority ? 0 : running.length > 0 ? Math.max(host.load(), used) : Math.min(host.load(), limits.load);
+function standing(limits: Limits, host: Host, running: Admission[], recent: Admission[]) {
 	let grows = 0;
 	let reserved = 0;
 	for (const admission of new Set([...running, ...recent])) {
@@ -544,18 +624,11 @@ function standing(limits: Limits, host: Host, running: Admission[], recent: Admi
 		grows += growth;
 		if (isRecent) reserved += Math.max(0, Math.max(peak, limits.memory) - current) - growth;
 	}
-	return { used, load, memory: host.memory() - grows, reserved };
+	return { memory: host.memory() - grows, reserved };
 }
 
-/**
- * Why a command arriving now would wait, or null when the gate would admit it at once even with
- * `reserved` more recent admissions counted against the headroom: work admitted elsewhere that has
- * not reached the gate yet, such as an agent still reading (see admission.ts). It counts every
- * queued caller as ahead, and never the spaced admissions `admit` grants on raw room, which would
- * pass the reserved work one by one. Like the gate, it admits a lone arrival whatever the load:
- * with nothing gated running, recent, queued, or reserved, the load is work no gate can wait out.
- */
-export function room(limits: Limits, host: Host, reserved: number): Waiting | null {
+/** The ledger's queued callers still waiting, and its running and recent admissions, as `host` reads them now. */
+function snapshot(host: Host) {
 	const ledger = host.ledger();
 	const now = host.now();
 	const live = ledger.admissions.filter((admission) => host.running(admission));
@@ -565,7 +638,36 @@ export function room(limits: Limits, host: Host, reserved: number): Waiting | nu
 	const admissions = ledger.admissions.filter((admission) => !admission.queued);
 	const running = admissions.filter((admission) => live.includes(admission));
 	const recent = admissions.filter((admission) => admission.at > now - RECENT_MS);
-	const { used, load, memory, reserved: recentMemory } = standing(limits, host, running, recent);
+	return { queued, running, recent };
+}
+
+/**
+ * Whether the host's memory has room for a command arriving now even with `reserved` more recent
+ * admissions counted against it: work admitted elsewhere that has not reached the gate yet, such
+ * as an agent still reading (see admission.ts). Neither load nor the gate's queue counts, so work
+ * waiting for CPUs never holds back what only needs memory.
+ */
+export function memoryRoom(limits: Limits, host: Host, reserved: number): boolean {
+	const { running, recent } = snapshot(host);
+	const { memory, reserved: recentMemory } = standing(limits, host, running, recent);
+	return memory - recentMemory - reserved * limits.memory >= limits.memory;
+}
+
+/**
+ * Why a command arriving now would wait, or null when the gate would admit it at once even with
+ * `reserved` more recent admissions counted against the headroom, for hosts whose memory alone
+ * cannot bound that work (see admission.ts). It counts every queued caller as ahead, and never the
+ * spaced admissions `admit` grants on raw room, which would pass the reserved work one by one. Like
+ * the gate, it admits a lone arrival whatever the load: with nothing gated running, recent, queued,
+ * or reserved, the load is work no gate can wait out.
+ */
+export function room(limits: Limits, host: Host, reserved: number): Waiting | null {
+	const { queued, running, recent } = snapshot(host);
+	const measured = host.load();
+	if (measured === undefined) return "load";
+	const used = running.reduce((sum, admission) => sum + (admission.cores ?? 0), 0);
+	const load = running.length > 0 ? Math.max(measured, used) : Math.min(measured, limits.load);
+	const { memory, reserved: recentMemory } = standing(limits, host, running, recent);
 	if (load > limits.load || used >= limits.load) return "load";
 	if (memory < limits.memory) return "memory";
 	const pending = queued + reserved;
@@ -577,9 +679,9 @@ export function room(limits: Limits, host: Host, reserved: number): Waiting | nu
 
 /**
  * Wait until the host has room for a command, then record its admission. The
- * load average and available memory lag new work, so each admission from the
- * last minute counts as one more unit of load and as one command's memory
- * taken from available memory:
+ * load and available memory lag new work, so each admission from the last
+ * minute counts as one more unit of load and as one command's memory taken
+ * from available memory:
  *
  * 1. While load and memory have room even counting those, admit at once.
  * 2. While only the raw load and memory have room, admit one command at a
@@ -589,6 +691,9 @@ export function room(limits: Limits, host: Host, reserved: number): Waiting | nu
  * The load limit applies only while an admitted command still runs. Without
  * one, the load is work the gate cannot wait out, as on a freshly booted macOS
  * runner, so the raw load counts as having room.
+ *
+ * Until the host's load can be measured (see `Host.load`), a caller waits
+ * CPU_SAMPLE_MS for it.
  *
  * A running command's load can lull, as between a build's phases, while it will
  * soon take the whole host again. So where gates measure their commands (see
@@ -670,7 +775,15 @@ export async function admit(
 		const admitted = (at: number) =>
 			host.publish(ledger, [...kept.filter((admission) => admission.id !== place), { id, at, ...self }]);
 		// Priority ignores load, whether or not a gated command runs; memory still applies.
-		const { used, load, memory, reserved } = standing(limits, host, [...running], recent, precedence.priority);
+		const measured = precedence.priority ? 0 : host.load();
+		if (measured === undefined) {
+			await host.sleep(CPU_SAMPLE_MS, signal);
+			return false;
+		}
+		const used = precedence.priority ? 0 : [...running].reduce((sum, admission) => sum + (admission.cores ?? 0), 0);
+		// The load counts as at least the CPUs the running commands kept busy, and without one as having room.
+		const load = running.size > 0 ? Math.max(measured, used) : Math.min(measured, limits.load);
+		const { memory, reserved } = standing(limits, host, [...running], recent);
 		let wait = SETTLE_MS;
 		if (load > limits.load || used >= limits.load) waiting?.("load");
 		else if (memory < limits.memory) waiting?.("memory");
@@ -740,6 +853,8 @@ export async function measure(
 			if (signal.aborted) return;
 			throw error;
 		}
+		// Sample the host's CPUs too, so a gate arriving while this command runs measures them at once.
+		host.load();
 		const usage = host.usage(admission.unit);
 		const at = host.now();
 		if (usage !== undefined) {
@@ -963,7 +1078,7 @@ export function owner(env = process.env, cgroup = "/proc/self/cgroup"): { run: O
 }
 
 const notices: Record<Waiting, string> = {
-	load: "quest gate: waiting for the load average to fall",
+	load: "quest gate: waiting for CPU load to fall",
 	memory: "quest gate: waiting for free memory",
 	queue: "quest gate: waiting for commands queued earlier to start",
 };

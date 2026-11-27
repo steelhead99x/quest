@@ -1,6 +1,6 @@
 // The quest tree, whose contract is the guide (`quest guide`): parsing its
 // documents, validating them, whether a given quest can be started, and its
-// dependencies.
+// dependencies; and the repository's `quest.toml`, its CI and release tasks.
 //
 // The core is pure: no filesystem, process, or Node APIs, so it runs wherever
 // JavaScript does. Callers load the documents and say which paths exist.
@@ -20,6 +20,7 @@ export {
 	has,
 	codeSpan,
 	holds,
+	HOST,
 	type Host,
 	hosts,
 	isQuest,
@@ -52,7 +53,6 @@ export {
 	ALWAYS_HIGH,
 	type Class,
 	classesFor,
-	DEFAULT,
 	DEFAULT_CLASSES,
 	type HighPath,
 	PATHS,
@@ -66,12 +66,25 @@ export {
 	highHits,
 	matches,
 	offeredClasses,
+	PLANS,
 	parseRiskFile,
 	patternError,
 	recordedRisk,
 	riskier,
 	riskFileId,
 } from "./risk";
+export {
+	MANIFEST_FILE,
+	type Manifest,
+	type ManifestRepo,
+	type ManifestTask,
+	type ParsedManifest,
+	TASK_TIERS,
+	type TaskPick,
+	type TaskTier,
+	parseQuestManifest,
+	pickTasks,
+} from "./manifest";
 export { type Missed, type Moved, type Source, move, promote, relocate, remove } from "./edit";
 export { comparePaths, normalize } from "./path";
 export { type Blocker, blockers, label, lookup, parked, ready, renderBlocker } from "./ready";
@@ -160,6 +173,21 @@ export {
 	parseRecord,
 	parseUpload,
 } from "./record";
+export {
+	type FindingOutcome,
+	type PostedFinding,
+	type PostedRisk,
+	type PostedRound,
+	RUN_OUTCOMES,
+	type ReviewRun,
+	type ReviewUpload,
+	type RunOutcome,
+	SEATS,
+	SETTLED,
+	type SeatRole,
+	type Settled,
+	parseReviews,
+} from "./reviews";
 export {
 	type Answer,
 	type Check,

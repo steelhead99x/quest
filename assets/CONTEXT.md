@@ -13,7 +13,7 @@ Language and PR topic packs (`pr`, `rust`, `ts`, `uniffi`) load lazily via hooks
 ## Shipping
 
 - Optimize for shipping fast with high confidence: every change should be deployable on its own, exercised on its real surface (built binary, running app, endpoint), and cleanly revertible.
-- Prefer fast detection and painless rollback over heavy pre-merge gates. Every PR check is required and fails fast and hard; soft, slow, or cross-platform suites run asynchronously on the default branch, coalesced, and file work when they fail. A PR that slows the gate says by how much and why it is worth it.
+- Prefer fast detection and painless rollback over heavy pre-merge gates. Run checks locally before pushing; CI runs none on pull requests. The merge queue is the only synchronous gate and fails fast and hard; soft, slow, or cross-platform suites run asynchronously on the default branch, coalesced, and file work when they fail. A PR that slows the queue says by how much and why it is worth it.
 - Make state, schema, and wire changes reversible across mixed versions (expand before contract, default fields across independently deployed seams). If a change cannot roll back cleanly, call it out explicitly and minimize the irreversible window.
 - Every shipped behavior needs an automated signal that detects breakage before users do (smoke, canary metric, invariant check, or alert). If you cannot tell whether your change broke production, adding that signal is part of the work.
 - Any manual deploy, release, or recovery step is debt: automate it or plan the quest that removes the human from the loop.
@@ -62,7 +62,7 @@ Language and PR topic packs (`pr`, `rust`, `ts`, `uniffi`) load lazily via hooks
 ## Pull requests
 
 - Merge the base only when the branch conflicts with it or a landing step (`quest merge` or a merge queue) refuses the head. Before each push to a PR's branch, confirm it is still open (a push after merge restores the deleted branch).
-- Before marking a PR ready for review, exercise the change on its real surface, record `## Validation` and `## Models` (`Size: M` matching its quest or a quest-sized skill PR, plus `Implementer: <harness>, <model-id>, <effort>` per session, newest last, `unknown` if unreported), and run `/quest-review` (a model no weaker than the latest writer reviews the committed head; a later push needs a new review unless `/quest-merge` exempts it). See `quest context pr` for online review threads, CI rules, and `## Caused by`.
+- Before marking a PR ready for review, exercise the change on its real surface, record `## Validation` and `## Models` (`Size: M` matching its quest or a quest-sized skill PR, plus `Implementer: <harness>, <model-id>, <effort>` per session, newest last, `unknown` if unreported), and run `/quest-review` (a model no weaker than the latest writer reviews the committed head; a later push needs a new review unless `/quest-merge` exempts it). See `quest context pr` for online review threads, pull request workflows, and `## Caused by`.
 - A review finding earns a fix when someone will hit what it describes or it points to a better direction. Decline the rest in a line each instead of adding code for a case that will not happen, whoever raised it.
 
 ## Quests

@@ -10,7 +10,7 @@ Take it with `quest iterate <pr> [token]` before acting, passing a hold token yo
 If it refuses, stop and report what it printed; taking over a hold is the user's choice.
 If you cannot push to the PR's branch, stop and report.
 When another worktree holds the PR's branch, work in a detached checkout of its head.
-Your `Implementer:` line ends with the size your brief gives the work, and the arm it names, as `Implementer: Claude Code, claude-opus-5-5, low effort (iterate, XS, arm B)`.
+Your `Implementer:` line ends with the size your brief gives the work, and the arm, cohort, and advisor it names, as `Implementer: Claude Code, claude-sonnet-5-5, high effort (iterate, XS, arm B, cohort advisor-2026-11, advisor claude-opus-5-5)`.
 
 Read the PR, its linked issues and quest, the reviews and comments posted on it, and the surrounding code.
 `quest status <pr>` reports its checks, reviews by head, and unresolved threads in one call.

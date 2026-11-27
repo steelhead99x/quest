@@ -1680,16 +1680,8 @@ describe.skipIf(process.platform === "win32")("the watcher's land fixer", () => 
 		expect(parseResolution(handback)).toMatchObject({ head, base: head });
 	});
 
-	test("a fixed high head is pushed but waits for a review: by its record, a malformed one, or a high path", async () => {
-		const record = (risk: string) =>
-			`## Review\n\n- Head: abcdef012345\n- Risk:${risk}\n- Classified: medium by the always-high paths\n`;
+	test("a fixed head that touches a high path is pushed but waits for a review", async () => {
 		const cases = [
-			{
-				body: record(" high, `it changes the sandbox`"),
-				file: "fixed.txt",
-				why: "its review record rates it high",
-			},
-			{ body: record("dire"), file: "fixed.txt", why: "Review record's risk is malformed: dire" },
 			{ body: "", file: "high.txt", why: "it changes high.txt, which is always high: every agent loads it" },
 		];
 		for (const { body, file, why } of cases) {

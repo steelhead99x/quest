@@ -122,18 +122,21 @@ Read the root instructions with the new line in place:
 - If `quest/README.md` was just created, ask the user what the project is
   working toward and write that as its Goal.
 
-`quest start` claims each quest with a draft PR that holds only an empty
-commit. If the repository's CI runs on pull requests, recommend skipping
-drafts, since agents run the checks locally until a PR is ready for review. In
-GitHub Actions, add `ready_for_review` to the `pull_request` trigger's `types`
-(alongside the defaults `opened`, `synchronize`, and `reopened`) and give each
-job the condition
-`github.event_name != 'pull_request' || github.event.pull_request.draft == false`.
+If the repository's CI runs checks on pull requests, recommend moving them into
+the merge queue's build, then dropping that trigger: agents run the checks
+locally before pushing, and the merge queue is the only synchronous gate. Check
+first that the queue's build runs every check the base requires, and that each
+context the base requires still reports on the PR's head, since GitHub's merge
+queue and the watcher's own queue both wait for those before building: keep a
+job that builds nothing and only reports such a context, except `quest land`,
+which must stay unreported so GitHub's auto-merge cannot land a pick before the
+watcher builds it, and verify that a picked PR enters the queue before relying
+on it.
 Change workflows only if the user agrees.
 
 Agents push their quest branches to the repository itself, and GitHub gives
 workflows on those branches the repository's secrets and default token, so
-recommend keeping that CI read-only: code no maintainer has reviewed should
+recommend keeping any workflow they run read-only: code no maintainer has reviewed should
 meet only a read-only `GITHUB_TOKEN` and no write credentials. In GitHub, set
 Settings → Actions → General → Workflow permissions to read; move repository
 secrets, and organization secrets shared with the repository, into

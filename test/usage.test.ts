@@ -7,7 +7,8 @@ import { describe, expect, test } from "vitest";
 import { implementer } from "../src/cli/models-record";
 import { fixes } from "../src/cli/land-fixer";
 import type { Risk, Round, Tally } from "../src/cli/review";
-import { classifierSessions, parseReview, reviewRecord, reviewSessions } from "../src/cli/review-record";
+import { classifierSessions, parseReview, reviewSessions } from "../src/cli/review-record";
+import { reviewRecord } from "./review-body";
 import { culprits } from "../src/cli/breakage";
 import { type Session, causes, fold, parseSessions, share, usage, usageLines } from "../src/cli/usage";
 import type { LoggedWait } from "../src/cli/waits";
@@ -473,6 +474,8 @@ describe("PR records", () => {
 			effort: "low",
 			size: "XS",
 			arm: null,
+			cohort: null,
+			advisor: null,
 		});
 		expect(implementer("Implementer: Codex, gpt-6.2-sol, unknown effort")).toEqual({
 			harness: "Codex",
@@ -480,6 +483,8 @@ describe("PR records", () => {
 			effort: "unknown",
 			size: null,
 			arm: null,
+			cohort: null,
+			advisor: null,
 		});
 		expect(implementer("Implementer: someone")).toBeNull();
 	});
@@ -550,6 +555,49 @@ describe("share", () => {
 				),
 			),
 		).toEqual([[1, 3, 0]]);
+	});
+
+	test("gives an advisor's spend to the seat it advised, not to the PR's costliest seat", () => {
+		// A Sonnet writer advised by Fable, and an Opus iterate that spent more: Fable's tokens bill under Fable,
+		// which no seat runs, so without the advisor they would fall to the Opus seat as the costliest.
+		const seats = [
+			{ model: "claude-sonnet-5-5", effort: "high", advisor: "claude-fable-5-2" },
+			{ model: "claude-opus-5-5", effort: "high", advisor: null },
+		];
+		expect(
+			costs(
+				share(
+					[
+						spend("claude-sonnet-5-5", "high", 1, "implementing"),
+						spend("claude-fable-5-2", "high", 2, "implementing"),
+						spend("claude-opus-5-5", "high", 5, "iterating"),
+					],
+					seats,
+				),
+			),
+		).toEqual([
+			[0, 3, 0],
+			[1, 5, 0],
+		]);
+		// Opus spend fits both the writer Opus advises and an Opus iterate, so the session's role tells them apart.
+		const opus = [
+			{ model: "claude-sonnet-5-5", effort: "high", advisor: "claude-opus-5-5" },
+			{ model: "claude-opus-5-5", effort: "high" },
+		];
+		expect(
+			costs(
+				share(
+					[
+						spend("claude-opus-5-5", "high", 2, "implementing"),
+						spend("claude-opus-5-5", "high", 3, "iterating"),
+					],
+					opus,
+				),
+			),
+		).toEqual([
+			[0, 2, 0],
+			[1, 3, 0],
+		]);
 	});
 });
 
@@ -974,9 +1022,33 @@ describe("usage", () => {
 		expect(report.folded).toEqual({ copies: 1, hosts: ["box"] });
 		expect(report.incomplete).toEqual([{ host: null, harness: "claude", session: GONE, skippedLines: 2 }]);
 		expect(ten.implementers).toEqual([
-			{ harness: "Claude Code", model: "claude-opus-5-5", effort: "high", size: null, arm: null },
-			{ harness: "Claude Code", model: "claude-opus-5-5", effort: "high", size: "L", arm: null },
-			{ harness: "Codex", model: "gpt-6.2-sol", effort: "medium", size: "S", arm: null },
+			{
+				harness: "Claude Code",
+				model: "claude-opus-5-5",
+				effort: "high",
+				size: null,
+				arm: null,
+				cohort: null,
+				advisor: null,
+			},
+			{
+				harness: "Claude Code",
+				model: "claude-opus-5-5",
+				effort: "high",
+				size: "L",
+				arm: null,
+				cohort: null,
+				advisor: null,
+			},
+			{
+				harness: "Codex",
+				model: "gpt-6.2-sol",
+				effort: "medium",
+				size: "S",
+				arm: null,
+				cohort: null,
+				advisor: null,
+			},
 		]);
 		expect(ten.unread).toEqual(["Implementer: Claude Code, Some Model"]);
 		expect(usageLines(report)).toContain("  unread: Implementer: Claude Code, Some Model");
@@ -1210,7 +1282,16 @@ describe("usage", () => {
 		);
 	});
 
-	test("rolls up the writer A/B by size and arm, leaving out a PR a writer ran off its arm", async () => {
+	test("rolls up the writer A/B by size, cohort, and arm, leaving out a PR a writer ran off its arm", async () => {
+		const advisedB = "arm B, cohort advisor-2026-11, advisor claude-opus-5-5";
+		const modelSpend = {
+			requests: 1,
+			inputTokens: 10,
+			cacheWriteTokens: 20,
+			cacheReadTokens: 30,
+			outputTokens: 40,
+			complete: true,
+		};
 		const models = (...lines: string[]) =>
 			[
 				"## Models",
@@ -1260,8 +1341,56 @@ describe("usage", () => {
 				),
 				// An unsized PR has no cell to count in.
 				armed(25, "quest/m0/unsized", "- Implementer: Claude Code, claude-opus-5-5, high effort (arm B)"),
+				// The advisor cohort's arms count apart from the legacy lines above, which name no cohort.
+				armed(
+					26,
+					"quest/m0/adv",
+					"- Size: M",
+					`- Implementer: Claude Code, claude-sonnet-5-5, high effort (${advisedB})`,
+					`- Implementer: Claude Code, claude-sonnet-5-5, high effort (iterate, M, ${advisedB})`,
+				),
+				armed(
+					27,
+					"quest/m0/adv-a",
+					"- Size: M",
+					"- Implementer: Claude Code, claude-opus-5-5, high effort (arm A, cohort advisor-2026-11)",
+				),
+				// An iterate without the advisor ran off its arm.
+				armed(
+					28,
+					"quest/m0/unadvised",
+					"- Size: M",
+					`- Implementer: Claude Code, claude-sonnet-5-5, high effort (${advisedB})`,
+					"- Implementer: Claude Code, claude-sonnet-5-5, high effort (iterate, M, arm B, cohort advisor-2026-11)",
+				),
+				// So did an iterate at another effort.
+				armed(
+					29,
+					"quest/m0/effort",
+					"- Size: M",
+					`- Implementer: Claude Code, claude-sonnet-5-5, high effort (${advisedB})`,
+					`- Implementer: Claude Code, claude-sonnet-5-5, medium effort (iterate, M, ${advisedB})`,
+				),
+				// An unknown first effort matches either, but two known ones still differ.
+				armed(
+					30,
+					"quest/m0/efforts",
+					"- Size: M",
+					`- Implementer: Claude Code, claude-sonnet-5-5 (${advisedB})`,
+					`- Implementer: Claude Code, claude-sonnet-5-5, high effort (iterate, M, ${advisedB})`,
+					`- Implementer: Claude Code, claude-sonnet-5-5, medium effort (iterate, M, ${advisedB})`,
+				),
 			],
 			sessions: [
+				// The advised writer's session, whose advisor's tokens token-max reports under Opus.
+				exported("66666666-6666-6666-6666-666666666666", "claude-sonnet-5-5", "high", 3, {
+					branches: [{ name: "quest/m0/adv", first: "2026-11-06T10:05:00Z", last: "2026-11-06T10:06:00Z" }],
+					cwd: "/adv",
+					models: [
+						{ ...modelSpend, model: "claude-sonnet-5-5", effort: "high", costUsd: 1 },
+						{ ...modelSpend, model: "claude-opus-5-5", effort: "high", costUsd: 2 },
+					],
+				}),
 				exported("33333333-3333-3333-3333-333333333333", "claude-opus-5-5", "high", 3, {
 					branches: [{ name: "quest/m0/b1", first: "2026-11-06T10:05:00Z", last: "2026-11-06T10:06:00Z" }],
 					cwd: "/b1",
@@ -1286,9 +1415,11 @@ describe("usage", () => {
 		expect(
 			report.arms.map((a) => [
 				a.size,
+				a.cohort,
 				a.arm,
 				a.model,
 				a.effort,
+				a.advisor,
 				a.pulls,
 				a.reviewed,
 				a.tally.rounds,
@@ -1296,16 +1427,29 @@ describe("usage", () => {
 				a.spend.cost,
 			]),
 		).toEqual([
-			["M", "A", "claude-opus-5-5", "medium", 1, 1, 2, 0, 0],
-			["M", "B", "claude-opus-5-5", "high", 2, 2, 4, 4, 9],
+			["M", null, "A", "claude-opus-5-5", "medium", null, 1, 1, 2, 0, 0],
+			["M", null, "B", "claude-opus-5-5", "high", null, 2, 2, 4, 4, 9],
+			["M", "advisor-2026-11", "A", "claude-opus-5-5", "high", null, 1, 1, 2, 0, 0],
+			// The advisor's spend counts in its arm's.
+			["M", "advisor-2026-11", "B", "claude-sonnet-5-5", "high", "claude-opus-5-5", 1, 1, 2, 1, 3],
+		]);
+		// The advised writer's accuracy row is its own, with its advisor's spend in its cost.
+		const advised = report.accuracy.filter((a) => a.advisor !== null);
+		expect(advised.map((a) => [a.size, a.model, a.effort, a.advisor, a.pulls, a.spent.cost])).toEqual([
+			["M", "claude-sonnet-5-5", "high", "claude-opus-5-5", 4, 3],
+			["M", "claude-sonnet-5-5", "medium", "claude-opus-5-5", 2, 0],
+			["M", "claude-sonnet-5-5", "unknown", "claude-opus-5-5", 1, 0],
 		]);
 		const twenty = report.pulls.find((p) => p.number === 20)!;
 		expect(twenty.implementers.map((i) => i.arm)).toEqual(["B", "B"]);
 		const text = usageLines(report).join("\n");
 		expect(text).toContain("  implementer: Claude Code, claude-opus-5-5, high effort (XS, arm B)\n");
-		expect(text).toContain("Writer A/B by size and arm:\n");
 		expect(text).toContain(
-			"   M  B  Claude Code  claude-opus-5-5  high    2 PRs, 2 merged, 0 handed back, 2 reviewed: rounds 2.0, findings 2 (medium 2): fixed 2, refuted 0, open 0, first rounds 0: 0; 0 later fixes; 4 sessions, in 40, cache 80 written 120 read, out 160, ~$9.00\n",
+			"  implementer: Claude Code, claude-sonnet-5-5, high effort (M, arm B, cohort advisor-2026-11, advisor claude-opus-5-5)\n",
+		);
+		expect(text).toContain("Writer A/B by size, cohort, and arm:\n");
+		expect(text).toContain(
+			"   M  advisor-2026-11  B  Claude Code  claude-sonnet-5-5  high, advisor claude-opus-5-5  1 PRs, 1 merged, 0 handed back, 1 reviewed: rounds 2.0, findings 1 (medium 1): fixed 1, refuted 0, open 0, first rounds 0: 0; 0 later fixes; 1 sessions, in 20, cache 40 written 60 read, out 80, ~$3.00\n",
 		);
 	});
 

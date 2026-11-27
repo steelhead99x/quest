@@ -25,7 +25,7 @@ import {
 	WAIT_KINDS,
 } from "../core";
 import type { Arm } from "./models";
-import { canonicalModel, recorded } from "./models-record";
+import { type Implementer, canonicalModel, recorded } from "./models-record";
 import { type ClaimDependencies, upstream } from "./claims";
 import { repositoryPath } from "../github/client";
 import { git } from "./git";
@@ -108,7 +108,7 @@ export interface PullRow {
 	/** Its body, as a draft now or any earlier version, had a `## Waiting` section, so it was handed back to the maintainer. */
 	handedBack: boolean;
 	size: Size | null;
-	implementers: { harness: string; model: string; effort: string; size: Size | null; arm: Arm | null }[];
+	implementers: (Omit<Implementer, "size"> & { size: Size | null })[];
 	/** The `Implementer:` items it cannot read, which count toward no implementer. */
 	unread: string[];
 	/** Each reviewer the PR's `## Review` record names, with its latest round and its tally. */
@@ -154,6 +154,8 @@ export interface AccuracyRow {
 	harness: string;
 	model: string;
 	effort: string;
+	/** The model its advisor tool consulted, so an advised writer never mixes with the same writer alone. */
+	advisor: string | null;
 	pulls: number;
 	merged: number;
 	handedBack: number;
@@ -190,8 +192,10 @@ export interface ReviewerRow {
 	spent: Spend;
 }
 
-/** One writer A/B arm at one size, over the PRs every Implementer line of which names it. */
+/** One writer A/B arm at one size in one cohort, over the PRs every Implementer line of which names both. */
 export interface ArmRow extends Omit<AccuracyRow, "size" | "spent"> {
+	/** The A/B the PRs were drawn in, null for lines written before cohorts were named, so no readout mixes two. */
+	cohort: string | null;
 	size: Size;
 	arm: Arm;
 	/** The sessions on its PRs in every role, and their spend. */
@@ -908,7 +912,8 @@ function count(to: { tally: Omit<Counts, "first">; firstRounds: FirstRounds }, t
 
 /**
  * A PR's spend split among `seats`, as its record names them: spend whose `seat` is known, as a reviewer's session its
- * record names, to that seat; each model's other spend to the seats of that model, of its effort where both name one;
+ * record names, to that seat; each model's other spend to the seats that run it or consult it as their advisor, whose
+ * tokens bill under its own model, of its effort where both name one;
  * and spend of a model no seat names, as a sub-agent on a smaller model, to the seat that took the most, the PR's
  * main one. Spend that fits several seats goes to the first, the PR's writer, when an implementing session spent it,
  * and to the others when an iterating one did; what still fits several is split evenly among them and counted as
@@ -916,7 +921,7 @@ function count(to: { tally: Omit<Counts, "first">; firstRounds: FirstRounds }, t
  */
 export function share(
 	spent: (Spent & { role?: Role; seat?: number })[],
-	seats: { model: string; effort: string }[],
+	seats: { model: string; effort: string; advisor?: string | null }[],
 ): Map<number, Tokens & { split: number }> {
 	const shares = new Map<number, Tokens & { split: number }>();
 	if (seats.length === 0) return shares;
@@ -934,7 +939,10 @@ export function share(
 			continue;
 		}
 		const model = canonical(each.model);
-		const same = seats.flatMap((seat, i) => (canonical(seat.model) === model ? [i] : []));
+		// token-max reports an advisor's spend at the effort of the request that consulted it, its seat's.
+		const same = seats.flatMap((seat, i) =>
+			model !== null && (canonical(seat.model) === model || canonical(seat.advisor ?? null) === model) ? [i] : [],
+		);
 		const effort = each.effort ?? "unknown";
 		const exact = same.filter((i) => seats[i]!.effort === effort);
 		const loose = same.filter((i) => seats[i]!.effort === "unknown" || effort === "unknown");
@@ -972,7 +980,7 @@ function part(tokens: Tokens, n: number): Tokens {
 	};
 }
 
-const noOutcomes = (): Omit<AccuracyRow, "size" | "harness" | "model" | "effort" | "spent"> => ({
+const noOutcomes = (): Omit<AccuracyRow, "size" | "harness" | "model" | "effort" | "advisor" | "spent"> => ({
 	pulls: 0,
 	merged: 0,
 	handedBack: 0,
@@ -1037,8 +1045,8 @@ function accuracyRows(pulls: PullRow[]): AccuracyRow[] {
 		// A session that pushed twice is one implementer of the PR, whether or not each line names its size.
 		const distinct = [
 			...new Map(
-				each.implementers.map(({ harness, model, effort, size }) => {
-					const at = { harness, model, effort, size: size ?? each.size };
+				each.implementers.map(({ harness, model, effort, advisor, size }) => {
+					const at = { harness, model, effort, advisor, size: size ?? each.size };
 					return [JSON.stringify(at), at];
 				}),
 			).values(),
@@ -1050,8 +1058,8 @@ function accuracyRows(pulls: PullRow[]): AccuracyRow[] {
 			each.state === "merged" ? share(writing, distinct) : new Map<number, Tokens & { split: number }>();
 		for (const [i, implementer] of distinct.entries()) {
 			const size = implementer.size;
-			const { model } = implementer;
-			const id = JSON.stringify([size, implementer.harness, model, implementer.effort]);
+			const { model, advisor } = implementer;
+			const id = JSON.stringify([size, implementer.harness, model, implementer.effort, advisor]);
 			let row = rows.get(id);
 			if (!row) {
 				row = {
@@ -1059,6 +1067,7 @@ function accuracyRows(pulls: PullRow[]): AccuracyRow[] {
 					harness: implementer.harness,
 					model,
 					effort: implementer.effort,
+					advisor,
 					...noOutcomes(),
 					spent: noSpend(),
 				};
@@ -1074,7 +1083,7 @@ function accuracyRows(pulls: PullRow[]): AccuracyRow[] {
 		}
 	}
 	return [...rows.values()].sort((a, b) =>
-		order([a.size, a.harness, a.model, a.effort], [b.size, b.harness, b.model, b.effort]),
+		order([a.size, a.harness, a.model, a.effort, a.advisor], [b.size, b.harness, b.model, b.effort, b.advisor]),
 	);
 }
 
@@ -1138,9 +1147,10 @@ function reviewerRows(pulls: PullRow[]): ReviewerRow[] {
 }
 
 /**
- * The writer A/B's rollup: each sized PR whose every Implementer line names the same arm counts in it, under the
- * size and writer its first line names, with every session's spend on it; a writer off its arm, such as a fallback
- * that names none, leaves its PR in neither.
+ * The writer A/B's rollup: each sized PR whose every Implementer line names the same arm, cohort, writer, and advisor
+ * counts in it, under the cohort, size, and writer its first line names, with every session's spend on it, the
+ * advisor's included, an effort of `unknown` matching any; a writer off its arm, such as a fallback that names none or an iterate on another model, effort, or
+ * advisor, leaves its PR in neither.
  */
 function armRows(pulls: PullRow[]): ArmRow[] {
 	const rows = new Map<string, ArmRow>();
@@ -1149,12 +1159,35 @@ function armRows(pulls: PullRow[]): ArmRow[] {
 	for (const each of pulls) {
 		const first = each.implementers[0];
 		if (!first?.arm || each.size === null || each.unread.length > 0) continue;
-		if (each.implementers.some((implementer) => implementer.arm !== first.arm)) continue;
-		const { harness, model, effort, arm } = first;
-		const id = JSON.stringify([each.size, arm, harness, model, effort]);
+		const { harness, model, effort, advisor, arm, cohort } = first;
+		const efforts = new Set(each.implementers.map((other) => other.effort).filter((e) => e !== "unknown"));
+		if (
+			efforts.size > 1 ||
+			each.implementers.some(
+				(other) =>
+					other.arm !== arm ||
+					other.cohort !== cohort ||
+					other.harness !== harness ||
+					other.model !== model ||
+					other.advisor !== advisor,
+			)
+		)
+			continue;
+		const id = JSON.stringify([cohort, each.size, arm, harness, model, effort, advisor]);
 		let row = rows.get(id);
 		if (!row) {
-			row = { size: each.size, arm, harness, model, effort, ...noOutcomes(), sessions: 0, spend: zero() };
+			row = {
+				cohort,
+				size: each.size,
+				arm,
+				harness,
+				model,
+				effort,
+				advisor,
+				...noOutcomes(),
+				sessions: 0,
+				spend: zero(),
+			};
 			rows.set(id, row);
 		}
 		outcome(row, each, latest);
@@ -1168,7 +1201,10 @@ function armRows(pulls: PullRow[]): ArmRow[] {
 		}
 	}
 	return [...rows.values()].sort((a, b) =>
-		order([a.size, a.arm, a.harness, a.model, a.effort], [b.size, b.arm, b.harness, b.model, b.effort]),
+		order(
+			[a.size, a.cohort, a.arm, a.harness, a.model, a.effort, a.advisor],
+			[b.size, b.cohort, b.arm, b.harness, b.model, b.effort, b.advisor],
+		),
 	);
 }
 
@@ -1537,6 +1573,10 @@ function table(rows: string[][]): string[] {
 	);
 }
 
+/** A writer's effort, and the model advising it, if any. */
+const advised = (row: { effort: string; advisor: string | null }) =>
+	row.advisor === null ? row.effort : `${row.effort}, advisor ${row.advisor}`;
+
 /** The report as plain lines: each PR, then the rollups. */
 export function usageLines(report: Usage): string[] {
 	const lines = [
@@ -1553,7 +1593,14 @@ export function usageLines(report: Usage): string[] {
 				`  risk: ${row.risk.tier}, ${row.risk.reason}${riskNote(row.risk)}${row.risk.class === null ? "" : `; class ${row.risk.class}`}`,
 			);
 		for (const i of row.implementers) {
-			const notes = [i.size, i.arm && `arm ${i.arm}`].filter(Boolean).join(", ");
+			const notes = [
+				i.size,
+				i.arm && `arm ${i.arm}`,
+				i.cohort && `cohort ${i.cohort}`,
+				i.advisor && `advisor ${i.advisor}`,
+			]
+				.filter(Boolean)
+				.join(", ");
 			lines.push(`  implementer: ${i.harness}, ${i.model}, ${i.effort} effort${notes ? ` (${notes})` : ""}`);
 		}
 		for (const item of row.unread) lines.push(`  unread: ${item}`);
@@ -1612,7 +1659,7 @@ export function usageLines(report: Usage): string[] {
 					a.size ?? "-",
 					a.harness,
 					a.model,
-					a.effort,
+					advised(a),
 					`${a.pulls} PRs, ${a.merged} merged, ${a.handedBack} handed back, ${a.reviewed} reviewed: score ${mean(a.score, a.scored)}, rounds ${mean(a.tally.rounds, a.reviewed)}, ${findingsText({ ...a.tally, first: null })}, ${firsts(a.firstRounds)}; ${a.landFixes} land fixes, ${a.fixes} later fixes; ${per(a.spent, "merged PR")}`,
 				]),
 			),
@@ -1635,15 +1682,16 @@ export function usageLines(report: Usage): string[] {
 	if (report.arms.length)
 		lines.push(
 			"",
-			"Writer A/B by size and arm:",
+			"Writer A/B by size, cohort, and arm:",
 			...table(
 				report.arms.map((a) => [
 					" ",
 					a.size,
+					a.cohort ?? "-",
 					a.arm,
 					a.harness,
 					a.model,
-					a.effort,
+					advised(a),
 					`${a.pulls} PRs, ${a.merged} merged, ${a.handedBack} handed back, ${a.reviewed} reviewed: rounds ${mean(a.tally.rounds, a.reviewed)}, ${findingsText({ ...a.tally, first: null })}, ${firsts(a.firstRounds)}; ${a.fixes} later fixes; ${a.sessions} sessions, ${tokens(a.spend)}`,
 				]),
 			),

@@ -151,12 +151,15 @@ function readClaude(path: string, into: Builder): void {
 			if (id !== null && !seen.has(id) && isObject(message.usage)) {
 				seen.add(id);
 				const u = message.usage;
-				into.tokens(
-					num(u.input_tokens) +
-						num(u.cache_creation_input_tokens) +
-						num(u.cache_read_input_tokens) +
-						num(u.output_tokens),
-				);
+				const sum = (part: Record<string, unknown>) =>
+					num(part.input_tokens) +
+					num(part.cache_creation_input_tokens) +
+					num(part.cache_read_input_tokens) +
+					num(part.output_tokens);
+				// The top-level usage leaves out advisor and compaction iterations, which a nonempty list holds with
+				// the executor's own, so the list alone counts each token once.
+				const parts = Array.isArray(u.iterations) ? u.iterations.filter(isObject) : [];
+				into.tokens(parts.length > 0 ? parts.reduce((total, part) => total + sum(part), 0) : sum(u));
 			}
 			if (!Array.isArray(content)) return;
 			for (const block of content) {

@@ -1080,11 +1080,11 @@ describe("the risk tier", () => {
 
 	test("is stale with its review record once the base's risk file is not the one it was classified against", async () => {
 		const base = (file: { oid: string } | null) => ({ baseRef: baseTree(file) });
-		const read = async (body: string, fields: Node, state = "OPEN") => {
+		const read = async (body: string, fields: Node, state = "OPEN", statuses?: Record<string, Node>) => {
 			const warnings: string[] = [];
 			const fixture = setup(
 				[pull({ body, state, checks: null, reviews: page([]), threads: page([]), ...fields })],
-				{ warnings },
+				{ warnings, ...(statuses && { statuses }) },
 			);
 			const status = await pullRequestStatus(pr, fixture.deps);
 			return { risk: status.risk?.state, record: status.reviewRecord?.state, warnings };
@@ -1109,8 +1109,12 @@ describe("the risk tier", () => {
 		expect(await read(record(A), base(null))).toEqual(
 			stale(`was classified against RISK.md ${RISK_ID}, but the base has none`),
 		);
-		// A record that does not say which file it was classified against can be trusted against none.
-		expect(await read(record(A, null), {})).toEqual(stale(`names no risk file, but the base's is ${RISK_ID}`));
+		// A record and status from before the risk file line name none, so they cover a base that has none.
+		const before = { [A]: reviewStatus("SUCCESS", "Risk high: passed", A) };
+		expect(await read(record(A, null), base(null), "OPEN", before)).toEqual(current);
+		expect(await read(record(A, null), {}, "OPEN", before)).toEqual(
+			stale(`was classified when the base had no RISK.md, but the base's is ${RISK_ID}`),
+		);
 		// A closed PR cannot land, and its base may be gone, so only its head is compared.
 		expect(await read(record(A), { baseRef: null }, "MERGED")).toEqual(current);
 	});

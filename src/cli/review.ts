@@ -18,8 +18,11 @@ import {
 	ALWAYS_HIGH,
 	type Class,
 	DEFAULT_CLASSES,
+	type FindingOutcome,
 	heldHigh,
 	highHits,
+	matches,
+	PLANS,
 	RISK_FILE,
 	SIZES,
 	type Size,
@@ -30,6 +33,7 @@ import {
 	codeSpan,
 	offeredClasses,
 	parse,
+	parseReviews,
 	parseRiskFile,
 	size as questSize,
 	riskier,
@@ -199,11 +203,9 @@ export interface Assessment {
 	reason: string;
 }
 
-/** How the head's tier was set before review: by a model, by a path held high, or by default with no risk file. */
+/** How the head's tier was set before review: by a model, or by a path held high. */
 export type Classification =
-	| { kind: "model"; harness: HarnessName; model: string; effort: string; session: string }
-	| { kind: "paths" }
-	| { kind: "default" };
+	{ kind: "model"; harness: HarnessName; model: string; effort: string; session: string } | { kind: "paths" };
 
 /** The head's tier as set before review, and the classifier's turn, empty when no model ran or it was reused. */
 export interface Classified extends Assessment {
@@ -438,6 +440,8 @@ export interface ReviewDependencies {
 	 * it, as in the runner, only the options pick the reviewer.
 	 */
 	models?: (root: string, base: string, branch: string) => Promise<PullModels | null>;
+	/** Fails unless the run's record can be posted, before any reviewer spends a round; without it, nothing is checked. */
+	posting?: (root: string, base: string, branch: string) => Promise<void>;
 	/**
 	 * Queues a session for the record sender, as the stop hook does an interactive one, since no hook runs in a
 	 * reviewer. It says for itself anything the person must hear, and must not throw, so a round never fails on it.
@@ -497,9 +501,25 @@ export interface Reviewed {
 	sized: { size: Size; from: string };
 	/** The maintainer's reason for accepting the open findings of `rounds`, which repeat the head's last rounds. */
 	accepted?: string;
+	/**
+	 * The outcomes the run posts to PR `at`: those of earlier posted rounds it settled, each for the PR its round was
+	 * posted on, fixed or refuted by a round; the maintainer's accepted ones, deferred on `at`, which the acceptance posts
+	 * its rounds to; and those a failed post left for a later one.
+	 */
+	outcomes: (at: PostedOn) => FindingOutcome[];
 	/** Keeps the accepted findings among those the branch settled; for the caller to run once the acceptance is attested. */
 	remember?: () => void;
+	/** Marks the run's rounds as posted on PR `at`, so the next run settles their findings there; for the caller to run once they are. */
+	posted?: (at: PostedOn) => void;
 }
+
+/** The PR a session's round was posted on, as Kixel Quest names it: lowercase `owner/repo` and number. */
+export interface PostedOn {
+	repository: string;
+	number: number;
+}
+
+const samePull = (a: PostedOn, b: PostedOn) => a.repository === b.repository && a.number === b.number;
 
 /**
  * A branch's review sessions, one per reviewer, kept in the clone's common Git directory so every worktree
@@ -516,6 +536,11 @@ interface State {
 	classified?: { key: string; value: Omit<Classified, "usage" | "riskFile"> };
 	/** The maintainer's override of the branch's tier. */
 	override?: Override;
+	/**
+	 * The outcomes a failed post carried, for the next post: kept for the branch rather than a session, so a run that
+	 * drops sessions, as `--new` or a changed pick does, still posts them.
+	 */
+	pending?: FindingOutcome[];
 }
 
 /** One reviewer's session on a branch. */
@@ -530,6 +555,11 @@ interface Session {
 	rounds: { head: string; mergeBase: string; findings: Finding[] }[];
 	/** The session's last round, which a round on the same head with nothing to settle repeats. */
 	last: Round;
+	/**
+	 * The PR `last` was posted on. Kixel Quest refuses an outcome for a finding it never stored, as one a failed post or
+	 * an older quest left unposted, and takes one only for the PR that holds it.
+	 */
+	posted?: PostedOn;
 	/**
 	 * Digests of the instruction files and the REVIEW.md the session started
 	 * with. A resumed session keeps its first instructions and rules, so a change
@@ -1264,7 +1294,9 @@ export function verdict(reply: { structured?: unknown; text?: string }, earlier:
 			!(line === null || (Number.isSafeInteger(line) && (line as number) > 0)) ||
 			!SEVERITIES.includes(finding.severity as Finding["severity"]) ||
 			typeof finding.title !== "string" ||
-			typeof finding.body !== "string"
+			typeof finding.body !== "string" ||
+			// Kixel Quest stores a finding only by its path and title; a note is never posted.
+			(finding.severity !== "low" && (finding.file.trim() === "" || finding.title.trim() === ""))
 		) {
 			throw new Error(`the reviewer's finding ${index + 1} does not match the schema`);
 		}
@@ -1325,22 +1357,38 @@ function replied(reply: { structured?: unknown; text?: string }, what: string): 
 	}
 }
 
-/** The classifier's reply schema: the assessment, and the class the change falls in when any class is offered. */
-function classSchema(classes: string[]) {
-	if (classes.length === 0) return ASSESSMENT;
+/**
+ * The classifier's reply schema: the assessment, its tier no lower than `floor`, and the class the change falls in
+ * when any class is offered.
+ */
+function classSchema(classes: string[], floor: Tier) {
+	const tier = { type: "string", enum: TIERS.slice(TIERS.indexOf(floor)) };
+	const properties = { ...ASSESSMENT.properties, tier };
+	if (classes.length === 0) return { ...ASSESSMENT, properties };
 	return {
 		...ASSESSMENT,
 		required: [...ASSESSMENT.required, "class"],
-		properties: { ...ASSESSMENT.properties, class: { type: ["string", "null"], enum: [...classes, null] } },
+		properties: { ...properties, class: { type: ["string", "null"], enum: [...classes, null] } },
 	};
 }
 
-/** The classifier's assessment in `value`, and the class it names, which must be one of `classes`, or null. */
-export function classed(value: unknown, classes: string[], what: string): Assessment & { class: string | null } {
+/**
+ * The classifier's assessment in `value`, whose tier must be no lower than `floor`, and the class it names, which
+ * must be one of `classes`, or null.
+ */
+export function classed(
+	value: unknown,
+	classes: string[],
+	floor: Tier,
+	what: string,
+): Assessment & { class: string | null } {
 	const named = record(value)?.class ?? null;
 	if (named !== null && !classes.includes(named as string))
 		throw new Error(`${what} names ${JSON.stringify(named)}, which is no class the risk file offers this change`);
-	return { ...assessment(value, what), class: named as string | null };
+	const assessed = assessment(value, what);
+	if (riskier(floor, assessed.tier))
+		throw new Error(`${what} names ${assessed.tier}, below the ${floor} its change is held to`);
+	return { ...assessed, class: named as string | null };
 }
 
 /** The tier and reason `value` holds, with its reason on one line, failing as `what` when it holds none. */
@@ -1593,7 +1641,7 @@ export function reportPrompt(head: string, earlier: Finding[] = [], first = 1): 
 /** What each tier means, as the classifier reads it: who a mistake in the change reaches, and how soon they would know. */
 const TIER_SCALE =
 	"Risk is blast radius: who is hurt if the change is wrong, and whether anything catches it first. A change is low " +
-	"when no one outside the repository could tell it apart, such as tests, documentation, plans, comments, or a " +
+	"when no one outside the repository could tell it apart, such as tests, documentation, removed plans, comments, or a " +
 	"refactor that changes no behavior. It is high when a mistake in it reaches the users or customers of what the " +
 	"repository ships, or other repositories that build on it, before a check or a revert would catch it, such as " +
 	"the core of a wire protocol or data path, a public API others build against, billing, a security boundary, or a " +
@@ -1666,6 +1714,19 @@ const DIFF_FLAGS = ["--text", "--no-ext-diff", "--no-textconv", "--no-color", "-
 const modelDiff = (root: string, empty: string, args: string[]) =>
 	git(root, [`--attr-source=${empty}`, "diff", ...DIFF_FLAGS, ...args]);
 
+/**
+ * The paths under {@link PLANS} that `range` adds a line to, a rename's new side included, read as a model reads the
+ * diff so the head's attributes cannot hide one.
+ */
+function addedPlans(root: string, empty: string, range: string): string[] {
+	return modelDiff(root, empty, ["--numstat", "--no-renames", "-z", range, "--", PLANS])
+		.split("\0")
+		.flatMap((line) => {
+			const [, added, path] = /^(\d+)\t\d+\t([\s\S]+)$/.exec(line) ?? [];
+			return added !== undefined && added !== "0" && matches(PLANS, path!) ? [path!] : [];
+		});
+}
+
 /** The bytes as UTF-8 text, or null when they are not valid UTF-8, which decoding would swell with U+FFFD. */
 function text8(bytes: Buffer): string | null {
 	try {
@@ -1690,6 +1751,7 @@ export function classifyPrompt(
 	file: { sha: string; text: string | null },
 	diff: { stat: string; patch: string | null; file: string; size: number },
 	classes: readonly Class[] = [],
+	planned: readonly string[] = [],
 ): string {
 	const { stat, patch, file: patchFile, size } = diff;
 	const range = `${change.mergeBase}..${change.head}`;
@@ -1710,6 +1772,12 @@ export function classifyPrompt(
 		`<diff>\n${shown}\n</diff>`,
 		"Report the change's tier as JSON matching the response schema, with one sentence on what could break, for " +
 			"whom, and how hard it is to undo.",
+		...(planned.length > 0
+			? [
+					`It adds to plans under \`${PLANS}\`, which agents start without a person reading them, so its tier ` +
+						`is medium or high: ${planned.map(codeSpan).join(", ")}.`,
+				]
+			: []),
 		...(classes.length > 0
 			? [
 					"Also report as `class` the one class below whose rule every changed file meets, judged by what the " +
@@ -1830,6 +1898,28 @@ const seatKey = (seat: SeatId) => `${seat.reviewer}${seat.second ? " second" : "
 /** Whether two reviewers hold the same seat: the same harness and role. */
 export const sameSeat = (a: SeatId, b: SeatId) => seatKey(a) === seatKey(b);
 
+/** Whether `value` names a PR as a session's `posted` does. */
+function postedOn(value: unknown): boolean {
+	const at = value as PostedOn | null;
+	return (
+		typeof at === "object" &&
+		at !== null &&
+		Object.keys(at).length === 2 &&
+		typeof at.repository === "string" &&
+		Number.isSafeInteger(at.number)
+	);
+}
+
+/** Whether `value` is a branch's `pending` outcomes, each one Kixel Quest would take. */
+function pendingOutcomes(value: unknown): boolean {
+	try {
+		parseReviews({ runs: [], outcomes: value });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * A branch's saved sessions, read before any reviewer runs, so a file this
  * quest cannot resume is refused, naming `--new`, rather than failing after a
@@ -1861,6 +1951,7 @@ export function parseState(value: unknown): State {
 				typeof session?.reviewer === "string" &&
 				!("shadow" in session) &&
 				(session.second === undefined || session.second === true) &&
+				(session.posted === undefined || postedOn(session.posted)) &&
 				state.tallies!.some((tally) => sameSeat(tally, session)) &&
 				typeof session.session === "string" &&
 				typeof session.started === "number" &&
@@ -1874,6 +1965,7 @@ export function parseState(value: unknown): State {
 				session.given !== null,
 		) &&
 		state.sessions.filter((session) => session.second).length <= 1 &&
+		(state.pending === undefined || pendingOutcomes(state.pending)) &&
 		(state.history === undefined ||
 			(Array.isArray(state.history) &&
 				state.history.every((past) => typeof past?.title === "string" && typeof past.reason === "string"))) &&
@@ -1881,7 +1973,7 @@ export function parseState(value: unknown): State {
 			(typeof state.classified?.key === "string" &&
 				TIERS.includes(state.classified.value?.tier) &&
 				typeof state.classified.value.reason === "string" &&
-				["model", "paths", "default"].includes(state.classified.value.by?.kind) &&
+				["model", "paths"].includes(state.classified.value.by?.kind) &&
 				(state.classified.value.class === null || typeof state.classified.value.class === "string"))) &&
 		(state.override === undefined ||
 			(TIERS.includes(state.override?.tier) &&
@@ -2004,10 +2096,9 @@ interface Classifying {
 
 /**
  * Set the head's risk tier before any reviewer runs, from the change alone: high when it touches a path
- * {@link heldHigh} names from the base's risk file, medium when the base has no risk file and offers the change no
- * default class, and otherwise as the first of {@link CLASSIFIERS} that can run judges the diff against the file, if
- * any. The last classification is reused while the change, the file, and the built-in defaults are the same, which
- * `key` names.
+ * {@link heldHigh} names from the base's risk file, and otherwise as the first of {@link CLASSIFIERS} that can run
+ * judges the diff against the file, if any. The last classification is reused while the change, the file, and the
+ * built-in defaults are the same, which `key` names.
  */
 export async function classify(input: Classifying): Promise<{ key: string; value: Classified }> {
 	const { root, baseSha, change, changed } = input;
@@ -2020,14 +2111,13 @@ export async function classify(input: Classifying): Promise<{ key: string; value
 	// And the diff's form, so a tier set from a diff the head's attributes could shape is set again, and the built-in
 	// defaults, so a release that changes them classifies every head again.
 	const { empty } = change;
-	const defaults = [ALWAYS_HIGH, DEFAULT_CLASSES];
+	const defaults = [ALWAYS_HIGH, DEFAULT_CLASSES, PLANS];
 	const key = digest(JSON.stringify([change.mergeBase, change.head, text, changed, empty, DIFF_FLAGS, defaults]));
 	if (input.saved?.key === key) return { key, value: { ...input.saved.value, riskFile, usage: [] } };
 	if (input.savedOnly)
 		throw new ReviewInputError(
 			`no round classified ${change.head} from this base with this quest's diff; review it before accepting its findings`,
 		);
-	const set = (value: Omit<Classified, "usage" | "riskFile">) => ({ key, value: { ...value, riskFile, usage: [] } });
 	const file = text === null ? null : parseRiskFile(text);
 	if (file !== null && file.problems.length > 0)
 		throw new ReviewInputError(`the base's ${RISK_FILE} cannot be read: ${file.problems.join("; ")}`);
@@ -2037,14 +2127,14 @@ export async function classify(input: Classifying): Promise<{ key: string; value
 		const { path, rule } = hits[0]!;
 		const more = hits.length > 1 ? `, as are ${hits.length - 1} more of its paths` : "";
 		const reason = `it changes ${path}, which is always high${more}: ${rule.reason}`;
-		return set({ tier: "high", reason, by: { kind: "paths" }, class: null });
+		return { key, value: { tier: "high", reason, by: { kind: "paths" }, class: null, riskFile, usage: [] } };
 	}
+	// A plan an unreviewed change adds cascades into the work agents start from it, so adding to plans is never low,
+	// and only a change that removes plan text keeps the classes, which a low change needs to land on its own.
+	const planned = addedPlans(root, empty, range);
+	const floor: Tier = planned.length > 0 ? "medium" : "low";
 	// Only the classes whose scope holds every changed path, so the classifier cannot widen one.
-	const offered = classesFor(offeredClasses(file), changed);
-	if (text === null && offered.length === 0) {
-		const reason = `the base has no ${RISK_FILE} to name what is always high or customer-facing, so every change is medium`;
-		return set({ tier: "medium", reason, by: { kind: "default" }, class: null });
-	}
+	const offered = floor === "low" ? classesFor(offeredClasses(file), changed) : [];
 	const classes = offered.map((each) => each.name);
 
 	// With no attributes and every file as text, so the head can hide none of its hunks by marking them binary.
@@ -2069,7 +2159,13 @@ export async function classify(input: Classifying): Promise<{ key: string; value
 		// their length, so it goes down the file path too.
 		const bytes = stat.length + size <= DIFF_BUDGET ? readFileSync(patchFile) : null;
 		const patch = bytes && !bytes.includes(0) ? text8(bytes) : null;
-		const prompt = classifyPrompt(change, { sha: baseSha, text }, { stat, patch, file: patchFile, size }, offered);
+		const prompt = classifyPrompt(
+			change,
+			{ sha: baseSha, text },
+			{ stat, patch, file: patchFile, size },
+			offered,
+			planned,
+		);
 		answer = await ask(CLASSIFIERS, {
 			spent,
 			readable: scratch,
@@ -2078,11 +2174,11 @@ export async function classify(input: Classifying): Promise<{ key: string; value
 			env: input.env,
 			signal: input.signal,
 			instructions: CLASSIFY_INSTRUCTIONS,
-			schema: classSchema(classes),
+			schema: classSchema(classes, floor),
 			prompt,
 			who: "classifier",
 			task: "set the risk tier",
-			parse: (value) => classed(value, classes, "the classifier's reply"),
+			parse: (value) => classed(value, classes, floor, "the classifier's reply"),
 		});
 	} finally {
 		rmSync(scratch, { recursive: true, force: true });
@@ -2259,6 +2355,7 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 		: await fetchBase(root, options.base);
 	const { branch: baseBranch } = parseBase(root, baseRef);
 	const branch = sessionBranch(root, options.branch, baseBranch);
+	await deps.posting?.(root, baseRef, branch);
 	// The PR's own record names its size and implementers, so the author passes neither as a flag.
 	const needed = options.size === undefined || (options.exclude ?? []).length === 0;
 	const record = needed ? await deps.models?.(root, baseRef, branch) : undefined;
@@ -2377,11 +2474,20 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 	// `--new` drops the sessions, never what the branch already settled.
 	const past = saved?.history ?? [];
 	const { usage: _, riskFile: __, ...value } = classified.value;
-	const state = (kept: Session[], tallies: Tally[], risk: Risk, history: Past[]): State => ({
+	// What a failed post left, which `--new` keeps too.
+	const carried = saved?.pending ?? [];
+	const state = (
+		kept: Session[],
+		tallies: Tally[],
+		risk: Risk,
+		history: Past[],
+		pending: FindingOutcome[] = [],
+	): State => ({
 		branch,
 		sessions: kept,
 		tallies,
 		history,
+		...(pending.length > 0 && { pending }),
 		classified: { key: classified.key, value },
 		// A riskier change than the one the maintainer judged ends their override, unless it is riskier only up to the
 		// override's own tier, which agrees with it.
@@ -2420,6 +2526,27 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 		);
 		// An acceptance GitHub does not attest has not happened, so the caller saves it only once it is.
 		const kept = [...past, ...accepted.filter((each) => !past.some(same(each)))];
+		// Kixel Quest stores no outcome of an accepted finding, so it keeps one left to later work: on the PR this run
+		// posts the rounds to, which holds them even when an earlier post failed, and on a since-replaced PR that
+		// holds them too.
+		const outcomes = (at: PostedOn) => [
+			...carried,
+			...last.flatMap((round) => {
+				const posted = sessions.find((session) => session.last === round)?.posted;
+				const prs = posted === undefined || samePull(posted, at) ? [at] : [at, posted];
+				return prs.flatMap((pr) =>
+					round.findings.map((_, i) => ({
+						...pr,
+						harness: round.reviewer,
+						session: round.session,
+						round: round.round,
+						finding: i + 1,
+						outcome: "deferred" as const,
+						reason: options.accept!,
+					})),
+				);
+			}),
+		];
 		return {
 			rounds: last.map((round) => ({ ...round, usage: [], unchanged: true })),
 			tallies,
@@ -2430,12 +2557,26 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 			base,
 			sized,
 			accepted: options.accept,
+			outcomes,
+			// Run once the acceptance is attested, which is after its post.
 			remember: () => save(statePath, state(sessions, tallies, risk, kept)),
 		};
 	}
 	if (!named && !settling && risk.tier === "low") {
-		save(statePath, state(sessions, tallies, risk, past));
-		return { rounds: [], tallies, risk, skipped: [], branch, head, base, sized };
+		save(statePath, state(sessions, tallies, risk, past, carried));
+		// No round runs, but what an earlier run's failed post settled still goes with this one.
+		return {
+			rounds: [],
+			tallies,
+			risk,
+			skipped: [],
+			branch,
+			head,
+			base,
+			sized,
+			outcomes: () => carried,
+			posted: () => save(statePath, state(sessions, tallies, risk, past)),
+		};
 	}
 
 	const skipped: Skip[] = [];
@@ -2524,9 +2665,59 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 		past,
 		done.map((each) => each.round),
 	);
-	save(statePath, state([...done.map((each) => each.session), ...kept], after, risk, history));
+	const outcomes = [...carried, ...done.flatMap((each, i) => settledOutcomes(seats[i]!, each.round))];
+	// Until a post carries them, the branch keeps the outcomes, for the next run to post.
+	const store = (at: PostedOn | null) =>
+		save(
+			statePath,
+			state(
+				[...done.map(({ session }) => (at === null ? session : { ...session, posted: at })), ...kept],
+				after,
+				risk,
+				history,
+				at === null ? outcomes : [],
+			),
+		);
+	store(null);
 	const rounds = done.map((each) => each.round);
-	return { rounds, tallies: after, risk, skipped, branch, head, base, sized };
+	return {
+		rounds,
+		tallies: after,
+		risk,
+		skipped,
+		branch,
+		head,
+		base,
+		sized,
+		outcomes: () => outcomes,
+		posted: (at) => store(at),
+	};
+}
+
+/**
+ * The outcomes of the findings `round` settled in its seat's saved session, which raised them, for the PR that
+ * session's round was posted on, unless it never reached Kixel Quest: each fixed or refuted one, numbered within its
+ * round from 1. A repeated round settles nothing new; the branch keeps what its first run's failed post carried.
+ */
+function settledOutcomes(seat: Seat, round: Round): FindingOutcome[] {
+	const raised = seat.session;
+	const at = raised?.posted;
+	if (round.unchanged || at === undefined) return [];
+	return (round.earlier?.findings ?? []).flatMap(({ number, disposition, reason }) =>
+		disposition === "open"
+			? []
+			: [
+					{
+						...at,
+						harness: raised!.last.reviewer,
+						session: raised!.last.session,
+						round: raised!.last.round,
+						finding: number - seat.first + 1,
+						outcome: disposition,
+						reason,
+					},
+				],
+	);
 }
 
 /** Whether `past` is finding `a` settled before: the same title at the same file. */

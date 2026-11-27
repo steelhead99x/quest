@@ -51,6 +51,13 @@ Narrowed 2026-11-25 (maintainer, closing
 [kixel-ai/quest#891](https://github.com/kixel-ai/quest/pull/891)): ✅ "keep it
 simple. Claude writes, codex+claude reviews" (rejected: Codex, then Gemini, as
 fallback writers; Gemini as an opt-in reviewer). Quest runs no Antigravity.
+Amended 2026-11-26 (maintainer, `/quest-plan`): ✅ Routine writes stay on Claude
+and routine reviews stay on Codex+Claude, while [Stuck-agent advisor](/quest/m0/advise.md)
+adds read-only `quest advise` (`gemini-4-neon` via `agy` → `gpt-6.2-astra` via
+`codex` → `claude-fable-5-2` via `claude`) for stuck agents, and
+the routine advisor A/B ([kixel-ai/quest#934](https://github.com/kixel-ai/quest/pull/934)) runs Claude `--advisor` writer
+A/B arms across `XS`–`XL` (rejected: `opencode` for Neon; T3-only advisor;
+skipping routine `--advisor` arms).
 
 Decided 2026-11-21 (maintainer, `/quest-plan` in
 [kixel-ai/kixel.quest#85](https://github.com/kixel-ai/kixel.quest/pull/85)),

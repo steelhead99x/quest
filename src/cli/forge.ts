@@ -35,7 +35,7 @@ import { type GitHubDependencies, reading } from "../github/client";
 import { GitHubForge } from "../github/forge";
 import { GitError } from "./git";
 import { pullRequest, type RemoteHost, readRemote, remoteHost } from "./github";
-import { kixelUrl, tokenFor, tokensPath } from "./tokens";
+import { kixelUrl, notSignedIn, tokenFor, tokensPath } from "./tokens";
 
 /** The variable that, set to `github`, reads GitHub even where Kixel Quest serves the repository. */
 export const FORGE = "QUEST_FORGE";
@@ -96,8 +96,7 @@ export function hostedForge(repository: Repository, deps: ForgeDependencies): Ki
 	if (deps.env[FORGE] === "github") throw new Error(`Kixel Quest hosts ${name}, so ${FORGE}=github cannot reach it`);
 	const url = kixelUrl(deps.env);
 	const token = tokenFor(url, deps.env);
-	if (token === null)
-		throw new Error(`Kixel Quest (${url}) hosts ${name}; pair a token with it in ${tokensPath(deps.env)}`);
+	if (token === null) throw new Error(`Kixel Quest hosts ${name}, but ${notSignedIn(url)}`);
 	return new KixelQuestForge(new KixelQuest(url, token, deps, true));
 }
 

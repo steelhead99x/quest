@@ -20,6 +20,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
 	admit,
 	alive,
+	busyCpus,
+	CPU_SAMPLE_MS,
 	COMMAND_MEMORY,
 	claimDirectory,
 	direct,
@@ -37,7 +39,7 @@ import {
 	type Owner,
 	owner,
 	processStart,
-	room,
+	memoryRoom,
 	RECENT_MS,
 	SETTLE_MS,
 	job,
@@ -241,6 +243,104 @@ test("a running command that kept every CPU busy holds the host through a lull i
 	]);
 });
 
+/** A fake `/proc/stat` of `cpus` CPUs, whose aggregate line `advance` adds ticks to. */
+function procStat(cpus: number) {
+	const proc = tempDir();
+	const ticks = { user: 0, nice: 0, system: 0, idle: 0, iowait: 0, irq: 0, softirq: 0, steal: 0, guest: 0 };
+	const write = () => {
+		const line = (name: string) => `${name} ${Object.values(ticks).map(Math.round).join(" ")} 0\n`;
+		const each = Array.from({ length: cpus }, (_, cpu) => line(`cpu${cpu}`)).join("");
+		writeFileSync(join(proc, "stat"), `${line("cpu")}${each}intr 1 0\nprocs_running 90\n`);
+	};
+	write();
+	return {
+		proc,
+		/** Run the CPUs for `ms` at 100 ticks a second, busy `user` of the time and waiting on disk `iowait` of it. */
+		advance(ms: number, user: number, iowait = 0) {
+			const all = (ms / 1000) * 100 * cpus;
+			ticks.user += all * user;
+			// Guest time is counted in user time too.
+			ticks.guest += all * user;
+			ticks.iowait += all * iowait;
+			ticks.idle += all * (1 - user - iowait);
+			write();
+		},
+	};
+}
+
+test("busy CPUs leave out I/O wait, and are measured from samples every gate on the host shares", () => {
+	const { proc, advance } = procStat(4);
+	const file = join(tempDir(), "ledger", "cpu");
+	// The first caller only samples.
+	expect(busyCpus(proc, file, 0)).toBeUndefined();
+	// Three of four CPUs wait on disk, which a load average counts as load, and half of one is busy.
+	advance(CPU_SAMPLE_MS, 0.125, 0.75);
+	expect(busyCpus(proc, file, CPU_SAMPLE_MS)).toBeCloseTo(0.5);
+	// A sample less than CPU_SAMPLE_MS newer is not recorded, so another caller measures from the first.
+	advance(CPU_SAMPLE_MS / 2, 0.125, 0.75);
+	expect(busyCpus(proc, file, 1.5 * CPU_SAMPLE_MS)).toBeCloseTo(0.5);
+	expect(JSON.parse(readFileSync(file, "utf8")).map(({ at }: { at: number }) => at)).toEqual([0, CPU_SAMPLE_MS]);
+	// Measured over the last SETTLE_MS once samples reach that far back: 1.5 s at half a CPU, then two CPUs.
+	advance(SETTLE_MS - 1.5 * CPU_SAMPLE_MS, 0.5);
+	expect(busyCpus(proc, file, SETTLE_MS)).toBeCloseTo(1.55);
+	advance(SETTLE_MS, 0.7);
+	expect(busyCpus(proc, file, 2 * SETTLE_MS)).toBeCloseTo(2.8);
+	// Less than one idle CPU may hide any amount of runnable work.
+	advance(SETTLE_MS, 0.76);
+	expect(busyCpus(proc, file, 3 * SETTLE_MS)).toBe(Infinity);
+	// Samples older than twice that, or dated in the future by a clock stepped backward, are dropped.
+	advance(3 * SETTLE_MS, 0.5);
+	expect(busyCpus(proc, file, 6 * SETTLE_MS)).toBeUndefined();
+	expect(busyCpus(proc, file, SETTLE_MS)).toBeUndefined();
+	// A file cut short reads as no samples.
+	writeFileSync(file, "[");
+	expect(busyCpus(proc, file, SETTLE_MS + CPU_SAMPLE_MS)).toBeUndefined();
+});
+
+test("busy CPUs are measured from the sample nearest SETTLE_MS old", () => {
+	const { proc, advance } = procStat(4);
+	const file = join(tempDir(), "cpu");
+	expect(busyCpus(proc, file, 0)).toBeUndefined();
+	advance(SETTLE_MS, 0);
+	expect(busyCpus(proc, file, SETTLE_MS)).toBe(0);
+	// Of samples 9.9 and 4.9 seconds old, the younger spans only the burst since.
+	advance(SETTLE_MS - 100, 0.9);
+	expect(busyCpus(proc, file, 2 * SETTLE_MS - 100)).toBe(Infinity);
+});
+
+test("a host whose CPUs wait on disk admits, and one whose CPUs are all busy waits", async () => {
+	const { proc, advance } = procStat(4);
+	const file = join(tempDir(), "cpu");
+	const limits = { load: 4, memory: GiB };
+	const state = { now: 0, load: 0, memory: Infinity };
+	// Half a CPU busy and three waiting on disk, which a load average counts as load.
+	const events: string[] = [];
+	const host = testHost(tempDir(), state, events);
+	host.load = () => busyCpus(proc, file, state.now);
+	host.sleep = async (ms) => {
+		events.push(`sleep ${ms}`);
+		state.now += ms;
+		advance(ms, 0.125, 0.75);
+	};
+	// A build admitted long ago still runs, so the load is the gate's to wait out.
+	const build = { id: "build", at: -10 * RECENT_MS, ...me };
+	expect(host.publish(host.ledger(), [build])).toBe(true);
+	// With no sample yet, the first caller waits one sample for it, then starts at once.
+	await admit(limits, host, signal, (reason) => events.push(reason));
+	expect(events).toEqual([`sleep ${CPU_SAMPLE_MS}`]);
+	// A compile burst keeps every CPU busy, so the next waits until a CPU frees.
+	state.now += SETTLE_MS;
+	advance(SETTLE_MS, 0.99);
+	events.length = 0;
+	await admit(limits, host, signal, (reason) => events.push(reason));
+	expect(events).toEqual(["load", `sleep ${SETTLE_MS}`]);
+	expect(host.ledger().admissions).toEqual([
+		build,
+		{ id: expect.any(String), at: CPU_SAMPLE_MS, ...me },
+		{ id: expect.any(String), at: CPU_SAMPLE_MS + 2 * SETTLE_MS, ...me },
+	]);
+});
+
 /** Run `measure` over `busy`, the CPUs its command keeps busy over each SETTLE_MS, undefined before its scope exists; returns what it publishes. */
 async function measured(busy: (number | undefined)[]) {
 	const state = { now: 0, load: 0, memory: Infinity };
@@ -249,6 +349,11 @@ async function measured(busy: (number | undefined)[]) {
 	let usage: number | undefined;
 	let total = 0;
 	host.usage = () => usage;
+	let samples = 0;
+	host.load = () => {
+		samples++;
+		return 0;
+	};
 	const published: string[] = [];
 	const publish = host.publish;
 	host.publish = (base, admissions) => {
@@ -268,7 +373,7 @@ async function measured(busy: (number | undefined)[]) {
 		usage = total;
 	};
 	await measure(host, { id: "build", unit: "quest-gate-build.scope" }, stop.signal);
-	return { published, admissions: host.ledger().admissions };
+	return { published, admissions: host.ledger().admissions, samples };
 }
 
 test("a gate records the most CPUs its command kept busy in the last minute", async () => {
@@ -281,8 +386,10 @@ test("a gate records the most CPUs its command kept busy in the last minute", as
 });
 
 test("a gate records its command's burst before the first sample", async () => {
-	const { published } = await measured([4, ...Array(RECENT_MS / SETTLE_MS).fill(0)]);
+	const { published, samples } = await measured([4, ...Array(RECENT_MS / SETTLE_MS).fill(0)]);
 	expect(published).toEqual([`4 at ${SETTLE_MS}`, `0 at ${SETTLE_MS + RECENT_MS}`]);
+	// Each sample also samples the host's CPUs, for gates arriving meanwhile.
+	expect(samples).toBe(1 + RECENT_MS / SETTLE_MS);
 });
 
 test("a gate records its admission again once another gate drops it, even while its cores hold", async () => {
@@ -343,20 +450,20 @@ test("a measured command reserves only what its peak adds beyond what available 
 	host.footprint = () => footprint;
 	// At its peak, a build admitted long ago adds nothing to what available memory shows.
 	host.publish(host.ledger(), [measuredBuild(-10 * RECENT_MS)]);
-	expect(room(limits, host, 0)).toBeNull();
+	expect(memoryRoom(limits, host, 0)).toBe(true);
 	footprint = { current: 8 * GiB, peak: 10 * GiB };
-	expect(room(limits, host, 0)).toBe("memory");
+	expect(memoryRoom(limits, host, 0)).toBe(false);
 	// A recent one, not yet reflected, reserves one command's memory, less what it holds beyond that.
 	footprint = { current: 3 * GiB, peak: 3 * GiB };
 	host.publish(host.ledger(), [measuredBuild(0)]);
-	expect(room(limits, host, 0)).toBeNull();
+	expect(memoryRoom(limits, host, 0)).toBe(true);
 	// One its gate has not measured yet reserves a whole command's memory, as a kernel without peaks leaves it.
 	host.publish(host.ledger(), [{ id: "build", at: 0, ...me }]);
-	expect(room(limits, host, 0)).toBe("memory");
+	expect(memoryRoom(limits, host, 0)).toBe(false);
 	// So does one whose scope is gone.
 	host.publish(host.ledger(), [measuredBuild(0)]);
 	host.footprint = () => undefined;
-	expect(room(limits, host, 0)).toBe("memory");
+	expect(memoryRoom(limits, host, 0)).toBe(false);
 	// A cgroup other than a gate scope's reads as a version cut short.
 	const outside = `${buildGroup}/../../../../etc/quest-gate-x.scope`;
 	writeFileSync(join(directory, "100"), JSON.stringify([{ id: "build", at: 0, ...me, group: outside }]));
@@ -1275,10 +1382,13 @@ describe.runIf(process.platform === "linux")("a systemd scope", () => {
 		const pid = join(dir, "pid");
 		const args = join(dir, "args");
 		mkdirSync(bin);
-		writeFileSync(join(bin, "systemd-run"), `#!/bin/sh\necho $$ > ${quote(pid)}\nexec sleep 1000\n`);
+		// The test polls for these files, so each appears only once written whole.
+		const write = (file: string, words: string) =>
+			`echo ${words} > ${quote(`${file}.tmp`)} && mv ${quote(`${file}.tmp`)} ${quote(file)}`;
+		writeFileSync(join(bin, "systemd-run"), `#!/bin/sh\n${write(pid, "$$")}\nexec sleep 1000\n`);
 		writeFileSync(
 			join(bin, "systemctl"),
-			`#!/bin/sh\necho $$ > ${quote(join(dir, "cancel"))}\necho "$@" > ${quote(args)}\n${cancels ? `kill "$(cat ${quote(pid)})"` : "exec sleep 1000"}\n`,
+			`#!/bin/sh\n${write(join(dir, "cancel"), "$$")}\n${write(args, '"$@"')}\n${cancels ? `kill "$(cat ${quote(pid)})"` : "exec sleep 1000"}\n`,
 		);
 		chmodSync(join(bin, "systemd-run"), 0o755);
 		chmodSync(join(bin, "systemctl"), 0o755);

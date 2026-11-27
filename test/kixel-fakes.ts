@@ -3,7 +3,7 @@
 // as it would on Kixel Quest, and answers refusals with 409 as Kixel Quest does.
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
 	type Claim,
@@ -17,6 +17,7 @@ import {
 	parseForgeRequest,
 	withoutHandBack,
 } from "../src/core";
+import { tokensPath } from "../src/cli/tokens";
 
 export const KIXEL = "http://localhost:8787";
 export const KIXEL_TOKEN = "kq-token";
@@ -48,9 +49,17 @@ export interface KixelPull {
 /** The env a CLI run reads: the fake's URL, and a config directory pairing its token with it. */
 export function kixelEnv(): Record<string, string> {
 	const config = mkdtempSync(join(tmpdir(), "quest-kixel-"));
-	mkdirSync(join(config, "quest"));
-	writeFileSync(join(config, "quest", "records.json"), JSON.stringify({ [KIXEL]: KIXEL_TOKEN }));
+	writeTokens({ XDG_CONFIG_HOME: config }, { [KIXEL]: KIXEL_TOKEN });
 	return { QUEST_KIXEL_URL: KIXEL, XDG_CONFIG_HOME: config };
+}
+
+/** Sign the user `env` names in to each Kixel Quest URL with its token, replacing every earlier sign-in. */
+export function writeTokens(env: NodeJS.ProcessEnv, tokens: Record<string, string>): void {
+	mkdirSync(dirname(tokensPath(env)), { recursive: true });
+	const logins = Object.fromEntries(
+		Object.entries(tokens).map(([url, token]) => [url, { token, transcripts: false }]),
+	);
+	writeFileSync(tokensPath(env), JSON.stringify(logins));
 }
 
 export class FakeKixelQuest {
@@ -281,3 +290,52 @@ export class FakeKixelQuest {
 }
 
 class Refused extends Error {}
+
+/**
+ * Kixel Quest's `quest login` endpoints, as its Worker answers them: `/login/device` gives a code for a host's label,
+ * and `/login/token` answers `authorization_pending` until `approve` runs, then issues the code's token once.
+ */
+export class FakeLogin {
+	/** The label each code was asked for. */
+	readonly labels: string[] = [];
+	/** How many times a host asked for its token. */
+	polls = 0;
+	#approved = new Set<string>();
+	#issued = 0;
+
+	constructor(
+		readonly url = KIXEL,
+		readonly code: Partial<Record<"verification_uri" | "expires_in" | "interval", unknown>> = {},
+	) {}
+
+	/** Approve every code given so far, as a signed-in person entering it would. */
+	approve(): void {
+		for (let n = 1; n <= this.labels.length; n++) this.#approved.add(`device-${n}`);
+	}
+
+	readonly fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+		const path = new URL(String(input)).pathname;
+		const body = JSON.parse(String(init?.body)) as Record<string, string>;
+		const json = (value: unknown, status = 200) =>
+			new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+		if (init?.method !== "POST") return json({ error: "invalid_request" }, 405);
+		if (path === "/login/device") {
+			if (typeof body.label !== "string" || body.label === "") return json({ error: "invalid_request" }, 400);
+			this.labels.push(body.label);
+			return json({
+				device_code: `device-${this.labels.length}`,
+				user_code: "BCDF-GHJK",
+				verification_uri: `${this.url}/login`,
+				expires_in: 600,
+				interval: 5,
+				...this.code,
+			});
+		}
+		if (path === "/login/token") {
+			this.polls++;
+			if (!this.#approved.delete(body.device_code!)) return json({ error: "authorization_pending" }, 400);
+			return json({ access_token: `issued-${++this.#issued}`, token_type: "Bearer" });
+		}
+		return json({ error: "not found" }, 404);
+	}) as typeof fetch;
+}

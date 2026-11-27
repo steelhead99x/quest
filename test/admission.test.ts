@@ -7,8 +7,11 @@ const GiB = 2 ** 30;
 const signal = new AbortController().signal;
 const me = { pid: process.pid, start: processStart(process.pid) };
 
-/** A host of 8 CPUs with real ledgers, and load, memory, a clock, and process liveness the test controls. */
-function host() {
+/**
+ * A host of 8 CPUs with real ledgers, and load, memory, a clock, and process liveness the test
+ * controls; with `load`, agents also wait for load and the gate's queue, as on macOS.
+ */
+function host(load = false) {
 	const state = {
 		now: 10 * PENDING_MS,
 		load: 0,
@@ -33,6 +36,7 @@ function host() {
 	const deps: AdmissionDependencies = {
 		limits: { load: 8, memory: 4 * GiB },
 		gate: ledger(tempDir()),
+		load,
 		agents: ledger(tempDir()),
 		notice: (text) => notices.push(text),
 	};
@@ -51,10 +55,10 @@ function host() {
 	return { state, sleeps, notices, deps, gated, atOnce };
 }
 
-test("a fan-out fills the host's headroom, and each agent frees its share once it would have built", async () => {
+test("a fan-out fills the host's memory, and each agent frees its share once it would have built", async () => {
 	const { state, deps, sleeps, notices, atOnce } = host();
-	state.load = 5;
-	// Load 5 plus 0, 1, and 2 agents not yet building stays under 8 CPUs; a fourth would not.
+	state.memory = 15 * GiB;
+	// 15 GiB less 0, 1, and 2 agents not yet building still leaves one command's 4 GiB; a fourth would not.
 	expect([await atOnce(), await atOnce(), await atOnce(), await atOnce()]).toEqual([true, true, true, false]);
 	// The fourth waits as the gate's callers do, and starts once the first three no longer count.
 	state.stop = Infinity;
@@ -63,7 +67,7 @@ test("a fan-out fills the host's headroom, and each agent frees its share once i
 	expect(new Set(sleeps)).toEqual(new Set([SETTLE_MS]));
 	// Each waiting call names what it waits for once, however long it waits.
 	expect(notices.filter((text) => text.startsWith("waiting"))).toEqual(
-		Array(2).fill("waiting for the load average to fall before starting an agent"),
+		Array(2).fill("waiting for free memory before starting an agent"),
 	);
 });
 
@@ -73,8 +77,32 @@ test("each agent not yet building takes one command's memory", async () => {
 	expect([await atOnce(), await atOnce(), await atOnce()]).toEqual([true, true, false]);
 });
 
-test("a queued or running gated command holds agents back as it would another command", async () => {
-	const { state, gated, atOnce, notices } = host();
+test("agents start whatever the load and the gate's queue, while memory has room", async () => {
+	const { state, gated, atOnce } = host();
+	state.load = 40;
+	state.memory = 9 * GiB;
+	// Gated commands queued, and running ones that kept every CPU busy, hold back only gated work.
+	gated([
+		{ id: "build", at: state.now - RECENT_MS, ...me, cores: 8 },
+		{ id: "queued", at: state.now, ...me, queued: true },
+	]);
+	expect(await atOnce()).toBe(true);
+	// A recent gated admission takes one command's memory, as the gate counts it.
+	state.now += PENDING_MS;
+	gated([{ id: "test", at: state.now, ...me }]);
+	expect([await atOnce(), await atOnce()]).toEqual([true, false]);
+});
+
+test("on macOS, agents fill the load's headroom as the gate's callers would", async () => {
+	const { state, notices, atOnce } = host(true);
+	state.load = 5;
+	// Load 5 plus 0, 1, and 2 agents not yet building stays under 8 CPUs; a fourth would not.
+	expect([await atOnce(), await atOnce(), await atOnce(), await atOnce()]).toEqual([true, true, true, false]);
+	expect(notices).toEqual(["waiting for CPU load to fall before starting an agent"]);
+});
+
+test("on macOS, a queued or running gated command holds agents back as it would another command", async () => {
+	const { state, gated, atOnce, notices } = host(true);
 	state.load = 6;
 	// One command queued for the gate: an arrival would wait behind it only once the host is short.
 	gated([{ id: "queued", at: state.now, ...me, queued: true }]);
@@ -85,27 +113,16 @@ test("a queued or running gated command holds agents back as it would another co
 	state.now += PENDING_MS;
 	gated([{ id: "build", at: state.now - RECENT_MS, ...me, cores: 8 }]);
 	expect(await atOnce()).toBe(false);
-	// A recent gated admission counts once, as the gate counts it.
-	gated([{ id: "build", at: state.now, ...me, cores: 1 }]);
-	state.load = 6;
-	expect([await atOnce(), await atOnce()]).toEqual([true, false]);
-});
-
-test("a host loaded by work no gate holds still starts one agent at a time", async () => {
-	const { state, atOnce } = host();
+	// A host loaded by work no gate holds still starts one agent at a time.
+	state.now += PENDING_MS;
+	gated([]);
 	state.load = 40;
 	expect([await atOnce(), await atOnce()]).toEqual([true, false]);
-	state.now += PENDING_MS;
-	expect(await atOnce()).toBe(true);
-	// Memory is never waived.
-	state.now += PENDING_MS;
-	state.memory = GiB;
-	expect(await atOnce()).toBe(false);
 });
 
 test("an agent whose launcher exited no longer counts, and one still running counts only while it may yet build", async () => {
 	const { state, atOnce } = host();
-	state.load = 7;
+	state.memory = 4 * GiB;
 	expect([await atOnce(4242), await atOnce()]).toEqual([true, false]);
 	state.dead.add(4242);
 	expect(await atOnce()).toBe(true);
@@ -117,7 +134,7 @@ test("an agent whose launcher exited no longer counts, and one still running cou
 
 test("an agent dated in the future by a clock stepped backward counts from now, and still expires", async () => {
 	const { state, deps, sleeps } = host();
-	state.load = 7;
+	state.memory = 4 * GiB;
 	deps.agents.publish(deps.agents.ledger(), [{ id: "ahead", at: state.now + 12 * PENDING_MS }]);
 	await admit(deps, signal);
 	expect(sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(PENDING_MS);

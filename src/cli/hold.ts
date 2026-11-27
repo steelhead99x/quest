@@ -13,7 +13,6 @@ import {
 	type Method,
 	type PullRequest,
 	Refusal,
-	recordedRisk,
 	withoutHandBack,
 } from "../core";
 import { cleanAutoMergeRefusal, immediateMerge, queueHead } from "../github/merge";
@@ -158,14 +157,12 @@ export async function land(pr: PullRequest, request: LandRequest, deps: GitHubDe
 	open(snapshot);
 	current(snapshot);
 	unheld(snapshot, undefined, deps.now());
-	readableRisk(snapshot);
 	// The policy below is decided for the base read above; reread before landing, since a retarget decides nothing.
 	const unchanged = async () => {
 		const fresh = await labels.read();
 		open(fresh);
 		current(fresh);
 		unheld(fresh, undefined, deps.now());
-		readableRisk(fresh);
 		if (fresh.base !== snapshot.base) {
 			throw new Refusal(`${snapshot.url} was retargeted from ${snapshot.base} to ${fresh.base}; land it again`);
 		}
@@ -174,7 +171,7 @@ export async function land(pr: PullRequest, request: LandRequest, deps: GitHubDe
 	};
 	await passing(labels.github, pr, snapshot.url, sha);
 	await unsignaled(labels.github, pr, snapshot.url, sha);
-	const unreviewed = await unreviewedHigh(labels.github, { ...pr, base: snapshot.base }, sha, snapshot.body);
+	const unreviewed = await unreviewedHigh(labels.github, { ...pr, base: snapshot.base }, sha);
 	if (unreviewed !== null)
 		throw new Refusal(`${snapshot.url} head ${unreviewed}; run quest review on it, then land it again`);
 	const findings = await request.check({
@@ -265,7 +262,6 @@ export async function land(pr: PullRequest, request: LandRequest, deps: GitHubDe
 		const fresh = await labels.read();
 		current(fresh);
 		unheld(fresh, undefined, deps.now());
-		readableRisk(fresh);
 		if (
 			fresh.state !== "OPEN" ||
 			fresh.draft ||
@@ -413,13 +409,6 @@ function open(snapshot: Snapshot): void {
 	if (snapshot.state !== "OPEN") {
 		throw new Refusal(`${snapshot.url} is ${snapshot.state.toLowerCase()}; a push now would bring its branch back`);
 	}
-}
-
-/** Refuse a body whose `## Review` risk record does not parse, so no reader can mistake its tier. */
-function readableRisk(snapshot: Snapshot): void {
-	const risk = recordedRisk(snapshot.body);
-	if (risk !== null && "malformed" in risk)
-		throw new Refusal(`${snapshot.url}: ${risk.malformed}; rerun quest review to rewrite it, then land it again`);
 }
 
 /**

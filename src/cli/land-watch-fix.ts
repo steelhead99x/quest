@@ -820,12 +820,7 @@ async function requeue(
 	const unreviewed =
 		held.signals.length > 0
 			? null
-			: await unreviewedHigh(
-					github,
-					{ owner: owner!, repo: repo!, number, base },
-					head,
-					typeof pull.body === "string" ? pull.body : "",
-				);
+			: await unreviewedHigh(github, { owner: owner!, repo: repo!, number, base }, head);
 	if (held.signals.length > 0 || unreviewed !== null) {
 		// A workflow may have queued the head while the checks above ran, so act on the PR as it is now.
 		pull = await readPull(github, id);

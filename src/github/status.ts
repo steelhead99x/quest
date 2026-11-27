@@ -225,11 +225,9 @@ function riskFileMoved(recorded: ReturnType<typeof recordedRisk>, riskFile: stri
 	const now = riskFileId(riskFile);
 	if (recorded.riskFile === now) return null;
 	const was =
-		recorded.riskFile === null
-			? "names no risk file"
-			: recorded.riskFile === "none"
-				? "was classified when the base had no RISK.md"
-				: `was classified against RISK.md ${recorded.riskFile}`;
+		recorded.riskFile === "none"
+			? "was classified when the base had no RISK.md"
+			: `was classified against RISK.md ${recorded.riskFile}`;
 	const is = now === "none" ? "the base has none" : `the base's is ${now}`;
 	return `${was}, but ${is}, so it covers the head no longer: run quest review again`;
 }

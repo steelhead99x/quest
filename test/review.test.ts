@@ -13,7 +13,7 @@ import { basename, dirname, join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { REVIEWERS, weaker } from "../src/cli/models";
-import { type Class, DEFAULT_CLASSES, REFERENCE_LINE, recordedRisk } from "../src/core";
+import { type Class, DEFAULT_CLASSES, REFERENCE_LINE, type ReviewUpload, parseReviews } from "../src/core";
 import {
 	type Finding,
 	type Round,
@@ -25,6 +25,7 @@ import {
 	ask,
 	authored,
 	baseInstructions,
+	classed,
 	claudeFlags,
 	codexFlags,
 	nextStep,
@@ -39,15 +40,17 @@ import {
 	verdict,
 } from "../src/cli/review";
 import { runsFromCheckout, runsFromHead } from "../src/cli/own-build";
-import { withReview } from "../src/cli/review-record";
 import { implementer, recorded, sameModel } from "../src/cli/models-record";
 import { tempDir } from "./fixture";
+import { writeTokens } from "./kixel-fakes";
 import {
 	CLAUDE_LOGGED_OUT,
 	CODEX_LOGGED_OUT,
 	FINDING,
+	KIXEL,
 	type Call,
 	at,
+	classified,
 	effortOf,
 	fakes,
 	git,
@@ -233,6 +236,7 @@ fakes("--exclude-model avoids each model it names, and every model weaker than i
 
 fakes("a missing or logged-out reviewer CLI with no reviewer after it is an outage", async () => {
 	const s = setup();
+	await classified(s);
 	// Only git is on PATH, so no codex install outside the fakes is found either.
 	const only = join(s.bin, "..", "git-only");
 	mkdirSync(only);
@@ -243,6 +247,7 @@ fakes("a missing or logged-out reviewer CLI with no reviewer after it is an outa
 	expect(missing.stderr).toContain("codex is not installed");
 
 	const t = setup();
+	await classified(t);
 	vi.stubEnv("FAKE_LOGGED_OUT", "1");
 	const out = await quest("--root", t.repo, "review");
 	expect(out.code).toBe(3);
@@ -265,6 +270,7 @@ fakes.each([
 	"a logged-out error names the profile its status check read (host %s, %s, %s=%s)",
 	async (host, variable, flag, value, message) => {
 		const s = setup(host);
+		await classified(s);
 		vi.stubEnv(variable, "/work");
 		vi.stubEnv(flag, value);
 		const result = await quest("--root", s.repo, "review");
@@ -283,6 +289,7 @@ fakes.each([
 	"a login the API rejects fails as logged out, whatever the status check said (host %s, rejected in %s)",
 	async (host, variant, message) => {
 		const s = setup(host);
+		await classified(s);
 		vi.stubEnv("FAKE_REJECTED", variant);
 		const result = await quest("--root", s.repo, "review");
 		expect(result.stderr).toContain(message);
@@ -347,7 +354,6 @@ fakes("a reviewer's first turn that hit its usage limit after its session opened
 
 fakes("a seat cancelled by its sibling's usage limit queues no session but its own", async () => {
 	const s = setup();
-	moveBase(s.repo, (dir) => write(dir, "RISK.md", riskFile([])));
 	write(s.repo, "AGENTS.md", `HEAD-ROOT rule\n${REFERENCE_LINE}\n`);
 	git(s.repo, "commit", "-qam", "use Quest");
 	onGitHub(s.repo, []);
@@ -366,7 +372,6 @@ fakes("a seat cancelled by its sibling's usage limit queues no session but its o
 
 fakes("a seat cancelled by its sibling's usage limit still queues the session it had opened", async () => {
 	const s = setup();
-	moveBase(s.repo, (dir) => write(dir, "RISK.md", riskFile([])));
 	write(s.repo, "AGENTS.md", `HEAD-ROOT rule\n${REFERENCE_LINE}\n`);
 	git(s.repo, "commit", "-qam", "use Quest");
 	onGitHub(s.repo, []);
@@ -428,6 +433,7 @@ fakes.each([
 	["--effort", "high"],
 ])("a reviewer named with %s %s never falls through", async (flag, value) => {
 	const s = setup(null);
+	await classified(s);
 	vi.stubEnv("FAKE_FAILS", "codex");
 	vi.stubEnv("FAKE_LIMITED", "reset");
 	const result = await quest("--root", s.repo, "review", ...OPUS_WROTE, flag, value);
@@ -438,6 +444,7 @@ fakes.each([
 
 fakes("a failed turn whose reply only quotes a usage limit is no limit, so no other reviewer runs", async () => {
 	const s = setup();
+	await classified(s);
 	vi.stubEnv("FAKE_QUOTED", "1");
 	const result = await quest("--root", s.repo, "review", ...CLAUDE_REVIEWS);
 	expect(result.code).toBe(1);
@@ -447,6 +454,7 @@ fakes("a failed turn whose reply only quotes a usage limit is no limit, so no ot
 
 fakes("Codex reaches a gateway at OPENAI_BASE_URL, whose persistent 429 is the pool's usage limit", async () => {
 	const s = setup();
+	await classified(s);
 	vi.stubEnv("FAKE_LOGGED_OUT", "1");
 	vi.stubEnv("CODEX_API_KEY", "proxy-key");
 	vi.stubEnv("FAKE_LIMITED", "retried");
@@ -479,6 +487,7 @@ fakes.each([
 	"Codex sent to a gateway with no credential never gets the stored login (logged out: %j, credentials: %j)",
 	async (loggedOut, blank) => {
 		const s = setup();
+		await classified(s);
 		vi.stubEnv("FAKE_LOGGED_OUT", loggedOut);
 		vi.stubEnv("OPENAI_BASE_URL", "http://127.0.0.1:4000/v1");
 		vi.stubEnv("CODEX_API_KEY", blank);
@@ -502,6 +511,7 @@ fakes.each([
 	["CODEX_ACCESS_TOKEN", "gateway-token"],
 ])("a gateway's %s wins over Codex's stored login, which its status check never needs", async (name, value) => {
 	const s = setup();
+	await classified(s);
 	vi.stubEnv("OPENAI_BASE_URL", "http://127.0.0.1:4000/v1");
 	vi.stubEnv(name, value);
 	const result = await quest("--root", s.repo, "review");
@@ -516,6 +526,7 @@ fakes.each([
 
 fakes("a gateway that rejects Codex's key names the key and the gateway", async () => {
 	const s = setup();
+	await classified(s);
 	vi.stubEnv("OPENAI_BASE_URL", "http://127.0.0.1:4000/v1");
 	vi.stubEnv("CODEX_API_KEY", "gateway-key");
 	vi.stubEnv("FAKE_REJECTED", "turn");
@@ -528,6 +539,7 @@ fakes("a gateway that rejects Codex's key names the key and the gateway", async 
 
 fakes("a reviewer with no stored login reviews with the credential its CLI reads from the environment", async () => {
 	const s = setup();
+	await classified(s);
 	vi.stubEnv("FAKE_LOGGED_OUT", "1");
 	vi.stubEnv("CODEX_API_KEY", "codex-key");
 	vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "session-token");
@@ -542,6 +554,7 @@ fakes("a reviewer with no stored login reviews with the credential its CLI reads
 	}
 
 	const t = setup();
+	await classified(t);
 	vi.stubEnv("FAKE_LOGGED_OUT", "1");
 	vi.stubEnv("ANTHROPIC_API_KEY", "anthropic-key");
 	vi.stubEnv("CODEX_API_KEY", "codex-key");
@@ -580,6 +593,7 @@ fakes("a stored login wins over an environment credential, so a shell's key neve
 
 fakes("an environment credential the API rejects is named in the error", async () => {
 	const s = setup();
+	await classified(s);
 	vi.stubEnv("FAKE_LOGGED_OUT", "1");
 	vi.stubEnv("CODEX_API_KEY", "codex-key");
 	vi.stubEnv("FAKE_REJECTED", "turn");
@@ -590,6 +604,7 @@ fakes("an environment credential the API rejects is named in the error", async (
 
 fakes("a stored login the API rejects names the credential quest review strips beside it", async () => {
 	const s = setup();
+	await classified(s);
 	vi.stubEnv("ANTHROPIC_API_KEY", "anthropic-key");
 	vi.stubEnv("FAKE_REJECTED", "status");
 	const result = await quest("--root", s.repo, "review", "--harness", "claude");
@@ -628,9 +643,10 @@ fakes.each([
 		session: JSON.parse(first.stdout).rounds[0].session,
 	});
 	const calls = s.calls();
-	// Opus high reviews and reports, then resumes once; each run checks its login.
+	// Opus high reviews and reports, then resumes once; each run checks its login for Haiku's classifying and the review.
 	expect(at(calls, "high").map((c) => c.argv[0])).toEqual(["-p", "-p", "-p"]);
-	expect(calls.filter((c) => effortOf(c) === null)).toHaveLength(2);
+	expect(at(calls, "low").map((c) => c.argv[0])).toEqual(["-p", "-p"]);
+	expect(calls.filter((c) => effortOf(c) === null)).toHaveLength(4);
 	for (const call of calls) {
 		expect(call.env).toMatchObject({
 			ANTHROPIC_AUTH_TOKEN: "gateway-token",
@@ -658,6 +674,7 @@ fakes.each([
 	"a gateway with no credential never gets the stored login (logged out: %j, credentials: %j)",
 	async (loggedOut, blank) => {
 		const s = setup();
+		await classified(s);
 		vi.stubEnv("FAKE_LOGGED_OUT", loggedOut);
 		vi.stubEnv("ANTHROPIC_BASE_URL", "https://gateway.example");
 		vi.stubEnv("ANTHROPIC_API_KEY", blank);
@@ -724,6 +741,7 @@ fakes("a host-managed provider is dropped, and the review runs on the stored log
 
 fakes("a host-managed provider with no stored login fails as logged out", async () => {
 	const s = setup();
+	await classified(s);
 	vi.stubEnv("FAKE_LOGGED_OUT", "1");
 	vi.stubEnv("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "true");
 	vi.stubEnv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8317");
@@ -740,6 +758,7 @@ fakes("a host-managed provider with no stored login fails as logged out", async 
 
 fakes("a gateway credential the API rejects is named with the gateway", async () => {
 	const s = setup();
+	await classified(s);
 	vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "gateway-token");
 	vi.stubEnv("ANTHROPIC_BASE_URL", "https://gateway.example");
 	vi.stubEnv("FAKE_REJECTED", "status");
@@ -803,6 +822,7 @@ fakes("Claude gets no provider key over a stored login with no gateway or provid
 
 fakes("a provider's keys alone are no login, so the review stops before it starts", async () => {
 	const s = setup();
+	await classified(s);
 	for (const key of PROVIDER_KEYS) vi.stubEnv(key, "provider-key");
 	vi.stubEnv("FAKE_LOGGED_OUT", "1");
 	const result = await quest("--root", s.repo, "review", "--harness", "claude");
@@ -823,6 +843,7 @@ fakes("Claude gets a provider's keys while the provider is set", async () => {
 
 fakes("Codex keeps CODEX_CA_CERTIFICATE always, and CODEX_ACCESS_TOKEN without a stored login", async () => {
 	const s = setup();
+	await classified(s);
 	vi.stubEnv("CODEX_CA_CERTIFICATE", "/etc/gateway-ca.pem");
 	vi.stubEnv("CODEX_ACCESS_TOKEN", "agent-identity");
 	expect((await quest("--root", s.repo, "review")).code).toBe(0);
@@ -832,6 +853,7 @@ fakes("Codex keeps CODEX_CA_CERTIFICATE always, and CODEX_ACCESS_TOKEN without a
 	}
 
 	const t = setup();
+	await classified(t);
 	vi.stubEnv("FAKE_LOGGED_OUT", "1");
 	vi.stubEnv("CODEX_CA_CERTIFICATE", "/etc/gateway-ca.pem");
 	vi.stubEnv("CODEX_ACCESS_TOKEN", "agent-identity");
@@ -900,7 +922,6 @@ fakes("a detached checkout continues the session of the branch --branch names", 
 
 fakes("a detached checkout queues each session with the branch --branch names and its role", async () => {
 	const s = setup();
-	moveBase(s.repo, (dir) => write(dir, "RISK.md", riskFile([])));
 	write(s.repo, "AGENTS.md", `HEAD-ROOT rule\n${REFERENCE_LINE}\n`);
 	git(s.repo, "commit", "-qam", "use Quest");
 	onGitHub(s.repo, []);
@@ -989,14 +1010,18 @@ fakes("codex reviews read-only with the base's instructions, then reports in the
 	expect(result.code).toBe(0);
 	const head = git(s.repo, "rev-parse", "HEAD");
 	const base = git(s.repo, "rev-parse", "origin/main");
+	// The fixture's base has no RISK.md, which Haiku classifies against as it would an empty one.
+	const [classifier] = at(s.calls(), "low");
+	const session = classifier!.argv[classifier!.argv.indexOf("--session-id") + 1];
 	expect(result.stdout).toBe(
 		[
 			"size M default",
 			`base ${base} origin/main`,
 			`head ${head}`,
-			// The fixture's base has no RISK.md, so no model classifies the change.
-			"risk medium the base has no RISK.md to name what is always high or customer-facing, so every change is medium",
-			"classified medium default the base has no RISK.md to name what is always high or customer-facing, so every change is medium",
+			"risk medium It changes what the library returns.",
+			"classified medium model It changes what the library returns.",
+			`classifier claude claude-haiku-5-5 low ${session}`,
+			"usage classify input 40 cached 0 output 3",
 			"",
 			"reviewer codex gpt-6.2-sol high",
 			"session thread-1",
@@ -1144,6 +1169,7 @@ fakes("claude reviews read-only with the base's instructions, then reports in th
 	const s = setup();
 	// The rules travel inside the command's one double-quoted argument.
 	moveBase(s.repo, (dir) => write(dir, "REVIEW.md", 'Flag "magic" numbers \\ constants.\n'));
+	await classified(s);
 	const args = ["--harness", "claude", "--model", "opus", "--effort", "low", "--size", "XS", "--json"];
 	const result = await quest("--root", s.repo, "review", ...args);
 	expect(result.code).toBe(0);
@@ -1337,6 +1363,9 @@ fakes("a change to the applicable instructions starts a new session that weighs 
  * `upstream/widget`, whose root holds the quest tree, and the PRs are upstream's. Returns the PR bodies
  * each PATCH wrote.
  */
+/** What a run on GitHub alone prints, since `onGitHub` keeps the reads of a repository Kixel Quest serves there. */
+const OVERRIDDEN = `quest: QUEST_FORGE=github spends your GitHub quota on reads Kixel Quest (${KIXEL}) may serve; set it only to rerun a command Kixel Quest failed\n`;
+
 /** An open PR from `feature` into `main`, from `acme/widget` unless `head` names another repository. */
 type FakePull = { number: number; body: string | null; head?: string; sha?: string };
 function onGitHub(
@@ -1345,6 +1374,7 @@ function onGitHub(
 	fork = false,
 ): { body: string }[] & {
 	statuses: { sha: string; state: string; context: string; description: string; target_url: string }[];
+	posts: ReviewUpload[];
 } {
 	const local = git(repo, "remote", "get-url", "origin");
 	git(repo, "remote", "set-url", "origin", "https://github.com/acme/widget.git");
@@ -1352,6 +1382,7 @@ function onGitHub(
 	const owner = fork ? "upstream" : "acme";
 	const writes = Object.assign([] as { body: string }[], {
 		statuses: [] as { sha: string; state: string; context: string; description: string; target_url: string }[],
+		posts: [] as ReviewUpload[],
 	});
 	const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 	const info = (login: string, parent: string | null) => ({
@@ -1364,8 +1395,19 @@ function onGitHub(
 		ssh_url: `git@github.com:${login}/widget.git`,
 	});
 	vi.stubEnv("GH_TOKEN", "token");
+	vi.stubEnv("QUEST_FORGE", "github");
 	vi.stubGlobal("fetch", async (input: URL, init?: RequestInit) => {
 		const url = new URL(input);
+		if (url.origin === KIXEL) {
+			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret");
+			// It serves the repository, whose reads QUEST_FORGE keeps on GitHub.
+			if (url.pathname === "/forge") return json({ login: "agent", repositories: [`${owner}/widget`] });
+			if (url.pathname === "/reviews" && init?.method === "POST") {
+				const upload = parseReviews(JSON.parse(String(init.body)));
+				writes.posts.push(upload);
+				return json({ runs: upload.runs.length, outcomes: upload.outcomes.length });
+			}
+		}
 		if (url.pathname === "/repos/acme/widget") return json(info("acme", fork ? "upstream" : null));
 		if (url.pathname === "/repos/upstream/widget") return json(info("upstream", null));
 		if (url.pathname.startsWith("/repos/upstream/widget/contents/"))
@@ -1407,165 +1449,204 @@ function onGitHub(
 	return writes;
 }
 
-fakes("each round rewrites the Review section of the branch's open PR, keeping the author's prose", async () => {
-	const s = setup();
-	const pull = {
-		number: 7,
-		body: [
+fakes(
+	"each run posts its rounds and the outcomes it settled to Kixel Quest, leaving the PR body as written",
+	async () => {
+		const s = setup();
+		const body = [
 			"Fixes averaging.",
-			"",
-			"## Review",
-			"",
-			"Hand-written record of an older head.",
 			"",
 			"## Models",
 			"",
 			"- Size: S",
 			"- Implementer: Claude Code, claude-opus-5-5, high effort",
-		].join("\r\n"),
-	};
-	const writes = onGitHub(s.repo, [pull]);
-	try {
-		const first = await quest("--root", s.repo, "review");
-		expect(first.stderr).toBe("");
-		expect(first.code).toBe(0);
-		expect(first.stdout).toContain("record https://github.com/acme/widget/pull/7\n");
-		const head = git(s.repo, "rev-parse", "HEAD");
-		const base = git(s.repo, "rev-parse", "origin/main");
-		// The record's head carries a status saying it has not passed, which `quest status` reads before the body.
-		expect(writes.statuses).toEqual([
-			{
-				sha: head,
-				state: "failure",
-				context: "quest review",
-				description: "Risk medium, risk file none: findings open",
-				target_url: `https://github.com/acme/widget/compare/${base}...${head}`,
-			},
-		]);
-		expect(pull.body).toBe(
-			[
-				// The author's lines keep their line endings.
-				"Fixes averaging.\r\n\r\n## Review\r",
-				"",
-				"Rewritten by `quest review` after each round.",
-				"",
-				// The land gate counts a full SHA, which a head with an open finding does not earn.
-				`- Head: ${head.slice(0, 12)}, named in full once no reviewer reports a finding`,
-				`- Base: origin/main at ${base.slice(0, 12)}`,
-				"- Risk: medium, `the base has no RISK.md to name what is always high or customer-facing, so every change is medium`",
-				"- Classified: medium by default",
-				"- Risk file: none",
-				"",
-				// The body's `## Models` record sizes the PR S.
-				"- Reviewer: Codex, gpt-6.2-sol, medium effort",
-				"- Session: `thread-1`, round 1",
-				"- Score: 8/10, `Lands once the off-by-one is fixed.`",
-				"- Rounds: 1; first round 1 (high 1); findings 1 (high 1): fixed 0, refuted 0, open 1",
-				"- Findings, open until the next round settles them:",
-				"  - High, `src/lib.ts:2`: `Off by one`",
-				"",
-				"## Models\r\n\r\n- Size: S\r\n- Implementer: Claude Code, claude-opus-5-5, high effort",
-			].join("\n"),
-		);
+		].join("\r\n");
+		const pull = { number: 7, body };
+		const writes = onGitHub(s.repo, [pull]);
+		try {
+			const first = await quest("--root", s.repo, "review");
+			expect(first.stderr).toBe(OVERRIDDEN);
+			expect(first.code).toBe(0);
+			expect(first.stdout).toContain("record https://github.com/acme/widget/pull/7\n");
+			const head = git(s.repo, "rev-parse", "HEAD");
+			const base = git(s.repo, "rev-parse", "origin/main");
+			// Haiku classifies each head in a session of its own, which the run names.
+			const classifierNow = () => {
+				const classifier = at(s.calls(), "low").at(-1)!;
+				const session = classifier.argv[classifier.argv.indexOf("--session-id") + 1];
+				return { harness: "claude", model: "claude-haiku-5-5", effort: "low", session };
+			};
+			// The head carries a status saying it has not passed, which the land gate reads.
+			expect(writes.statuses).toEqual([
+				{
+					sha: head,
+					state: "failure",
+					context: "quest review",
+					description: "Risk medium, risk file none: findings open",
+					target_url: `https://github.com/acme/widget/compare/${base}...${head}`,
+				},
+			]);
+			const run = (classifier = classifierNow()) => ({
+				repository: "acme/widget",
+				number: 7,
+				base: { ref: "main", sha: base },
+				risk: {
+					tier: "medium",
+					reason: "It changes what the library returns.",
+					classified: "medium",
+					class: null,
+					classifier,
+					riskFile: "none",
+				},
+			});
+			// The body's `## Models` record sizes the PR S.
+			const seat = {
+				harness: "codex",
+				model: "gpt-6.2-sol",
+				effort: "medium",
+				seat: "pick",
+				session: "thread-1",
+			};
+			expect(writes.posts).toEqual([
+				{
+					runs: [
+						{
+							...run(),
+							head,
+							outcome: "findings open",
+							rounds: [
+								{
+									...seat,
+									round: 1,
+									score: 8,
+									rationale: "Lands once the off-by-one is fixed.",
+									findings: [
+										{ path: "src/lib.ts", start: 2, end: 2, severity: "high", title: "Off by one" },
+									],
+								},
+							],
+						},
+					],
+					outcomes: [],
+				},
+			]);
 
-		// The next round settles that finding from the responses; model text never mentions, links, or names a full SHA.
-		write(s.repo, "src/lib.ts", "export const x = 4;\n");
-		git(s.repo, "commit", "-qam", "fix");
-		write(s.repo, ".tmp/responses.md", "1. Fixed at src/lib.ts:1.\n");
-		vi.stubEnv("FAKE_DISPOSITION", "refuted");
-		const title = `Ping @someone about \`${base}\` in #12`;
-		vi.stubEnv(
-			"FAKE_REPLY",
-			JSON.stringify({
+			// The next round settles that finding from the responses, naming it by the round that raised it.
+			write(s.repo, "src/lib.ts", "export const x = 4;\n");
+			git(s.repo, "commit", "-qam", "fix");
+			write(s.repo, ".tmp/responses.md", "1. Fixed at src/lib.ts:1.\n");
+			vi.stubEnv("FAKE_DISPOSITION", "refuted");
+			vi.stubEnv(
+				"FAKE_REPLY",
+				JSON.stringify({
+					score: 9,
+					rationale: "Fixes #3.",
+					recommendation: null,
+					findings: [{ ...FINDING, line: null, title: "Still off" }],
+				}),
+			);
+			const second = await quest(
+				"--root",
+				s.repo,
+				"review",
+				"--responses",
+				join(s.repo, ".tmp", "responses.md"),
+				"--json",
+			);
+			expect(second.code, second.stderr).toBe(0);
+			expect(JSON.parse(second.stdout).record).toEqual({ url: "https://github.com/acme/widget/pull/7" });
+			const kept = git(s.repo, "rev-parse", "HEAD");
+			const secondRound = {
+				...seat,
+				round: 2,
 				score: 9,
 				rationale: "Fixes #3.",
-				recommendation: "Ask @someone to derive it\nin the query.",
-				findings: [{ ...FINDING, line: null, title }],
-			}),
-		);
-		const second = await quest(
-			"--root",
-			s.repo,
-			"review",
-			"--responses",
-			join(s.repo, ".tmp", "responses.md"),
-			"--json",
-		);
-		expect(second.code).toBe(0);
-		expect(JSON.parse(second.stdout).record).toEqual({ url: "https://github.com/acme/widget/pull/7" });
-		const record = pull.body.split("## Review\r\n\n")[1]!.split("\n\n## Models")[0];
-		expect(record).toContain(`- Head: ${git(s.repo, "rev-parse", "HEAD").slice(0, 12)},`);
-		expect(record).toContain("- Session: `thread-1`, round 2\n");
-		expect(record).toContain(
-			"- Score: 9/10, `Fixes #3.`\n- Recommendation: `Ask @someone to derive it in the query.`\n",
-		);
-		// The refuted finding counts beside the new one, across both rounds.
-		expect(record).toContain(
-			"- Rounds: 2; first round 1 (high 1); findings 2 (high 2): fixed 0, refuted 1, open 1\n",
-		);
-		expect(record).toContain(
-			`  - High, \`src/lib.ts\`: \`\`Ping @someone about \`${base.slice(0, 12)}\` in #12\`\`\n`,
-		);
-		expect(record).toContain(
-			`- The last round's findings, at ${head.slice(0, 12)}:\n  - Refuted: high, \`src/lib.ts:2\`: \`Off by one\`; \`Checked against the head.\``,
-		);
-		expect(record).not.toMatch(/\b[0-9a-f]{40}\b/);
-		expect(pull.body.startsWith("Fixes averaging.\r\n\r\n## Review\r\n\nRewritten")).toBe(true);
-		expect(writes).toHaveLength(2);
+				findings: [{ path: "src/lib.ts", start: null, end: null, severity: "high", title: "Still off" }],
+			};
+			expect(writes.posts[1]).toEqual({
+				runs: [{ ...run(), head: kept, outcome: "findings open", rounds: [secondRound] }],
+				outcomes: [
+					{
+						repository: "acme/widget",
+						number: 7,
+						harness: "codex",
+						session: "thread-1",
+						round: 1,
+						finding: 1,
+						outcome: "refuted",
+						reason: "Checked against the head.",
+					},
+				],
+			});
 
-		// The maintainer accepts the finding the reviewer keeps: no reviewer runs, and the head passes.
-		const refused = await quest(
-			"--root",
-			s.repo,
-			"review",
-			"--accept",
-			"Kept.",
-			"--responses",
-			join(s.repo, ".tmp", "responses.md"),
-		);
-		expect(refused.code).toBe(2);
-		const calls = s.calls().length;
-		// A token that cannot push records no acceptance, so the body keeps the open findings and the run fails.
-		const before = pull.body;
-		const github = globalThis.fetch;
-		vi.stubGlobal("fetch", async (input: URL, init?: RequestInit) => {
-			const path = new URL(input).pathname;
-			if (path.includes("/statuses/")) return new Response('{"message":"Not Found"}', { status: 404 });
-			const response = await github(input, init);
-			if (path !== "/repos/acme/widget") return response;
-			return new Response(
-				JSON.stringify({ ...((await response.json()) as object), permissions: { push: false } }),
+			// The maintainer accepts the finding the reviewer keeps: no reviewer runs, and the head passes.
+			const refused = await quest(
+				"--root",
+				s.repo,
+				"review",
+				"--accept",
+				"Kept.",
+				"--responses",
+				join(s.repo, ".tmp", "responses.md"),
 			);
-		});
-		const unpushed = await quest("--root", s.repo, "review", "--accept", "Fine.");
-		expect(unpushed.code).toBe(1);
-		expect(unpushed.stdout).toContain("\nnext stop: an acceptance counts only once a maintainer's token sets");
-		expect(pull.body).toBe(before);
-		// Nor does the branch remember its findings as accepted, which a later reviewer would then omit.
-		expect(readFileSync(sessionFile(join(s.repo, ".git"), "feature"), "utf8")).not.toContain('"accepted"');
-		vi.stubGlobal("fetch", github);
-		const accepted = await quest("--root", s.repo, "review", "--accept", "  It pings  no one. ");
-		expect(accepted.code, accepted.stderr).toBe(0);
-		expect(s.calls()).toHaveLength(calls);
-		expect(accepted.stdout).toContain(
-			"\naccepted round 2 of this head, for the maintainer's reason; no reviewer ran\n",
-		);
-		expect(accepted.stdout).toMatch(/\nnext done: the maintainer accepted the findings left open on this head\n$/);
-		const kept = git(s.repo, "rev-parse", "HEAD");
-		const final = pull.body.split("## Review\r\n\n")[1]!.split("\n\n## Models")[0];
-		expect(final).toContain(`- Head: ${kept}\n`);
-		expect(final).toContain("- Accepted by the maintainer: `It pings no one.`\n");
-		expect(final).toContain("- Session: `thread-1`, round 2\n");
-		expect(final).toContain("- Findings, accepted by the maintainer:\n  - High, `src/lib.ts`:");
-		expect(writes.statuses.at(-1)).toMatchObject({
-			sha: kept,
-			state: "success",
-			description: "Risk medium, risk file none: findings accepted",
-		});
-	} finally {
-		vi.unstubAllGlobals();
-	}
-});
+			expect(refused.code).toBe(2);
+			const calls = s.calls().length;
+			// A token that cannot push records no acceptance, so nothing is posted and the run fails.
+			const github = globalThis.fetch;
+			vi.stubGlobal("fetch", async (input: URL, init?: RequestInit) => {
+				const path = new URL(input).pathname;
+				if (path.includes("/statuses/")) return new Response('{"message":"Not Found"}', { status: 404 });
+				const response = await github(input, init);
+				if (path !== "/repos/acme/widget") return response;
+				return new Response(
+					JSON.stringify({ ...((await response.json()) as object), permissions: { push: false } }),
+				);
+			});
+			const unpushed = await quest("--root", s.repo, "review", "--accept", "Fine.");
+			expect(unpushed.code).toBe(1);
+			expect(unpushed.stdout).toContain("\nnext stop: an acceptance counts only once a maintainer's token sets");
+			expect(writes.posts).toHaveLength(2);
+			// Nor does the branch remember its findings as accepted, which a later reviewer would then omit.
+			expect(readFileSync(sessionFile(join(s.repo, ".git"), "feature"), "utf8")).not.toContain('"accepted"');
+			vi.stubGlobal("fetch", github);
+			const accepted = await quest("--root", s.repo, "review", "--accept", "  It pings  no one. ");
+			expect(accepted.code, accepted.stderr).toBe(0);
+			expect(s.calls()).toHaveLength(calls);
+			expect(accepted.stdout).toContain(
+				"\naccepted round 2 of this head, for the maintainer's reason; no reviewer ran\n",
+			);
+			expect(accepted.stdout).toMatch(
+				/\nnext done: the maintainer accepted the findings left open on this head\n$/,
+			);
+			expect(writes.statuses.at(-1)).toMatchObject({
+				sha: kept,
+				state: "success",
+				description: "Risk medium, risk file none: findings accepted",
+			});
+			// The accepted round is posted again as the run's, its finding left to later work for the maintainer's reason.
+			expect(writes.posts[2]).toEqual({
+				runs: [{ ...run(), head: kept, outcome: "findings accepted", rounds: [secondRound] }],
+				outcomes: [
+					{
+						repository: "acme/widget",
+						number: 7,
+						harness: "codex",
+						session: "thread-1",
+						round: 2,
+						finding: 1,
+						outcome: "deferred",
+						reason: "It pings no one.",
+					},
+				],
+			});
+			// No run edits the body.
+			expect(writes).toHaveLength(0);
+			expect(pull.body).toBe(body);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	},
+);
 
 /** A risk file whose `## High` list holds `high`, after a line of prose the classifier reads. */
 const riskFile = (high: string[]) =>
@@ -1751,18 +1832,18 @@ fakes(
 );
 
 fakes(
-	"a base with no risk file offers the built-in quest class to a plan-only change, and holds workflows high",
+	"a base with no risk file offers the built-in quest class to a change removing plans, and holds workflows high",
 	async () => {
 		const s = setup();
-		vi.stubEnv("FAKE_RISK", JSON.stringify({ tier: "low", reason: "Only a plan changes.", class: "quest" }));
+		moveBase(s.repo, (dir) => write(dir, "quest/m0/plan.md", "# [S] A plan\n\n## Goal\n\nDone.\n"));
+		vi.stubEnv("FAKE_RISK", JSON.stringify({ tier: "low", reason: "Only a plan goes.", class: "quest" }));
 		vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
 		git(s.repo, "checkout", "-qb", "plans", "origin/main");
-		write(s.repo, "quest/m0/plan.md", "# [S] A plan\n\n## Goal\n\nDone.\n");
-		git(s.repo, "add", ".");
-		git(s.repo, "commit", "-qm", "plan");
-		const planned = await quest("--root", s.repo, "review");
-		expect(planned.code, planned.stderr).toBe(0);
-		expect(planned.stdout).toContain("risk low Only a plan changes.\nclassified low model Only a plan changes.\n");
+		git(s.repo, "rm", "-q", "quest/m0/plan.md");
+		git(s.repo, "commit", "-qm", "plan done");
+		const removed = await quest("--root", s.repo, "review");
+		expect(removed.code, removed.stderr).toBe(0);
+		expect(removed.stdout).toContain("risk low Only a plan goes.\nclassified low model Only a plan goes.\n");
 		const [call, ...more] = classifying(s.calls());
 		expect(more).toEqual([]);
 		expect(JSON.parse(call!.argv[call!.argv.indexOf("--json-schema") + 1]!).properties.class.enum).toEqual([
@@ -1770,7 +1851,7 @@ fakes(
 			null,
 		]);
 		expect(call!.stdin).toContain("The repository has no risk file");
-		expect(call!.stdin).toContain("- `quest` (`quest/**`) - only plans under `quest/` change");
+		expect(call!.stdin).toContain("- `quest` (`quest/**`) - only plans under `quest/` are removed or cut");
 
 		// A change to the built-in defaults classifies the same head again.
 		const [quests] = DEFAULT_CLASSES as Class[];
@@ -1783,6 +1864,19 @@ fakes(
 		}
 		expect(classifying(s.calls())).toHaveLength(2);
 
+		// Adding a plan is at least medium, which the classifier judges with no class offered, as under a risk file.
+		git(s.repo, "checkout", "-qB", "plans", "origin/main");
+		write(s.repo, "quest/m0/new.md", "# [S] New\n");
+		git(s.repo, "add", ".");
+		git(s.repo, "commit", "-qm", "new plan");
+		vi.stubEnv("FAKE_RISK", JSON.stringify({ tier: "medium", reason: "It adds a plan.", class: null }));
+		const added = await quest("--root", s.repo, "review");
+		expect(added.code, added.stderr).toBe(0);
+		expect(added.stdout).toContain("\nrisk medium It adds a plan.\n");
+		const adding = classifying(s.calls())[2]!;
+		expect(adding.stdin).toContain("It adds to plans under `quest/`");
+		expect(adding.stdin).not.toContain("- `quest` (`quest/**`)");
+
 		// A workflow is high by its path, with no model.
 		for (const path of [".github/workflows/ci.yml", ".github/actions/setup/action.yml"]) {
 			git(s.repo, "checkout", "-qB", "ci", "origin/main");
@@ -1794,23 +1888,23 @@ fakes(
 			expect(ci.code, ci.stderr).toBe(0);
 			expect(ci.stdout).toContain(`\nrisk high it changes ${path}, which is always high: `);
 		}
-		expect(classifying(s.calls())).toHaveLength(2);
+		expect(classifying(s.calls())).toHaveLength(3);
 	},
 	30_000,
 );
 
 fakes("a risk file's class named like a built-in one replaces it", async () => {
 	const s = setup();
-	moveBase(s.repo, (dir) =>
-		write(dir, "RISK.md", `${riskFile([])}\n## Automatic\n\n- \`quest\` (\`quest/m0/**\`) - OWN-RULE\n`),
-	);
-	vi.stubEnv("FAKE_RISK", JSON.stringify({ tier: "low", reason: "Only a plan changes.", class: null }));
+	moveBase(s.repo, (dir) => {
+		write(dir, "RISK.md", `${riskFile([])}\n## Automatic\n\n- \`quest\` (\`quest/m0/**\`) - OWN-RULE\n`);
+		for (const milestone of ["m0", "m1"]) write(dir, `quest/${milestone}/plan.md`, "# [S] A plan\n");
+	});
+	vi.stubEnv("FAKE_RISK", JSON.stringify({ tier: "low", reason: "Only a plan goes.", class: null }));
 	vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
 	const offered = async (path: string) => {
 		git(s.repo, "checkout", "-qB", "plans", "origin/main");
-		write(s.repo, path, "# [S] A plan\n");
-		git(s.repo, "add", ".");
-		git(s.repo, "commit", "-qm", "plan");
+		git(s.repo, "rm", "-q", path);
+		git(s.repo, "commit", "-qm", "plan done");
 		const result = await quest("--root", s.repo, "review");
 		expect(result.code, result.stderr).toBe(0);
 		const call = classifying(s.calls()).at(-1)!;
@@ -1824,11 +1918,58 @@ fakes("a risk file's class named like a built-in one replaces it", async () => {
 	expect((await offered("quest/m1/plan.md")).names).toBeUndefined();
 });
 
+fakes("a change adding to plans is at least medium and offered no class, where one removing them is not", async () => {
+	const s = setup();
+	const plan = "# [S] A plan\n\n## Goal\n\nDone.\n\n## Plan\n\nSteps.\n";
+	moveBase(s.repo, (dir) => {
+		write(dir, "RISK.md", `${riskFile([])}\n## Automatic\n\n- \`any\` - anything\n`);
+		write(dir, "quest/m0/plan.md", plan);
+	});
+	vi.stubEnv("FAKE_RISK", JSON.stringify({ tier: "medium", reason: "It plans more work.", class: null }));
+	vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
+	const classified = async (change: () => void) => {
+		git(s.repo, "checkout", "-qB", "plans", "origin/main");
+		change();
+		git(s.repo, "add", "-A");
+		git(s.repo, "commit", "-qm", "plans");
+		const result = await quest("--root", s.repo, "review");
+		expect(result.code, result.stderr).toBe(0);
+		const call = classifying(s.calls()).at(-1)!;
+		const schema = JSON.parse(call.argv[call.argv.indexOf("--json-schema") + 1]!);
+		return { tiers: schema.properties.tier.enum, classes: schema.properties.class?.enum, prompt: call.stdin };
+	};
+
+	// A new quest, and a line added to one, each hold the tier at medium or above with no class to land in.
+	for (const change of [
+		() => write(s.repo, "quest/m0/follow-up.md", "# [XS] More work\n\n## Goal\n\nMore.\n"),
+		() => write(s.repo, "quest/m0/plan.md", plan.replace("Steps.", "Steps.\nAnd more steps.")),
+	]) {
+		const added = await classified(change);
+		expect(added.tiers).toEqual(["medium", "high"]);
+		expect(added.classes).toBeUndefined();
+		expect(added.prompt).toContain("It adds to plans under `quest/`");
+	}
+	// A move adds the plan at its new path.
+	const moved = await classified(() => git(s.repo, "mv", "quest/m0/plan.md", "quest/m0/moved.md"));
+	expect(moved.prompt).toContain("so its tier is medium or high: `quest/m0/moved.md`.");
+
+	// Cutting a plan's lines keeps every tier and class.
+	const cut = await classified(() => write(s.repo, "quest/m0/plan.md", plan.replace("\n## Plan\n\nSteps.\n", "")));
+	expect(cut.tiers).toEqual(["low", "medium", "high"]);
+	expect(cut.classes).toEqual(["quest", "any", null]);
+	expect(cut.prompt).not.toContain("It adds to plans");
+});
+
+test("a classifier reply below its change's floor is refused", () => {
+	const reply = { tier: "low", reason: "Only a plan.", class: null };
+	expect(() => classed(reply, [], "medium", "the reply")).toThrow("the reply names low, below the medium");
+	expect(classed({ ...reply, tier: "high" }, [], "medium", "the reply").tier).toBe("high");
+});
+
 fakes(
 	"the classifier sees every hunk, whatever the head's attributes and bytes say",
 	async () => {
 		const s = setup();
-		moveBase(s.repo, (dir) => write(dir, "RISK.md", riskFile([])));
 		vi.stubEnv("FAKE_RISK", JSON.stringify({ tier: "medium", reason: "It changes the output." }));
 		vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
 		// A head that marks its source binary.
@@ -1952,7 +2093,6 @@ fakes(
 
 fakes("without a logged-in Claude Code, Codex classifies", async () => {
 	const s = setup();
-	moveBase(s.repo, (dir) => write(dir, "RISK.md", riskFile([])));
 	// Only git and the fake Codex are on PATH, so no Claude Code install outside the fakes is found either.
 	const only = join(s.bin, "..", "codex-only");
 	mkdirSync(only);
@@ -1992,7 +2132,6 @@ fakes(
 	"a classifier whose turn fails on its login or usage limit, or replies unusably, passes the turn to the next",
 	async () => {
 		const s = setup();
-		moveBase(s.repo, (dir) => write(dir, "RISK.md", riskFile([])));
 		vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
 		const run = async (failing: string) => {
 			vi.stubEnv("FAKE_CLASSIFY", failing);
@@ -2063,7 +2202,6 @@ fakes("a question no model answers usably throws with what each reply took", asy
 
 fakes("a classifier session that hit its usage limit is queued though no classifier answers", async () => {
 	const s = setup();
-	moveBase(s.repo, (dir) => write(dir, "RISK.md", riskFile([])));
 	vi.stubEnv("FAKE_CLASSIFY", "claude-limited,codex-limited");
 	const queued: { harness: string; session: string }[] = [];
 	const error = await review({ root: s.repo }, { env: process.env, queue: (session) => queued.push(session) }).catch(
@@ -2076,7 +2214,6 @@ fakes("a classifier session that hit its usage limit is queued though no classif
 
 fakes("a second reviewer with open findings settles them on a head below high, even at a named effort", async () => {
 	const s = setup();
-	moveBase(s.repo, (dir) => write(dir, "RISK.md", riskFile([])));
 	const responses = join(s.repo, ".tmp", "responses.md");
 	write(s.repo, ".tmp/responses.md", "1. Fixed.\n2. Fixed.\n");
 	const seconds = (out: string) => out.split("\n").filter((line) => /^reviewer .* second$/.test(line));
@@ -2105,7 +2242,6 @@ fakes("a second reviewer with open findings settles them on a head below high, e
 
 fakes("each session a round starts is queued with the PR its record went to, or none", async () => {
 	const s = setup();
-	moveBase(s.repo, (dir) => write(dir, "RISK.md", riskFile([])));
 	write(s.repo, "AGENTS.md", `HEAD-ROOT rule\n${REFERENCE_LINE}\n`);
 	git(s.repo, "commit", "-qam", "use Quest");
 	const pulls: { number: number; body: string | null }[] = [];
@@ -2116,8 +2252,7 @@ fakes("each session a round starts is queued with the PR its record went to, or 
 	vi.stubEnv("XDG_CONFIG_HOME", config);
 	vi.stubEnv("QUEST_KIXEL_URL", "https://kixel.example");
 	vi.stubEnv("QUEST_FORGE", "github");
-	mkdirSync(join(config, "quest"));
-	writeFileSync(join(config, "quest", "records.json"), JSON.stringify({ "https://kixel.example": "secret" }));
+	writeTokens({ XDG_CONFIG_HOME: config }, { "https://kixel.example": "secret" });
 	mkdirSync(join(state, "quest", "records"), { recursive: true });
 	writeFileSync(join(state, "quest", "records", "sender.pid"), String(process.pid));
 	const pending = join(state, "quest", "records", "pending");
@@ -2148,7 +2283,6 @@ fakes(
 	"every session a round starts is queued for the record sender, and a resumed one again once it runs",
 	async () => {
 		const s = setup();
-		moveBase(s.repo, (dir) => write(dir, "RISK.md", riskFile([])));
 		write(s.repo, "AGENTS.md", `HEAD-ROOT rule\n${REFERENCE_LINE}\n`);
 		git(s.repo, "commit", "-qam", "use Quest");
 		onGitHub(s.repo, []);
@@ -2159,8 +2293,7 @@ fakes(
 		vi.stubEnv("QUEST_KIXEL_URL", "https://kixel.example");
 		// The token is for the sender; the forge stays GitHub.
 		vi.stubEnv("QUEST_FORGE", "github");
-		mkdirSync(join(config, "quest"));
-		writeFileSync(join(config, "quest", "records.json"), JSON.stringify({ "https://kixel.example": "secret" }));
+		writeTokens({ XDG_CONFIG_HOME: config }, { "https://kixel.example": "secret" });
 		// A sender that runs, so the person is told nothing.
 		mkdirSync(join(state, "quest", "records"), { recursive: true });
 		writeFileSync(join(state, "quest", "records", "sender.pid"), String(process.pid));
@@ -2257,28 +2390,35 @@ fakes(
 			const schema = JSON.parse(call!.argv[call!.argv.indexOf("--json-schema") + 1]!);
 			expect(schema.properties.class.enum).toEqual(["constants", null]);
 			const head = git(s.repo, "rev-parse", "HEAD");
-			// The head is named in full, so the record counts as its review.
-			expect(pull.body).toContain(`- Head: ${head}\n`);
-			// Named by its blob's first 12 characters, so `quest status` can tell when the base's file changes.
-			const file = git(s.repo, "rev-parse", "origin/main:RISK.md").slice(0, 12);
-			expect(pull.body).toContain(
-				`- Class: \`constants\`\n- Risk file: ${file}\n- Local review: none, since the head is low risk`,
-			);
-			expect(recordedRisk(pull.body)).toMatchObject({
-				tier: "low",
-				class: "constants",
-				overridden: null,
-				riskFile: file,
-			});
-			// Its status attests the tier and class the record names, which `quest status` checks the body against.
-			expect(writes.statuses).toEqual([
-				{
-					sha: head,
-					state: "success",
-					context: "quest review",
-					description: `Risk low, class constants, risk file ${file}: passed with no local reviewer`,
-					target_url: `https://github.com/acme/widget/compare/${git(s.repo, "merge-base", "origin/main", head)}...${head}`,
+			// The run posts its classification alone, which passes the head with no local reviewer.
+			expect(writes.posts).toHaveLength(1);
+			const [run] = writes.posts[0]!.runs;
+			expect(run).toMatchObject({
+				head,
+				outcome: "passed with no local reviewer",
+				risk: {
+					tier: "low",
+					reason: "Only a constant changes.",
+					classified: "low",
+					class: "constants",
+					classifier: { harness: "claude", effort: "low" },
 				},
+				rounds: [],
+			});
+			expect(writes.posts[0]!.outcomes).toEqual([]);
+			// Named by its blob's first 12 characters, so the land gate can tell when the base's file changes.
+			const file = git(s.repo, "rev-parse", "origin/main:RISK.md").slice(0, 12);
+			expect(run!.risk.riskFile).toBe(file);
+			// Its status attests the tier and class, which the land gate reads, and passes only once the post is stored.
+			const attested = {
+				sha: head,
+				context: "quest review",
+				description: `Risk low, class constants, risk file ${file}: passed with no local reviewer`,
+				target_url: `https://github.com/acme/widget/compare/${git(s.repo, "merge-base", "origin/main", head)}...${head}`,
+			};
+			expect(writes.statuses).toEqual([
+				{ ...attested, state: "failure" },
+				{ ...attested, state: "success" },
 			]);
 
 			// The maintainer holds it high: both of its size's reviewers review it.
@@ -2287,11 +2427,10 @@ fakes(
 			expect(held.stdout).toContain("\nrisk high It ships tonight.\noverridden low by the maintainer\n");
 			expect(held.stdout).toContain("\nreviewer codex gpt-6.2-sol medium\n");
 			expect(held.stdout).toContain("\nreviewer claude claude-opus-5-5 medium second\n");
-			expect(recordedRisk(pull.body)).toMatchObject({
-				tier: "high",
-				overridden: "low",
-				reason: "It ships tonight.",
-			});
+			// The maintainer's tier is posted, beside the classifier's own, with both seats' rounds.
+			const [overridden] = writes.posts.at(-1)!.runs;
+			expect(overridden!.risk).toMatchObject({ tier: "high", reason: "It ships tonight.", classified: "low" });
+			expect(overridden!.rounds.map((round) => round.seat)).toEqual(["pick", "second"]);
 			// The override outlasts a new head whose change is no riskier.
 			write(s.repo, "src/lib.ts", "export const x = 3;\n");
 			git(s.repo, "commit", "-qam", "another constant");
@@ -2318,7 +2457,10 @@ fakes(
 			expect(same.code, same.stderr).toBe(0);
 			expect(same.stdout).toContain("\nrisk medium It changes the output.\n");
 			expect(same.stdout).not.toContain("\noverridden ");
-			expect(recordedRisk(pull.body)).toMatchObject({ tier: "medium", overridden: null });
+			expect(writes.posts.at(-1)!.runs[0]!.risk).toMatchObject({
+				tier: "medium",
+				reason: "It changes the output.",
+			});
 
 			expect((await quest("--root", s.repo, "review", "--override", "low")).stderr).toContain(
 				"--override and --reason go together",
@@ -2353,10 +2495,10 @@ fakes("a malformed risk file on the base fails before any model runs", async () 
 	expect(s.calls()).toEqual([]);
 });
 
-fakes("a branch with no open PR, or a body without a Review section, is reported as such", async () => {
+fakes("a branch with no open PR posts nothing, and a later run settles none of what it left unposted", async () => {
 	const s = setup();
 	const pulls: { number: number; body: string | null }[] = [];
-	onGitHub(s.repo, pulls);
+	const writes = onGitHub(s.repo, pulls);
 	try {
 		const none = await quest("--root", s.repo, "review");
 		expect(none.code).toBe(0);
@@ -2366,12 +2508,15 @@ fakes("a branch with no open PR, or a body without a Review section, is reported
 		vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
 		write(s.repo, ".tmp/responses.md", "Fixed.\n");
 		const recorded = await quest("--root", s.repo, "review", "--responses", join(s.repo, ".tmp", "responses.md"));
+		expect(recorded.code, recorded.stderr).toBe(0);
 		expect(recorded.stdout).toContain("record https://github.com/acme/widget/pull/8\n");
-		expect(pulls[0]!.body).toMatch(
-			/^## Review\n\nRewritten by `quest review` after each round\.\n[\s\S]*- Findings: none\n/,
-		);
-		// A round with no findings names its head in full, which the land gate counts.
-		expect(pulls[0]!.body!.match(/\b[0-9a-f]{40}\b/g)).toEqual([git(s.repo, "rev-parse", "HEAD")]);
+		expect(writes.posts).toHaveLength(1);
+		const [run] = writes.posts[0]!.runs;
+		expect(run).toMatchObject({ number: 8, head: git(s.repo, "rev-parse", "HEAD"), outcome: "passed" });
+		expect(run!.rounds.map((round) => round.round)).toEqual([2]);
+		// The first round reached no PR, so Kixel Quest never stored its finding, and an outcome for it would be refused.
+		expect(writes.posts[0]!.outcomes).toEqual([]);
+		expect(pulls[0]!.body).toBeNull();
 	} finally {
 		vi.unstubAllGlobals();
 	}
@@ -2389,7 +2534,7 @@ fakes("a maintainer's checkout records on a contributor's fork PR and reads its 
 		sha: "f".repeat(40),
 	};
 	const pulls: FakePull[] = [stranger];
-	onGitHub(s.repo, pulls);
+	const writes = onGitHub(s.repo, pulls);
 	vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
 	try {
 		const alone = await quest("--root", s.repo, "review");
@@ -2407,7 +2552,8 @@ fakes("a maintainer's checkout records on a contributor's fork PR and reads its 
 		expect(result.stdout).toContain("record https://github.com/acme/widget/pull/12\n");
 		// Size S picks Sol at medium.
 		expect(result.stdout).toContain("\nreviewer codex gpt-6.2-sol medium\n");
-		expect(pull.body).toMatch(/^Body\.\n\n## Models\n\n- Size: S\n\n## Review\n\nRewritten by `quest review`/);
+		expect(writes.posts.at(-1)!.runs[0]).toMatchObject({ repository: "acme/widget", number: 12 });
+		expect(pull.body).toBe("Body.\n\n## Models\n\n- Size: S\n");
 		expect(stranger.body).toBe("Stranger.\n\n## Models\n\n- Size: XS\n");
 
 		// A second contributor's PR whose head this checkout also holds leaves no way to tell them apart.
@@ -2432,12 +2578,12 @@ fakes("a maintainer's checkout records on a contributor's fork PR and reads its 
 fakes("a review from a subdirectory of a fork records on the upstream PR", async () => {
 	const s = setup();
 	const pull = { number: 11, body: "Body." };
-	onGitHub(s.repo, [pull], true);
+	const writes = onGitHub(s.repo, [pull], true);
 	try {
 		const result = await quest("--root", join(s.repo, "src"), "review");
-		expect(result.stderr).toBe("");
+		expect(result.stderr).toBe(OVERRIDDEN);
 		expect(result.stdout).toContain("record https://github.com/upstream/widget/pull/11\n");
-		expect(pull.body).toMatch(/^Body\.\n\n## Review\n\nRewritten by `quest review`/);
+		expect(writes.posts.at(-1)!.runs[0]).toMatchObject({ repository: "upstream/widget", number: 11 });
 	} finally {
 		vi.unstubAllGlobals();
 	}
@@ -2493,7 +2639,7 @@ fakes("a later round checks only what changed since the reviewed head, and the o
 
 const NOTE = { file: "src/lib.ts", line: 1, severity: "low", title: "Name the constant", body: "x says nothing." };
 
-fakes("a low finding is a note: printed and recorded, never numbered, answered, or held against the head", async () => {
+fakes("a low finding is a note: printed, never posted, numbered, answered, or held against the head", async () => {
 	const s = setup();
 	const pull = {
 		number: 7,
@@ -2507,9 +2653,7 @@ fakes("a low finding is a note: printed and recorded, never numbered, answered, 
 		expect(first.stdout).toContain(
 			"\nfindings 1\n\n1. high src/lib.ts:2 Off by one\n  average([3]) is 0.\n\nnotes 1\n\n- src/lib.ts:1 Name the constant\n  x says nothing.\n",
 		);
-		expect(pull.body).toContain(
-			"- Notes, the author's to take or leave:\n  - `src/lib.ts:1`: `Name the constant`\n",
-		);
+		expect(writes.posts[0]!.runs[0]!.rounds[0]!.findings.map((finding) => finding.title)).toEqual(["Off by one"]);
 
 		// One response answers the one numbered finding, and a round that reports only the note passes the head.
 		write(s.repo, "src/lib.ts", "export const x = 4;\n");
@@ -2524,7 +2668,9 @@ fakes("a low finding is a note: printed and recorded, never numbered, answered, 
 		);
 		expect(second.stdout).toMatch(/\nnext done: no finding holds this head; its notes are yours to take or leave/);
 		const head = git(s.repo, "rev-parse", "HEAD");
-		expect(pull.body).toContain(`- Head: ${head}\n`);
+		expect(writes.posts[1]!.runs[0]).toMatchObject({ head, outcome: "passed" });
+		expect(writes.posts[1]!.runs[0]!.rounds[0]!.findings).toEqual([]);
+		expect(writes.posts[1]!.outcomes).toMatchObject([{ round: 1, finding: 1, outcome: "fixed" }]);
 		expect(writes.statuses.at(-1)).toMatchObject({ sha: head, state: "success" });
 
 		// The note is carried to no later round, so the next head needs no responses.
@@ -2590,7 +2736,7 @@ fakes("the PR's Models record sizes the review and names its latest writer", asy
 	try {
 		// Sol reviews it at L's effort, whoever wrote it.
 		const wrote = await quest("--root", s.repo, "review");
-		expect(wrote.stderr).toBe("");
+		expect(wrote.stderr).toBe(OVERRIDDEN);
 		expect(wrote.stdout).toMatch(/^size L ## Models\n[\s\S]*\nreviewer codex gpt-6.2-sol xhigh\n/);
 
 		// Flags override the record.
@@ -2649,11 +2795,27 @@ test("a Models record reads its size and every implementing model", () => {
 		implementers: [
 			{
 				item: "Implementer: Claude Code, claude-opus-5-5, high effort",
-				fields: { harness: "Claude Code", model: "claude-opus-5-5", effort: "high", size: null, arm: null },
+				fields: {
+					harness: "Claude Code",
+					model: "claude-opus-5-5",
+					effort: "high",
+					size: null,
+					arm: null,
+					cohort: null,
+					advisor: null,
+				},
 			},
 			{
 				item: "Implementer: Codex, unknown, unknown effort",
-				fields: { harness: "Codex", model: "unknown", effort: "unknown", size: null, arm: null },
+				fields: {
+					harness: "Codex",
+					model: "unknown",
+					effort: "unknown",
+					size: null,
+					arm: null,
+					cohort: null,
+					advisor: null,
+				},
 			},
 		],
 	});
@@ -2672,6 +2834,8 @@ test("an Implementer line reads as agents write it", () => {
 		effort,
 		size: null,
 		arm: null,
+		cohort: null,
+		advisor: null,
 	});
 	expect(read("Claude Code, Opus 5.5, high effort")).toEqual(opus("high"));
 	expect(read("Claude Code, Claude Opus 5.5, xhigh effort")).toEqual(opus("xhigh"));
@@ -2683,6 +2847,8 @@ test("an Implementer line reads as agents write it", () => {
 		effort: "low",
 		size: null,
 		arm: null,
+		cohort: null,
+		advisor: null,
 	});
 	expect(read("claude-haiku-5-5, effort not reported")).toEqual({
 		harness: "unknown",
@@ -2690,6 +2856,8 @@ test("an Implementer line reads as agents write it", () => {
 		effort: "unknown",
 		size: null,
 		arm: null,
+		cohort: null,
+		advisor: null,
 	});
 	expect(read("Codex, GPT-6.2 Sol, medium effort (iterate, XS)")).toEqual({
 		harness: "Codex",
@@ -2697,6 +2865,8 @@ test("an Implementer line reads as agents write it", () => {
 		effort: "medium",
 		size: "XS",
 		arm: null,
+		cohort: null,
+		advisor: null,
 	});
 	// A retired model's spellings still read as its ID, as older records name it; an unlisted ID reads as written.
 	for (const name of ["GPT-6.1 Sol", "GPT 6.1  Sol", "GPT-6.1-SOL", "openai/gpt-6.1-sol"])
@@ -2721,6 +2891,34 @@ test("an Implementer line reads as agents write it", () => {
 	expect(read("Claude Code, Opus 5.5, high effort (arm A)")).toEqual({ ...opus("high"), arm: "A" });
 	// Only an arm the A/B runs reads as one.
 	expect(read("Claude Code, Opus 5.5, high effort (arm C)")).toEqual(opus("high"));
+	// A cohort and advisor read from the notes, the advisor by any spelling of a model.
+	expect(
+		read(
+			"Claude Code, claude-sonnet-5-5, high effort (iterate, M, arm B, cohort advisor-2026-11, advisor Opus 5.5)",
+		),
+	).toEqual({
+		harness: "Claude Code",
+		model: "claude-sonnet-5-5",
+		effort: "high",
+		size: "M",
+		arm: "B",
+		cohort: "advisor-2026-11",
+		advisor: "claude-opus-5-5",
+	});
+	expect(read("Claude Code, Opus 5.5, xhigh effort (advisor claude-fable-5-2)")).toEqual({
+		...opus("xhigh"),
+		advisor: "claude-fable-5-2",
+	});
+	expect(read("claude-opus-5-5 (arm A, cohort advisor-2026-11)")).toEqual({
+		...opus("unknown", "unknown"),
+		arm: "A",
+		cohort: "advisor-2026-11",
+	});
+	// A bare family reads as its listed model, as `--advisor opus` runs it; a name no table knows stays as written,
+	// so the line still reads, and `quest review` can still find the writer.
+	for (const name of ["opus", "Opus", "Claude Opus", "claude-opus"])
+		expect(read(`Claude Code, claude-sonnet-5-5, high effort (advisor ${name})`)?.advisor).toBe("claude-opus-5-5");
+	expect(read("Claude Code, Opus 5.5, high effort (advisor Some Model)")?.advisor).toBe("Some Model");
 	expect(read("unknown, Opus 5.5, high effort")).toEqual(opus("high", "unknown"));
 	expect(read("Claude Code, Fable 5.2, medium effort")?.model).toBe("claude-fable-5-2");
 	expect(read("Codex, openai/gpt-6.2-sol, high effort")?.model).toBe("gpt-6.2-sol");
@@ -2742,24 +2940,6 @@ test("an Implementer line reads as agents write it", () => {
 	expect(read("Codex, Some Model, high effort")).toBeNull();
 	expect(read("Claude Code, Opus 5.5, high effort, extra")).toBeNull();
 	expect(read("Claude Code, Opus 5.5, very high effort")).toBeNull();
-});
-
-test("the record replaces only a top-level Review section, never an example of one", () => {
-	const fenced = "Example:\n\n```md\n## Review\n\nold\n```\n\nAfter.\n";
-	expect(withReview(fenced, "new")).toBe(`${fenced.trimEnd()}\n\n## Review\n\nnew\n`);
-	const quoted = "> ## Review\n> quoted\n\n## Review\n\nold\n\n# Notes\n\n## Review\n\nsecond\n";
-	expect(withReview(quoted, "new")).toBe(
-		"> ## Review\n> quoted\n\n## Review\n\nnew\n\n# Notes\n\n## Review\n\nsecond\n",
-	);
-	// A level-3 heading stays inside the section, and a rewrite of the same record changes nothing.
-	const nested = "## Review\n\nold\n\n### Detail\n\nmore\n\n## Models\n\n- Size: S\n";
-	const once = withReview(nested, "new");
-	expect(once).toBe("## Review\n\nnew\n\n## Models\n\n- Size: S\n");
-	expect(withReview(once, "new")).toBe(once);
-	expect(withReview("", "new")).toBe("## Review\n\nnew\n");
-	// A heading appended inside an unclosed construct would be no section, which the land gate never reads.
-	for (const open of ["```md\nunclosed", "<!-- unclosed"])
-		expect(() => withReview(open, "new")).toThrow("unclosed code fence or HTML comment");
 });
 
 fakes("a status GitHub refuses fails the run, unless the token cannot push, where it counts for nothing", async () => {
@@ -2785,7 +2965,7 @@ fakes("a status GitHub refuses fails the run, unless the token cannot push, wher
 	] as const) {
 		const s = setup();
 		const pull = { number: 9, body: "" };
-		onGitHub(s.repo, [pull]);
+		const writes = onGitHub(s.repo, [pull]);
 		const head = git(s.repo, "rev-parse", "HEAD");
 		const fetch = globalThis.fetch;
 		vi.stubGlobal("fetch", async (input: URL, init?: RequestInit) => {
@@ -2801,7 +2981,9 @@ fakes("a status GitHub refuses fails the run, unless the token cannot push, wher
 			expect(result.stdout).toContain(
 				`\nrecord https://github.com/acme/widget/pull/9; ${line.replace("HEAD", head)}\n`,
 			);
-			expect(pull.body).toContain("## Review");
+			// The run is posted whatever became of its status; Kixel Quest counts it only from a poster who can push.
+			expect(writes.posts).toHaveLength(1);
+			expect(pull.body).toBe("");
 		} finally {
 			vi.unstubAllGlobals();
 		}
@@ -2882,23 +3064,194 @@ fakes("--accept refuses another base's rounds, a high head without its second ro
 	}
 });
 
-fakes("a record GitHub refuses fails the command after printing the round", async () => {
+fakes("a post Kixel Quest refuses fails the command after printing the round", async () => {
 	const s = setup();
-	onGitHub(s.repo, [{ number: 9, body: "" }]);
+	const writes = onGitHub(s.repo, [{ number: 9, body: "" }]);
 	const fetch = globalThis.fetch;
 	vi.stubGlobal("fetch", async (input: URL, init?: RequestInit) =>
-		init?.method === "PATCH"
-			? new Response('{"message":"Must have admin rights"}', { status: 403 })
+		new URL(input).pathname === "/reviews"
+			? new Response('{"error":"Posted by another person, so only they may replace it."}', { status: 409 })
 			: fetch(input, init),
 	);
 	try {
 		const result = await quest("--root", s.repo, "review");
 		expect(result.code).toBe(1);
 		expect(result.stdout).toContain("findings 1\n");
-		expect(result.stderr).toContain("the round finished, but recording it failed: GitHub HTTP 403");
+		expect(result.stderr).toContain(
+			`the round finished, but recording it failed: ${KIXEL}/reviews answered HTTP 409: Posted by another person, so only they may replace it.`,
+		);
+		// The status went first, so the failed head is attested as such.
+		expect(writes.statuses).toMatchObject([{ state: "failure" }]);
+		// A passing run's status stays failing until its post is stored, so a refused post leaves no pass standing.
+		const accepted = await quest("--root", s.repo, "review", "--accept", "Fine.");
+		expect(accepted.code).toBe(1);
+		expect(accepted.stdout).toContain("\nnext stop: the acceptance was not recorded;");
+		expect(writes.statuses).toMatchObject([{ state: "failure" }, { state: "failure" }]);
 	} finally {
 		vi.unstubAllGlobals();
 	}
+});
+
+fakes(
+	"the outcomes a failed post settled reach Kixel Quest with the round's repeat, on the PR that holds them",
+	async () => {
+		const s = setup();
+		const pulls = [{ number: 7, body: "" }];
+		const writes = onGitHub(s.repo, pulls);
+		try {
+			expect((await quest("--root", s.repo, "review")).code).toBe(0);
+			expect(writes.posts).toHaveLength(1);
+			write(s.repo, "src/lib.ts", "export const x = 4;\n");
+			git(s.repo, "commit", "-qam", "fix");
+			write(s.repo, ".tmp/responses.md", "1. Fixed at src/lib.ts:1.\n");
+			vi.stubEnv(
+				"FAKE_REPLY",
+				JSON.stringify({ score: 9, rationale: "Fixed.", recommendation: null, findings: [] }),
+			);
+			const github = globalThis.fetch;
+			vi.stubGlobal("fetch", async (input: URL, init?: RequestInit) =>
+				new URL(input).pathname === "/reviews"
+					? new Response('{"error":"Try later."}', { status: 503 })
+					: github(input, init),
+			);
+			const failed = await quest("--root", s.repo, "review", "--responses", join(s.repo, ".tmp", "responses.md"));
+			expect(failed.code).toBe(1);
+			vi.stubGlobal("fetch", github);
+			const calls = s.calls().length;
+			// The PR was replaced since the first round was posted, so the outcome still goes to the one holding it.
+			pulls[0]!.number = 8;
+			const repeated = await quest("--root", s.repo, "review");
+			expect(repeated.code, repeated.stderr).toBe(0);
+			expect(s.calls()).toHaveLength(calls);
+			expect(writes.posts).toHaveLength(2);
+			expect(writes.posts[1]!.runs).toMatchObject([{ number: 8, outcome: "passed", rounds: [{ round: 2 }] }]);
+			expect(writes.posts[1]!.outcomes).toEqual([
+				{
+					repository: "acme/widget",
+					number: 7,
+					harness: "codex",
+					session: "thread-1",
+					round: 1,
+					finding: 1,
+					outcome: "fixed",
+					reason: "Checked against the head.",
+				},
+			]);
+			expect(writes.statuses.at(-1)).toMatchObject({ state: "success" });
+			// Once posted, a further repeat settles nothing again.
+			expect((await quest("--root", s.repo, "review")).code).toBe(0);
+			expect(writes.posts[2]!.outcomes).toEqual([]);
+		} finally {
+			vi.unstubAllEnvs();
+			vi.unstubAllGlobals();
+		}
+	},
+);
+
+fakes("the outcomes a failed post settled survive --new, which drops the sessions that settled them", async () => {
+	const s = setup();
+	const writes = onGitHub(s.repo, [{ number: 7, body: "" }]);
+	try {
+		expect((await quest("--root", s.repo, "review")).code).toBe(0);
+		write(s.repo, "src/lib.ts", "export const x = 4;\n");
+		git(s.repo, "commit", "-qam", "fix");
+		write(s.repo, ".tmp/responses.md", "1. Fixed at src/lib.ts:1.\n");
+		vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 9, rationale: "Fixed.", recommendation: null, findings: [] }));
+		const github = globalThis.fetch;
+		vi.stubGlobal("fetch", async (input: URL, init?: RequestInit) =>
+			new URL(input).pathname === "/reviews"
+				? new Response('{"error":"Try later."}', { status: 503 })
+				: github(input, init),
+		);
+		const failed = await quest("--root", s.repo, "review", "--responses", join(s.repo, ".tmp", "responses.md"));
+		expect(failed.code).toBe(1);
+		vi.stubGlobal("fetch", github);
+		const fresh = await quest("--root", s.repo, "review", "--new");
+		expect(fresh.code, fresh.stderr).toBe(0);
+		expect(writes.posts).toHaveLength(2);
+		expect(writes.posts[1]!.outcomes).toMatchObject([{ number: 7, round: 1, finding: 1, outcome: "fixed" }]);
+	} finally {
+		vi.unstubAllEnvs();
+		vi.unstubAllGlobals();
+	}
+});
+
+fakes("accepting a round posted on a since-replaced PR defers its findings on both PRs", async () => {
+	const s = setup();
+	const pulls = [{ number: 7, body: "" }];
+	const writes = onGitHub(s.repo, pulls);
+	expect((await quest("--root", s.repo, "review")).code).toBe(0);
+	pulls[0]!.number = 8;
+	const accepted = await quest("--root", s.repo, "review", "--accept", "Fine.");
+	expect(accepted.code, accepted.stderr).toBe(0);
+	expect(writes.posts[1]!.outcomes.map(({ number, outcome }) => ({ number, outcome }))).toEqual([
+		{ number: 8, outcome: "deferred" },
+		{ number: 7, outcome: "deferred" },
+	]);
+});
+
+fakes("accepting a round whose post failed defers its findings on the PR the acceptance posts it to", async () => {
+	const s = setup();
+	const pulls = [{ number: 7, body: "" }];
+	const writes = onGitHub(s.repo, pulls);
+	const github = globalThis.fetch;
+	vi.stubGlobal("fetch", async (input: URL, init?: RequestInit) =>
+		new URL(input).pathname === "/reviews"
+			? new Response('{"error":"Try later."}', { status: 503 })
+			: github(input, init),
+	);
+	try {
+		expect((await quest("--root", s.repo, "review")).code).toBe(1);
+		vi.stubGlobal("fetch", github);
+		// The PR was replaced since, so the acceptance posts the round, and defers its finding, on the new one.
+		pulls[0]!.number = 8;
+		const accepted = await quest("--root", s.repo, "review", "--accept", "Fine.");
+		expect(accepted.code, accepted.stderr).toBe(0);
+		expect(writes.posts).toHaveLength(1);
+		expect(writes.posts[0]!.runs).toMatchObject([
+			{ number: 8, outcome: "findings accepted", rounds: [{ round: 1 }] },
+		]);
+		expect(writes.posts[0]!.outcomes).toMatchObject([
+			{ number: 8, session: "thread-1", round: 1, finding: 1, outcome: "deferred", reason: "Fine." },
+		]);
+	} finally {
+		vi.unstubAllGlobals();
+	}
+});
+
+fakes("a repository Kixel Quest does not serve runs no reviewer for a PR, since it would store no round", async () => {
+	const s = setup();
+	const pulls: FakePull[] = [];
+	onGitHub(s.repo, pulls);
+	const github = globalThis.fetch;
+	vi.stubGlobal("fetch", async (input: URL, init?: RequestInit) =>
+		new URL(input).pathname === "/forge"
+			? new Response(JSON.stringify({ login: "agent", repositories: [] }))
+			: github(input, init),
+	);
+	try {
+		// A branch with no PR yet posts nothing, so it is reviewed all the same.
+		const local = await quest("--root", s.repo, "review");
+		expect(local.code, local.stderr).toBe(0);
+		expect(local.stdout).toContain("record skipped: no open PR from feature into main");
+		const calls = s.calls().length;
+		pulls.push({ number: 7, body: "" });
+		const result = await quest("--root", s.repo, "review");
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain(`${KIXEL} does not serve acme/widget, so it would store no review of it`);
+		expect(s.calls()).toHaveLength(calls);
+	} finally {
+		vi.unstubAllGlobals();
+	}
+});
+
+fakes("a host not signed in to Kixel Quest runs no reviewer, since it could not post the round", async () => {
+	const s = setup();
+	vi.stubEnv("XDG_CONFIG_HOME", join(s.repo, "..", "nobody"));
+	const result = await quest("--root", s.repo, "review");
+	expect(result.code).toBe(1);
+	expect(result.stderr).toContain(`this host is not signed in to ${KIXEL}; run \`quest login\``);
+	expect(s.calls()).toEqual([]);
 });
 
 /** Push a commit that `change` makes to origin's main, returning its SHA. */
@@ -2942,6 +3295,14 @@ test("the verdict is checked field by field, settling each earlier finding once"
 	expect(() => verdict({ structured: { ...scored, findings: [{ ...FINDING, line: 0 }] } }, 0)).toThrow(
 		"does not match",
 	);
+	// Kixel Quest stores each finding by its path and title, so neither may be blank; a note is never posted.
+	for (const blank of [{ file: "" }, { title: " " }]) {
+		expect(() => verdict({ structured: { ...scored, findings: [{ ...FINDING, ...blank }] } }, 0)).toThrow(
+			"does not match",
+		);
+		const note = { ...FINDING, severity: "low", ...blank };
+		expect(verdict({ structured: { ...scored, findings: [note] } }, 0).findings).toEqual([note]);
+	}
 	expect(() => verdict({ text: '{"verdict":"approve"}' }, 0)).toThrow("no findings list");
 	for (const score of [-1, 11, 7.5, "7", undefined]) {
 		expect(() => verdict({ structured: { ...scored, score, findings: [] } }, 0)).toThrow("no score from 0 to 10");

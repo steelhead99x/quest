@@ -8,8 +8,9 @@ import { accessSync, constants, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { type Finding, branchQuest, check, parse } from "../core";
+import { type Finding, MANIFEST_FILE, branchQuest, check, parse } from "../core";
 import { discoveryEnv } from "./git";
+import { type RootFile, manifestProblems } from "./run";
 import { committedSources, hasQuests } from "./tree";
 
 /**
@@ -179,8 +180,24 @@ function treeCheck(dir: string, commit: string): Keyed[] {
 			{ lines: source.text.split(/\r\n?|\n/), entries: docs[index].entries },
 		]),
 	);
+	// The repository's quest.toml and flake.nix, as `quest check` reads them from the working tree.
+	const blob = (path: string): RootFile => {
+		const entry = git(dir, ["ls-tree", commit, "--", path]);
+		if (entry.status !== 0) throw new Error(`git ls-tree ${commit} -- ${path}: ${entry.stderr.trim()}`);
+		if (entry.stdout === "") return null;
+		// A link, as `quest check` reads it, is the link and not its target.
+		if (entry.stdout.startsWith("120000 ")) return { kind: "link" };
+		const read = git(dir, ["cat-file", "blob", `${commit}:${path}`]);
+		if (read.status !== 0) throw new Error(`git cat-file ${commit}:${path}: ${read.stderr.trim()}`);
+		return { kind: "file", text: read.stdout };
+	};
+	const manifest = manifestProblems(blob).map((problem): Keyed => {
+		const [, line, message] = /^[^:]+(?::(\d+):\d+)?: (.*)$/s.exec(problem)!;
+		const finding = { path: MANIFEST_FILE, line: line === undefined ? null : Number(line), message: message! };
+		return { finding, key: `${MANIFEST_FILE}\0${message}\0` };
+	});
 	// As `--no-stubs` does: a head may ship an audit this binary does not, with its stub.
-	return check(docs, exists, { auditNames: false }).map((finding) => {
+	const quests = check(docs, exists, { auditNames: false }).map((finding) => {
 		const file = files.get(finding.path);
 		const line = finding.line;
 		if (line === null || file === undefined) return { finding, key: `${finding.path}\0${finding.message}\0` };
@@ -188,6 +205,7 @@ function treeCheck(dir: string, commit: string): Keyed[] {
 		const text = file.lines.slice((entry?.line ?? line) - 1, entry?.end ?? line).join("\n");
 		return { finding, key: `${finding.path}\0${finding.message}\0${text}` };
 	});
+	return [...quests, ...manifest];
 }
 
 /** `treeCheck` on a commit the head is screened against, where an unreadable tree screens nothing. */

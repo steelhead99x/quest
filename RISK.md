@@ -42,14 +42,15 @@ consumers keep parsing, this repository's own agent instructions, its CI scripts
 or pin bump; its workflows and actions are high, as every repository's are. A bug agents act on while its
 release is live is a risk every one of them carries.
 
-Tests, plans under `quest/`, and documentation change nothing others rely
-on, so they are low.
+Tests, documentation, and a change that only removes plans under `quest/`
+change nothing others rely on, so they are low. A change adding to those
+plans is at least medium, which `quest review` sets itself.
 
 ## Automatic
 
 A low PR whose author has write access lands without the maintainer's pick
 when its whole diff falls in one class below, or in quest's built-in
-`quest` class for plans under `quest/`, judged by the diff alone:
+`quest` class for removing plans under `quest/`, judged by the diff alone:
 a PR title's commit type is only the author's claim. Only a PR the
 maintainer picks changes this list, proposed with `quest usage`'s numbers
 for the class: its PRs merged, the culprits among them, and their wait on a

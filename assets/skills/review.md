@@ -14,7 +14,7 @@ The exception is a draft with no `## Waiting` section, which is still its starte
 Work in a checkout of the PR's head, detached when another worktree holds its branch.
 Whenever your checked-out branch is not the PR's head branch, pass `--branch <head-branch>` to each `quest review`, so its rounds and record follow the PR.
 Commit everything, and unless the repository's local checks already passed on that commit, run them and fix any failure the branch causes.
-A PR whose author lacks write access gets no local run: leave its checks to CI, and run a `quest` it cannot modify, such as an installed release, from outside its checkout with `--root`.
+A PR whose author lacks write access gets no local run: leave its checks to the merge queue, and run a `quest` it cannot modify, such as an installed release, from outside its checkout with `--root`.
 A check failure that reproduces unchanged in a checkout of the base branch is pre-existing rather than the PR's: record the command and both failures in the PR body's validation, go on to review and readiness, and add a follow-up for it unless an open PR already fixes it.
 Never alter the repository's harness to get a pass, such as by disabling a tool, unsetting its environment, or skipping a check, nor report an altered run as its checks.
 
@@ -26,9 +26,9 @@ It picks a reviewer no weaker than the model that changed the branch last, which
 It reads that model, and off a quest branch the size, from the PR body's `## Models` record: open the draft PR and write the record before the first round, as `Size: M` and `Implementer: Claude Code, claude-opus-5-5, high effort`.
 Pass `--exclude-model` or `--size` only for a PR whose body cannot hold the record; `--exclude-model` also bars the model it names, so do not name the writer.
 Where the repository's root instructions name other reviewers, pass them with `--harness`, `--model`, and `--effort`, which runs that reviewer alone.
-Each round rewrites the PR body's `## Review` section and, on GitHub, sets the head's `quest review` commit status, so add context only after it; when it printed `record skipped`, run it again once the PR can take the record, since `quest status` counts only the record `quest review` writes, and only from a maintainer's round: a contributor's own round prints `status skipped`. At `status refused`, fix what it names, such as pushing the head, and review it again.
+Each round posts to Kixel Quest, which needs `quest login` on the host, and, on GitHub, sets the head's `quest review` commit status; it leaves the PR body alone. When it printed `record skipped`, run it again once the branch has its PR, since `quest status` counts only a round `quest review` posted, and only a maintainer's: a contributor's own round prints `status skipped`. At `status refused`, or a post Kixel Quest refused, fix what it names, such as pushing the head, and review it again.
 
-`quest review` sets the head's risk tier before any reviewer runs, from who a mistake in the change would reach: a low head gets no local reviewer, only a record saying so, a medium one gets its size's reviewer, and a high one gets a second reviewer from the other vendor beside it.
+`quest review` sets the head's risk tier before any reviewer runs, from who a mistake in the change would reach: a low head gets no local reviewer, only its classification posted, a medium one gets its size's reviewer, and a high one gets a second reviewer from the other vendor beside it.
 When the user overrides the tier, pass it with `--override <tier> --reason <their reason>`.
 
 Each round ends with a `next` line: follow it until a round of the head reports no finding you have not refuted; never block on the score.

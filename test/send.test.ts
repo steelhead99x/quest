@@ -18,6 +18,8 @@ import {
 import { tokensPath } from "../src/cli/tokens";
 import type { Session } from "../src/cli/usage";
 import { tempDir } from "./fixture";
+import { FakeLogin, writeTokens } from "./kixel-fakes";
+import { login } from "../src/cli/login";
 
 /** The Kixel Quest the tests' users hold a token for, as `QUEST_KIXEL_URL` names it, and where it takes records. */
 const URL_ = "https://kixel.example";
@@ -37,10 +39,7 @@ function home(token: string | null = "secret"): NodeJS.ProcessEnv {
 	const env = { XDG_STATE_HOME: tempDir(), XDG_CONFIG_HOME: tempDir(), QUEST_KIXEL_URL: URL_ };
 	mkdirSync(join(env.XDG_STATE_HOME, "quest", "records"), { recursive: true });
 	writeFileSync(senderPid(env), String(process.pid));
-	if (token !== null) {
-		mkdirSync(join(env.XDG_CONFIG_HOME, "quest"));
-		writeFileSync(tokensPath(env), JSON.stringify({ [URL_]: token }));
-	}
+	if (token !== null) writeTokens(env, { [URL_]: token });
 	return env;
 }
 
@@ -57,7 +56,9 @@ const stopped = (cwd: string) => ({ harness: "claude", session: "s1", transcript
 test("a user without a token queues nothing and is told once", () => {
 	const env = home(null);
 	const root = checkout();
-	expect(queue(stopped(root), env).notices).toEqual([expect.stringContaining(`holds no token for ${URL_}`)]);
+	expect(queue(stopped(root), env).notices).toEqual([
+		expect.stringContaining(`is not signed in to ${URL_}; run \`quest login\``),
+	]);
 	expect(queue(stopped(root), env)).toEqual({ notices: [], queued: false });
 	// Outside a checkout that uses Quest, nothing is said.
 	expect(queue(stopped(tempDir()), env)).toEqual({ notices: [], queued: false });
@@ -68,13 +69,13 @@ test("the Kixel Quest URL defaults to kixel.quest, and must be HTTPS, or HTTP to
 	const env = home(null);
 	delete env.QUEST_KIXEL_URL;
 	expect(queue(stopped(root), env).notices).toEqual([
-		expect.stringContaining("holds no token for https://kixel.quest"),
+		expect.stringContaining("is not signed in to https://kixel.quest;"),
 	]);
 	expect(() => queue(stopped(root), { ...env, QUEST_KIXEL_URL: "http://kixel.example" })).toThrow("not an HTTPS URL");
 	expect(() => queue(stopped(root), { ...env, QUEST_KIXEL_URL: "kixel" })).toThrow("not a URL");
 	// A trailing slash names the same Kixel Quest, so the token pairs with it.
 	expect(queue(stopped(root), { ...env, QUEST_KIXEL_URL: "http://127.0.0.1:8080/" }).notices).toEqual([
-		expect.stringContaining("holds no token for http://127.0.0.1:8080,"),
+		expect.stringContaining("is not signed in to http://127.0.0.1:8080;"),
 	]);
 });
 
@@ -243,6 +244,25 @@ test("the sender posts each queued session with its sub-agents, from its transcr
 		["sub", [7], "implementing", "quest/m0/a.md"],
 	]);
 	expect(pending(env)).toEqual([]);
+});
+
+test("the sender posts with the token quest login stored", async () => {
+	const env = home(null);
+	const root = checkout();
+	const server = new FakeLogin(URL_);
+	await login({
+		env,
+		fetch: server.fetch,
+		now: () => 0,
+		sleep: async () => server.approve(),
+		hostname: "workstation",
+		ask: async () => "n",
+		say: () => {},
+	});
+	expect(queue(stopped(root), env)).toEqual({ notices: [], queued: true });
+	const { deps, uploads } = sender(env, 200, [session("s1", "quest/m0/a")]);
+	await sendPass(deps);
+	expect(uploads.map((upload) => upload.token)).toEqual(["Bearer issued-1"]);
 });
 
 test("a session `quest review` queued is sent on the PR it recorded on, as the role it played", async () => {
@@ -505,8 +525,22 @@ test("a failed upload stays queued and is said once; a refused token stops sendi
 		queued: false,
 	});
 	// A new token is tried again.
-	writeFileSync(tokensPath(env), JSON.stringify({ [URL_]: "fresh" }));
+	writeTokens(env, { [URL_]: "fresh" });
 	expect(queue(stopped(root), env).queued).toBe(true);
+});
+
+test("a token a new sign-in replaced during the pass keeps the queue for the new one", async () => {
+	const env = home();
+	queue(stopped(checkout()), env);
+	const sessions = [session("s1", "quest/m0/a")];
+	// Signing in again revokes the token the pass read before its upload answers.
+	const revoked = sender(env, 401, sessions, () => writeTokens(env, { [URL_]: "fresh" }));
+	expect(await sendPass(revoked.deps)).toEqual([]);
+	expect(pending(env)).toHaveLength(1);
+	const { deps, uploads } = sender(env, 200, sessions);
+	await sendPass(deps);
+	expect(uploads.map((upload) => upload.token)).toEqual(["Bearer fresh"]);
+	expect(pending(env)).toEqual([]);
 });
 
 test("a redirected upload keeps the queue and its cursor, since the endpoint received nothing", async () => {
@@ -832,7 +866,7 @@ test("an incident is posted at once, open until reported again with its culprit,
 	).rejects.toThrow("answered 403");
 	await expect(
 		reportIncident({ cwd: root, id: "x", found: "person", pull: null, at: 0 }, sender(home(null), 200, []).deps),
-	).rejects.toThrow("holds no token");
+	).rejects.toThrow("run `quest login`");
 });
 
 test("a fix that merges after its sessions were sent reaches the store with the next session", async () => {
@@ -1220,13 +1254,13 @@ test.each([
 	["names none", undefined],
 ])("a record is sent to the Kixel Quest its hook queued it for when the sender's environment %s", async (_, named) => {
 	const env = home();
-	writeFileSync(tokensPath(env), JSON.stringify({ [URL_]: "one", [OTHER]: "two", [GONE]: "three" }));
+	writeTokens(env, { [URL_]: "one", [OTHER]: "two", [GONE]: "three" });
 	const root = checkout();
 	queue({ ...stopped(root), session: "s1" }, env);
 	queue({ ...stopped(root), session: "s2" }, { ...env, QUEST_KIXEL_URL: OTHER });
 	queue({ ...stopped(root), session: "s3" }, { ...env, QUEST_KIXEL_URL: GONE });
 	// The person removed one token after its record was queued.
-	writeFileSync(tokensPath(env), JSON.stringify({ [URL_]: "one", [OTHER]: "two" }));
+	writeTokens(env, { [URL_]: "one", [OTHER]: "two" });
 	const sessions = [session("s1", "quest/m0/a"), session("s2", "quest/m0/a"), session("s3", "quest/m0/a")];
 	const { deps, uploads } = sender({ ...env, QUEST_KIXEL_URL: named }, 200, sessions);
 	const hosts = viaHosts(deps);
@@ -1243,7 +1277,7 @@ test.each([
 
 test("a Kixel Quest that refuses its token drops only its own records", async () => {
 	const env = home();
-	writeFileSync(tokensPath(env), JSON.stringify({ [URL_]: "one", [OTHER]: "two" }));
+	writeTokens(env, { [URL_]: "one", [OTHER]: "two" });
 	const root = checkout();
 	queue({ ...stopped(root), session: "s1" }, env);
 	queue({ ...stopped(root), session: "s2" }, { ...env, QUEST_KIXEL_URL: OTHER });
@@ -1260,7 +1294,7 @@ test("a Kixel Quest that refuses its token drops only its own records", async ()
 
 test("a failing Kixel Quest keeps its records without holding back another's", async () => {
 	const env = home();
-	writeFileSync(tokensPath(env), JSON.stringify({ [URL_]: "one", [OTHER]: "two" }));
+	writeTokens(env, { [URL_]: "one", [OTHER]: "two" });
 	const root = checkout();
 	queue({ ...stopped(root), session: "s1" }, env);
 	queue({ ...stopped(root), session: "s2" }, { ...env, QUEST_KIXEL_URL: OTHER });
@@ -1277,7 +1311,7 @@ test("a failing Kixel Quest keeps its records without holding back another's", a
 
 test("each Kixel Quest that does not serve a repository says so once, whichever said it first", async () => {
 	const env = home();
-	writeFileSync(tokensPath(env), JSON.stringify({ [URL_]: "one", [OTHER]: "two" }));
+	writeTokens(env, { [URL_]: "one", [OTHER]: "two" });
 	const root = checkout();
 	queue({ ...stopped(root), session: "s1" }, env);
 	queue({ ...stopped(root), session: "s2" }, { ...env, QUEST_KIXEL_URL: OTHER });

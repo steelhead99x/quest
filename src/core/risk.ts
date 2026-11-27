@@ -1,6 +1,7 @@
 // A pull request's risk tier: what could break, for whom, and how hard it is to undo, set from its diff and never
 // from who wrote it. The repository's RISK.md lists the paths whose change is always high and says what else is
-// customer-facing there; `quest review` sets the tier and records it in the PR body's `## Review` section.
+// customer-facing there, and a repository without one is classified as one with an empty file; `quest review` sets
+// the tier and records it in the PR body's `## Review` section.
 import type { List, ListItem, Paragraph, PhrasingContent, RootContent } from "mdast";
 
 import { codeSpan, markdown } from "./doc";
@@ -37,11 +38,17 @@ export const ALWAYS_HIGH: readonly HighPath[] = [
 export const heldHigh = (file: RiskFile | null): HighPath[] => [...ALWAYS_HIGH, ...(file?.high ?? [])];
 
 /**
- * The automatic classes every repository offers, whatever its risk file says: plans under `quest/`, the same tree in
- * every quest repository. A risk file's class of the same name replaces one.
+ * The quest tree, the same in every quest repository. A change adding or changing a line under it, a new quest or a
+ * move included, is at least medium whatever the risk file says, since agents start that work with no person reading it.
+ */
+export const PLANS = "quest/";
+
+/**
+ * The automatic classes every repository offers, whatever its risk file says: plans under {@link PLANS} that a change
+ * only removes, since one adding to them is never low. A risk file's class of the same name replaces one.
  */
 export const DEFAULT_CLASSES: readonly Class[] = [
-	{ name: "quest", scope: ["quest/**"], rule: "only plans under `quest/` change, which no user reads" },
+	{ name: "quest", scope: ["quest/**"], rule: "only plans under `quest/` are removed or cut, which no user reads" },
 ];
 
 /** The classes a base with risk file `file`, or none, offers: {@link DEFAULT_CLASSES} it does not replace, then its own. */
@@ -281,8 +288,8 @@ export interface RecordedRisk {
 	reason: string;
 	/** The classifier's own tier, lower than `tier` when a reviewer raised it. */
 	classified: Tier;
-	/** How the classifier set it: a model, a path held high, or the default where the base has no risk file. */
-	by: "model" | "paths" | "default";
+	/** How the classifier set it: a model, or a path held high. */
+	by: "model" | "paths";
 	/** The classifier's session, when a model set the tier. */
 	session: string | null;
 	/** The head the record names: in full, or its first 12 characters while a finding is open. */
@@ -291,8 +298,11 @@ export interface RecordedRisk {
 	class: string | null;
 	/** The tier before the maintainer overrode it to `tier`, or null when they did not. */
 	overridden: Tier | null;
-	/** The base's risk file the classifier read, as {@link riskFileId} names it, or null when the record does not say. */
-	riskFile: string | null;
+	/**
+	 * The base's risk file the classifier read, as {@link riskFileId} names it; `none` when the record does not say,
+	 * since a record from before the line names none and counts wherever the base has none.
+	 */
+	riskFile: string;
 }
 
 /** How a record names the base's risk file: its blob's first 12 characters, or `none` where the base has none. */
@@ -338,15 +348,14 @@ export function recordedRisk(body: string): RecordedRisk | MalformedRisk | null 
 		tier: risk[1] as Tier,
 		reason: risk[3]!,
 		classified: classified[1] as Tier,
-		by: by === PATHS ? "paths" : by === DEFAULT ? "default" : "model",
+		by: by === PATHS ? "paths" : "model",
 		session: session ? session[2]! : null,
 		head: head[1]!,
 		class: named ? named[1]! : null,
 		overridden: overridden ? (overridden[1] as Tier) : null,
-		riskFile: file ? file[1]! : null,
+		riskFile: file ? file[1]! : riskFileId(null),
 	};
 }
 
-/** How the record names a tier the paths set, and the default where the base has no risk file. */
+/** How the record names a tier the paths set. */
 export const PATHS = "the always-high paths";
-export const DEFAULT = "default";

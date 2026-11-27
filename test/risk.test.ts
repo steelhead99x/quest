@@ -156,7 +156,7 @@ test("the review record's risk reads back, and a record without one names none",
 		head,
 		class: null,
 		overridden: null,
-		riskFile: null,
+		riskFile: "none",
 	});
 	expect(
 		recordedRisk(
@@ -167,9 +167,6 @@ test("the review record's risk reads back, and a record without one names none",
 			]),
 		),
 	).toMatchObject({ classified: "high", by: "paths", session: null, head: "aaaaaaaaaaaa" });
-	expect(
-		recordedRisk(record([`- Head: ${head}`, "- Risk: medium, `no file`", "- Classified: medium by default"])),
-	).toMatchObject({ by: "default" });
 	expect(recordedRisk(record([`- Head: ${head}`]))).toBeNull();
 	expect(recordedRisk("Summary.\n\n## Models\n\n- Size: S\n")).toBeNull();
 	// A risk line `quest review` did not write reads as malformed, never as no record.
@@ -312,7 +309,8 @@ test("the review record's class, override, and risk file read back", () => {
 	expect(recordedRisk(record(["- Classified: low by default", "- Risk file: none"]))).toMatchObject({
 		riskFile: "none",
 	});
-	expect(recordedRisk(record(["- Classified: low by default"]))).toMatchObject({ riskFile: null });
+	// A record from before the line names no risk file, which counts as the base having none.
+	expect(recordedRisk(record(["- Classified: low by default"]))).toMatchObject({ riskFile: "none" });
 	const malformed = { malformed: "the ## Review record's class, override, or risk file is malformed" };
 	expect(recordedRisk(record(["- Classified: low by default", "- Class: tests"]))).toEqual(malformed);
 	expect(recordedRisk(record(["- Classified: low by default", "- Overridden: by someone"]))).toEqual(malformed);

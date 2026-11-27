@@ -26,7 +26,7 @@ export default defineConfig({
 		// with a key or program the fixtures cannot reach; each fixture sets its identity.
 		// Git for Windows maps "/dev/null" to its null device but rejects os.devNull's "\\.\nul".
 		// An agent session's ID would log the gates tests run as that session's waits (src/cli/waits.ts).
-		// The developer's own records.json would send reads to Kixel Quest where it serves this repository.
+		// The developer's own quest login would send reads to Kixel Quest where it serves this repository.
 		// Each test gets its own XDG_STATE_HOME and XDG_CONFIG_HOME (test/state.ts).
 		// An exported QUEST_FORGE=github would skip the Kixel Quest fakes the forge tests serve.
 		env: {

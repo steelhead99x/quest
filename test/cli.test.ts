@@ -204,12 +204,12 @@ test("a document that is not UTF-8 is an error", () => {
 test("unblocked prints ranked counts and paths, with deterministic JSON and a limit", () => {
 	const tree = Tree.baseline();
 	expect(tree.run("unblocked")).toEqual({ code: 0, stdout: "1\tquest/m0/epic/one.md\n", stderr: "" });
-	const sonnetHigh = '{"harness":"claude","model":"claude-sonnet-5-5","effort":"high"}';
+	const advised = '{"harness":"claude","model":"claude-sonnet-5-5","effort":"high","advisor":"claude-opus-5-5"}';
 	const opusMedium = '{"harness":"claude","model":"claude-opus-5-5","effort":"medium"}';
-	// Its path hashes to arm B, which S runs on Sonnet before the size's own list.
+	// Its path hashes to arm B, which S runs on Sonnet advised by Opus before the size's own list.
 	expect(tree.run("unblocked", "--json", "--limit", "1")).toEqual({
 		code: 0,
-		stdout: `[{"path":"quest/m0/epic/one.md","dependents":1,"hosts":[],"arm":"B","models":[${sonnetHigh},${opusMedium}]}]\n`,
+		stdout: `[{"path":"quest/m0/epic/one.md","dependents":1,"hosts":[],"arm":"B","cohort":"advisor-2026-11","models":[${advised},${opusMedium}]}]\n`,
 		stderr: "",
 	});
 	tree.write("quest/m0/epic/two.md", "# [S] Two\n\n## Goal\n\nWork.\n");
@@ -225,22 +225,27 @@ test("unblocked reports the hosts a quest names", () => {
 test("unblocked routes a quest with a decision open one size up, and XL stays XL", () => {
 	const models = (tree: Tree) =>
 		JSON.parse(tree.run("unblocked", "--json").stdout).map(
-			(quest: { arm: string | null; models: { effort: string }[] }) =>
-				[String(quest.arm), ...quest.models.map((entry) => entry.effort)].join(" "),
+			(quest: { arm: string | null; cohort: string | null; models: { effort: string; advisor?: string }[] }) =>
+				[
+					String(quest.arm),
+					String(quest.cohort),
+					...quest.models.map((entry) => `${entry.effort}${entry.advisor ? `+${entry.advisor}` : ""}`),
+				].join(" "),
 		);
-	// Its path hashes to arm B at every size that runs one; a decision left open runs no arm.
+	// Its path hashes to arm B at every size; a decision left open runs no arm.
 	// An action is only a step for the maintainer, so it keeps the arm too.
 	const tree = Tree.baseline().append(
 		"quest/m0/epic/one.md",
 		"\n## Waiting\n\n- moq-dev/moq: a release.\n- Maintainer (action): approve the install.\n- Maintainer (PC): log in.\n",
 	);
-	expect(models(tree)).toEqual(["B high medium"]);
+	expect(models(tree)).toEqual(["B advisor-2026-11 high+claude-opus-5-5 medium"]);
 	tree.append("quest/m0/epic/one.md", "- Maintainer: pick a name.\n");
-	expect(models(tree)).toEqual(["null high"]);
+	expect(models(tree)).toEqual(["null null high"]);
+	// Arm B falls to the size's writer alone when its advisor cannot run.
 	tree.write("quest/m0/epic/one.md", "# [L] One\n\n## Goal\n\nWork.\n");
-	expect(models(tree)).toEqual(["null high"]);
+	expect(models(tree)).toEqual(["B advisor-2026-11 high+claude-fable-5-2 high"]);
 	tree.write("quest/m0/epic/one.md", "# [XL] One\n\n## Goal\n\nWork.\n\n## Waiting\n\n- Maintainer: pick.\n");
-	expect(models(tree)).toEqual(["null xhigh"]);
+	expect(models(tree)).toEqual(["null null xhigh"]);
 });
 
 test("models ranks a size's writers, or the one entry that runs a PR's writer", () => {
@@ -266,15 +271,30 @@ test("models ranks a size's writers, or the one entry that runs a PR's writer", 
 		expect(unknown.stderr).toContain(`no write list names ${model}`);
 	}
 	expect(tree.run("models", "XXL").code).toBe(2);
-	const arm = (size: string, name: string) => tree.run("models", size, "--arm", name);
-	expect(arm("S", "A").stdout).toBe("claude\tclaude-opus-5-5\tmedium\n");
-	expect(arm("S", "B").stdout).toBe("claude\tclaude-sonnet-5-5\thigh\n");
-	expect(arm("XS", "A").stdout).toBe("claude\tclaude-sonnet-5-5\thigh\n");
-	expect(arm("M", "B")).toMatchObject({ code: 2, stderr: expect.stringContaining("M runs no writer arms") });
-	expect(arm("L", "B")).toMatchObject({ code: 2, stderr: expect.stringContaining("L runs no writer arms") });
-	expect(arm("XL", "B")).toMatchObject({ code: 2, stderr: expect.stringContaining("XL runs no writer arms") });
+	const arm = (size: string, name: string, cohort = "advisor-2026-11") =>
+		tree.run("models", size, "--arm", name, "--cohort", cohort);
+	// Arm A is each size's own first writer.
+	for (const size of ["XS", "S", "M", "L", "XL"]) expect(arm(size, "A").stdout).toBe(tree.run("models", size).stdout);
+	expect(arm("XS", "B").stdout).toBe("claude\tclaude-sonnet-5-5\thigh\tclaude-opus-5-5\n");
+	expect(arm("S", "B").stdout).toBe("claude\tclaude-sonnet-5-5\thigh\tclaude-opus-5-5\n");
+	expect(arm("M", "B").stdout).toBe("claude\tclaude-sonnet-5-5\thigh\tclaude-opus-5-5\n");
+	expect(arm("L", "B").stdout).toBe("claude\tclaude-opus-5-5\thigh\tclaude-fable-5-2\n");
+	expect(JSON.parse(tree.run("models", "XL", "--arm", "B", "--cohort", "advisor-2026-11", "--json").stdout)).toEqual([
+		{ harness: "claude", model: "claude-opus-5-5", effort: "xhigh", advisor: "claude-fable-5-2" },
+	]);
+	// A line from an earlier A/B runs what it records, never this cohort's arm.
+	expect(arm("S", "B", "legacy")).toMatchObject({
+		code: 2,
+		stderr: expect.stringContaining("cohort legacy has ended"),
+	});
+	expect(tree.run("models", "S", "--arm", "B")).toMatchObject({
+		code: 2,
+		stderr: expect.stringContaining("together"),
+	});
 	expect(arm("S", "C").code).toBe(2);
-	expect(tree.run("models", "S", "--arm", "A", "--writer", "claude-opus-5-5").code).toBe(2);
+	expect(
+		tree.run("models", "S", "--arm", "A", "--cohort", "advisor-2026-11", "--writer", "claude-opus-5-5").code,
+	).toBe(2);
 });
 
 test("unblocked splits a size's quests between its arms by path, and keeps each quest's arm", () => {

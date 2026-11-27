@@ -151,7 +151,7 @@ describe("a PR on a repository Kixel Quest hosts", () => {
 		});
 	});
 
-	test("QUEST_FORGE=github cannot reach it, and without a token it names the file to pair one in", async () => {
+	test("QUEST_FORGE=github cannot reach it, and without a token it names quest login", async () => {
 		const pull = kixel.add({ branch: "feature" });
 		vi.stubEnv("QUEST_FORGE", "github");
 		const forced = await cli("status", kixel.url(pull.number));
@@ -160,7 +160,9 @@ describe("a PR on a repository Kixel Quest hosts", () => {
 		vi.stubEnv("XDG_CONFIG_HOME", tempDir());
 		const unpaired = await cli("iterate", kixel.url(pull.number));
 		expect(unpaired.code).toBe(1);
-		expect(unpaired.stderr).toContain(`Kixel Quest (${KIXEL}) hosts example/project; pair a token with it in`);
+		expect(unpaired.stderr).toBe(
+			`quest: Kixel Quest hosts example/project, but this host is not signed in to ${KIXEL}; run \`quest login\`\n`,
+		);
 		expect(kixel.calls).toEqual([]);
 	});
 });

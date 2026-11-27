@@ -1,5 +1,6 @@
-// Whose `## Review` record `quest status` counts: only one a `quest review` commit status attests, set on the reviewed
-// head by a user with write access to the base repository, since anyone can write a SHA into their own PR's body.
+// Which `quest review` commit statuses count: only one set on the reviewed head by a user with write access to the base
+// repository, bound to the head's diff from its merge base. The land gate reads the review from them alone; `quest
+// status` still counts a PR body's `## Review` record, which `quest review` once wrote, only where one attests it.
 import {
 	type PullRequest,
 	type RecordedRisk,
@@ -13,7 +14,7 @@ import {
 	reviewSection,
 	riskFileId,
 } from "../core";
-import { GitHubDeadline, type GitHubReader, array, object, repositoryPath, string } from "./client";
+import { GitHubDeadline, type GitHubReader, type ObjectValue, array, object, repositoryPath, string } from "./client";
 
 /** The commit status context `quest review` sets on each head it records. */
 export const REVIEW_CONTEXT = "quest review";
@@ -27,8 +28,7 @@ export type Outcome = "passed" | "passed with no local reviewer" | "findings acc
  */
 export function attestation(risk: Pick<RecordedRisk, "tier" | "class" | "riskFile">, outcome: Outcome): string {
 	const kind = risk.class === null ? "" : `, class ${risk.class}`;
-	const file = risk.riskFile === null ? "" : `, risk file ${risk.riskFile}`;
-	return `Risk ${risk.tier}${kind}${file}: ${outcome}`;
+	return `Risk ${risk.tier}${kind}, risk file ${risk.riskFile}: ${outcome}`;
 }
 
 /**
@@ -85,55 +85,78 @@ export async function trustedReview(
 /** The most files GitHub's compare API lists. */
 const FILE_LIMIT = 300;
 
-/** The `quest review` status descriptions on a PR's commits, newest first, a page at a time. */
+/** The `quest review` statuses on a PR's commits, a page at a time from the newest page. */
 const TIERS_QUERY = `query ReviewTiers($owner: String!, $repo: String!, $number: Int!, $before: String) {
 	repository(owner: $owner, name: $repo) { pullRequest(number: $number) {
 		commits(last: 100, before: $before) {
 			pageInfo { hasPreviousPage startCursor }
-			nodes { commit { oid status { context(name: "${REVIEW_CONTEXT}") { description } } } }
+			nodes { commit { oid status { context(name: "${REVIEW_CONTEXT}") {
+				state description targetUrl createdAt creator { __typename login }
+			} } } }
 		}
 	} }
 }`;
 
+/** A commit's latest `quest review` status, as GitHub returns it. */
+interface ReviewStatus {
+	oid: string;
+	status: ObjectValue;
+}
+
 /**
  * Why `sha`, the head of `pr` about to land, must wait for a new `quest review` round, or null when it may land.
- * A head `RISK.md` rates high lands only with a trusted record whose reviewed diff is `sha`'s and that was classified
- * against the base's current risk file, so any push after the last review that changes the diff, whoever made it,
- * and any change to the base's risk file since, waits for a new one. A head is high when `body`'s record rates it
- * high, is malformed, or does not count, when a `quest review` status on any of the PR's commits rates it high, or
- * when its diff from its merge base with the base touches a path the base's risk file holds high.
+ * The newest `quest review` status a writer set on a commit of the PR whose diff is the head's decides it: the head
+ * lands whatever its tier when that status passed, classified against the base's current risk file, so a round that
+ * failed outweighs an earlier pass of the same diff, and any push after the last review that changes the diff, whoever
+ * made it, and any change to the base's risk file since, waits for a new one. Otherwise it waits when it is high: when
+ * a `quest review` status on any of the PR's commits rates it high, or when its diff from its merge base with the base
+ * touches a path the base's risk file holds high.
  */
 export async function unreviewedHigh(
 	github: GitHubReader,
 	pr: PullRequest & { base: string },
 	sha: string,
-	body: string,
 ): Promise<string | null> {
-	let distrust: string | undefined;
-	const trusted = await trustedReview(github, pr, body, (message) => {
-		distrust = message;
-	});
 	const head = sha.toLowerCase();
 	const risk = await baseRisk(github, pr);
-	// A record classified against another risk file may hold a tier the base no longer gives, so it covers nothing.
-	const recorded = recordedRisk(body);
-	const covers =
-		recorded !== null && !("malformed" in recorded) && recorded.riskFile === riskFileId(risk?.blob ?? null);
-	if (covers && trusted.head === head) return null;
-	// A review of an earlier head carries to one with its diff, unless a round on this head has failed since.
-	if (
-		covers &&
-		trusted.head !== null &&
-		!(await failed(github, pr, head)) &&
-		(await sameDiff(github, pr, trusted.head, head))
-	)
-		return null;
-	const high =
-		distrust ??
-		recordHigh(body) ??
-		(await statusHigh(github, pr)) ??
-		(await pathHigh(github, pr, head, risk?.text ?? null));
+	const statuses = await reviewStatuses(github, pr);
+	let diff: Promise<string | null> | undefined;
+	for (const each of statuses) {
+		if (each.oid !== head) {
+			diff ??= baseDiff(github, pr, head);
+			const own = await diff;
+			if (own === null || (await baseDiff(github, pr, each.oid)) !== own) continue;
+		}
+		// Only a writer's status, bound to the diff it reviewed, says anything about the head.
+		const bound = await boundStatus(github, pr, each.oid, each.status);
+		if (typeof bound === "string") continue;
+		if (each.status.state === "SUCCESS" && bound.riskFile === riskFileId(risk?.blob ?? null)) return null;
+		break;
+	}
+	const high = statusHigh(statuses) ?? (await pathHigh(github, pr, head, risk?.text ?? null));
 	return high === null ? null : `${sha} is high, since ${high}, and no quest review status covers it`;
+}
+
+/**
+ * The `quest review` statuses on `pr`'s commits, the most recently set first, since a checkout may review an older
+ * commit after a newer one; GitHub lists at most 250 commits, so three pages.
+ */
+async function reviewStatuses(github: GitHubReader, pr: PullRequest): Promise<ReviewStatus[]> {
+	const found: ReviewStatus[] = [];
+	for (let before: string | null = null, more = true; more;) {
+		const data = await github.graphql(TIERS_QUERY, { owner: pr.owner, repo: pr.repo, number: pr.number, before });
+		const commits = object(object(object(data.repository).pullRequest).commits);
+		for (const node of array(commits.nodes).reverse()) {
+			const commit = object(node.commit);
+			const status = commit.status == null ? null : object(commit.status).context;
+			if (status != null) found.push({ oid: string(commit.oid).toLowerCase(), status: object(status) });
+		}
+		const page = object(commits.pageInfo);
+		more = page.hasPreviousPage === true;
+		before = more ? string(page.startCursor) : null;
+	}
+	const set = (each: ReviewStatus) => Date.parse(string(each.status.createdAt));
+	return found.sort((a, b) => set(b) - set(a));
 }
 
 const BASE_RISK_QUERY = `query BaseRisk($owner: String!, $repo: String!, $expression: String!) {
@@ -164,64 +187,25 @@ async function baseRisk(
 	return { text: blob.text, blob: string(blob.oid) };
 }
 
-/** Whether `sha` carries a `quest review` status that is not a pass. */
-async function failed(github: GitHubReader, pr: PullRequest, sha: string): Promise<boolean> {
-	const commit = object(
-		(await github.graphql(STATUS_QUERY, { owner: pr.owner, repo: pr.repo, sha })).repository,
-	).object;
-	const rollup = commit == null ? null : object(commit).status;
-	const status = rollup == null ? null : object(rollup).context;
-	return status != null && object(status).state !== "SUCCESS";
-}
-
-/** Whether `a` and `b` have the same diff from their merge bases with the base. One GitHub cannot diff has none. */
-async function sameDiff(
-	github: GitHubReader,
-	pr: PullRequest & { base: string },
-	a: string,
-	b: string,
-): Promise<boolean> {
-	const diffs: string[] = [];
-	for (const sha of [a, b]) {
-		const response = await github.request(`${repositoryPath(pr)}/compare/${encodeURIComponent(pr.base)}...${sha}`, {
-			accept: "application/vnd.github.diff",
-			allow: [404, 406, 422],
-		});
-		if (!response.ok) return false;
-		diffs.push(await response.text());
-	}
-	return diffs[0] === diffs[1];
-}
-
-/** Why `body`'s risk record makes its PR high, or null. A malformed one does, since the PR's author writes the body. */
-function recordHigh(body: string): string | null {
-	const risk = recordedRisk(body);
-	if (risk === null) return null;
-	if ("malformed" in risk) return risk.malformed;
-	return risk.tier === "high" ? "its review record rates it high" : null;
+/** `sha`'s diff from its merge base with the base, or null for one GitHub cannot diff. */
+async function baseDiff(github: GitHubReader, pr: PullRequest & { base: string }, sha: string): Promise<string | null> {
+	const response = await github.request(`${repositoryPath(pr)}/compare/${encodeURIComponent(pr.base)}...${sha}`, {
+		accept: "application/vnd.github.diff",
+		allow: [404, 406, 422],
+	});
+	return response.ok ? await response.text() : null;
 }
 
 /**
- * Why a `quest review` status on one of `pr`'s commits makes it high, or null. Only someone who can push sets one, and
- * a high rating only holds a head back, so the body, which its author can edit, never lowers it.
+ * Why a `quest review` status on one of the PR's commits makes it high, or null. Only someone who can push sets one, and
+ * a high rating only holds a head back.
  */
-async function statusHigh(github: GitHubReader, pr: PullRequest): Promise<string | null> {
-	// GitHub lists at most 250 commits of a PR, so this reads at most three pages.
-	for (let before: string | null = null, more = true; more;) {
-		const data = await github.graphql(TIERS_QUERY, { owner: pr.owner, repo: pr.repo, number: pr.number, before });
-		const commits = object(object(object(data.repository).pullRequest).commits);
-		for (const node of array(commits.nodes)) {
-			const commit = object(node.commit);
-			const status = commit.status == null ? null : object(commit.status).context;
-			const description = status == null ? null : object(status).description;
-			if (typeof description === "string" && ATTESTED.exec(description)?.[1] === "high")
-				return `the ${REVIEW_CONTEXT} status on ${string(commit.oid)} rates it high`;
-		}
-		const page = object(commits.pageInfo);
-		more = page.hasPreviousPage === true;
-		before = more ? string(page.startCursor) : null;
-	}
-	return null;
+function statusHigh(statuses: ReviewStatus[]): string | null {
+	const high = statuses.find(({ status }) => {
+		const description = status.description;
+		return typeof description === "string" && ATTESTED.exec(description)?.[1] === "high";
+	});
+	return high === undefined ? null : `the ${REVIEW_CONTEXT} status on ${high.oid} rates it high`;
 }
 
 /**
@@ -267,9 +251,53 @@ async function attestedOutcome(
 	const rollup = object(commit).status;
 	const status = rollup == null ? null : object(rollup).context;
 	if (status == null) return `${sha} has no ${REVIEW_CONTEXT} status`;
-	const { state, description, targetUrl, creator } = object(status);
-	if (state !== "SUCCESS")
-		return `the ${REVIEW_CONTEXT} status on ${sha} is ${String(state).toLowerCase()}, not success`;
+	const attested = await attestedStatus(github, pr, sha, object(status));
+	if (typeof attested === "string") return attested;
+	const risk = recordedRisk(body);
+	if (risk === null) return `it names no risk, which the ${REVIEW_CONTEXT} status on ${sha} attests`;
+	// A malformed risk is left for `quest status` to print.
+	if (
+		!("malformed" in risk) &&
+		(risk.tier !== attested.tier || risk.class !== attested.class || risk.riskFile !== attested.riskFile)
+	)
+		return `its risk differs from the ${REVIEW_CONTEXT} status on ${sha}: ${String(object(status).description)}`;
+	return { localReview: attested.outcome !== "passed with no local reviewer" };
+}
+
+/** What a `quest review` status attests: the head's risk, and the run's outcome. */
+interface Attested {
+	tier: string;
+	class: string | null;
+	riskFile: string;
+	outcome: Outcome;
+}
+
+/**
+ * The risk and outcome a writer's passing `quest review` status on `sha` attests for its diff from the merge base with
+ * the PR's base, or why it attests nothing.
+ */
+async function attestedStatus(
+	github: GitHubReader,
+	pr: PullRequest & { base: string },
+	sha: string,
+	status: ObjectValue,
+): Promise<Attested | string> {
+	if (status.state !== "SUCCESS")
+		return `the ${REVIEW_CONTEXT} status on ${sha} is ${String(status.state).toLowerCase()}, not success`;
+	return boundStatus(github, pr, sha, status);
+}
+
+/**
+ * What a writer's `quest review` status on `sha`, in any state, attests for its diff from the merge base with the PR's
+ * base, or why it attests nothing.
+ */
+async function boundStatus(
+	github: GitHubReader,
+	pr: PullRequest & { base: string },
+	sha: string,
+	status: ObjectValue,
+): Promise<Attested | string> {
+	const { description, targetUrl, creator } = status;
 	if (creator == null) return `the account that set the ${REVIEW_CONTEXT} status on ${sha} is gone`;
 	const { __typename: kind, login } = object(creator);
 	const name = String(login);
@@ -292,7 +320,7 @@ async function attestedOutcome(
 			{ allow: [404, 422] },
 		);
 	} catch (error) {
-		// A deadline is the caller's to handle; any other failure leaves the record unverified, not the PR unread.
+		// A deadline is the caller's to handle; any other failure leaves the status unverified, not the PR unread.
 		if (error instanceof GitHubDeadline || !(error instanceof Error)) throw error;
 		return `GitHub cannot compare ${sha} with ${pr.base}: ${error.message}`;
 	}
@@ -301,16 +329,14 @@ async function attestedOutcome(
 	// The status lives in this repository, so its target's diff binds it, whatever name the reader's remote gives it.
 	if (!String(targetUrl).toLowerCase().endsWith(`/compare/${from}...${sha}`))
 		return `the ${REVIEW_CONTEXT} status on ${sha} attests another diff than ${pr.base}'s, from ${from}: ${String(targetUrl)}`;
-	// The tier, class, and risk file gate a standing pick, so the body's must be the ones attested.
+	// The tier, class, and risk file gate a standing pick. A status that names no risk file came before it was
+	// attested, and names none, as a record without the line does.
 	const attested = ATTESTED.exec(typeof description === "string" ? description : "");
 	if (attested === null) return `the ${REVIEW_CONTEXT} status on ${sha} names no risk: ${String(description)}`;
-	const risk = recordedRisk(body);
-	if (risk === null) return `it names no risk, which the ${REVIEW_CONTEXT} status on ${sha} attests`;
-	// A malformed risk is left for `quest status` to print and `quest merge` to refuse.
-	if (
-		!("malformed" in risk) &&
-		(risk.tier !== attested[1] || risk.class !== (attested[2] ?? null) || risk.riskFile !== (attested[3] ?? null))
-	)
-		return `its risk differs from the ${REVIEW_CONTEXT} status on ${sha}: ${String(description)}`;
-	return { localReview: attested[4] !== "passed with no local reviewer" };
+	return {
+		tier: attested[1]!,
+		class: attested[2] ?? null,
+		riskFile: attested[3] ?? riskFileId(null),
+		outcome: attested[4] as Outcome,
+	};
 }

@@ -9,6 +9,7 @@
 Decided in [kixel-ai/kixel.quest#104](https://github.com/kixel-ai/kixel.quest/pull/104): ✅ backfill everything still on disk (rejected: since 2026-11-07; since 2026-11-14). Claude Code was deleting transcripts older than 30 days until kixel-ai/dotfiles#248 kept them ten years; run it on every host soon after it ships.
 
 - Reuse the sender's path, so a backfilled record is indistinguishable from a live one except for when it was sent.
+- Build each saved round's post with `reviewRun` in `src/cli/review-record.ts`, as `quest review` does, and mark its session `posted` once sent, so a later run settles its findings there.
 
 Tests: on a seeded host, a backfill since a date sends each session and each saved review session's last round once, and a second run sends nothing new.
 
@@ -16,4 +17,3 @@ Tests: on a seeded host, a backfill since a date sends each session and each sav
 
 - [Sessions](/quest/m0/telemetry/sessions.md) - the record fields a backfilled session fills
 - [Transcripts](/quest/m0/telemetry/transcripts.md) - the upload a backfill repeats
-- [Review posts](/quest/m0/telemetry/review-posts.md) - the post a saved round is sent as

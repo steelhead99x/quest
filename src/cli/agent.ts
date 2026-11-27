@@ -3,8 +3,8 @@
 // One command owns what a spawn would otherwise script again each time: it
 // strips the coordinating session's harness variables and credentials, so the
 // agent runs on its CLI's own login, and reads the agent's session, reply, and
-// outcome. Its own arguments name the harness, worktree, model, effort, and
-// permission mode, so a permission classifier reading the call sees the whole
+// outcome. Its own arguments name the harness, worktree, model, effort, any
+// advisor, and permission mode, so a permission classifier reading the call sees the whole
 // launch.
 import { type ChildProcess, type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -42,6 +42,8 @@ export interface Launch {
 	harness: HarnessName;
 	model: string;
 	effort: string;
+	/** The model Claude Code's advisor tool consults; only Claude runs one. */
+	advisor?: string;
 	/** Claude Code's `--permission-mode`, or Codex's sandbox mode. */
 	permissionMode: string;
 	worktree: string;
@@ -168,7 +170,17 @@ function claudeFlags(launch: Launch): string[] {
 		launch.permissionMode,
 		"--settings",
 		CLOSED_SESSIONS,
+		...(launch.advisor === undefined ? [] : ["--advisor", launch.advisor]),
 	];
+}
+
+/**
+ * What Claude Code needs to honor `--advisor`: without this variable it consults the advisor only where its
+ * server-side rollout flag enables it, and otherwise drops the tool silently, checked against 2.1.330. The variable
+ * is a `CLAUDE*` one `STRIPPED` removes, so it is set here.
+ */
+function advisorEnvironment(launch: Launch): NodeJS.ProcessEnv {
+	return launch.advisor === undefined ? {} : { CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL: "1" };
 }
 
 /** `codex exec --json` streams JSONL events: the thread id first, the reply in the last agent message. */
@@ -484,6 +496,8 @@ export async function runAgent(
 	session: string | undefined,
 	deps: AgentDependencies,
 ): Promise<number> {
+	if (launch.advisor !== undefined && launch.harness !== "claude")
+		throw new AgentInputError(`--advisor runs only on claude, not ${launch.harness}`);
 	let worktree: string;
 	try {
 		worktree = realpathSync(launch.worktree);
@@ -598,7 +612,10 @@ export async function runAgent(
 					);
 				};
 				// The agent works in its own checkout, so a location inherited from a Git hook would name the wrong one.
-				const env = discoveryEnv(programEnvironment(strippedEnvironment(deps.env)));
+				const env = {
+					...discoveryEnv(programEnvironment(strippedEnvironment(deps.env))),
+					...advisorEnvironment(launch),
+				};
 				if (command === undefined) {
 					supervised = checkouts!.run(checkout!, [program, ...args], { env, spawned: connect });
 					supervised.catch(reject);

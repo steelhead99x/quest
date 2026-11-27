@@ -15,6 +15,8 @@ export interface Model {
 	harness: HarnessName;
 	model: string;
 	effort: string;
+	/** The model Claude Code's advisor tool consults, as `claude --advisor` names it; no other harness runs one. */
+	advisor?: string;
 }
 
 /** The size of a PR with neither a quest nor `--size`. */
@@ -23,6 +25,7 @@ export const DEFAULT_SIZE: Size = "M";
 const sol = (effort: string): Model => ({ harness: "codex", model: "gpt-6.2-sol", effort });
 const opus = (effort: string): Model => ({ harness: "claude", model: "claude-opus-5-5", effort });
 const sonnet = (effort: string): Model => ({ harness: "claude", model: "claude-sonnet-5-5", effort });
+const advised = (entry: Model, advisor: string): Model => ({ ...entry, advisor });
 
 /**
  * Each size's writers, ranked: a spawn starts the quest on the first that can
@@ -107,35 +110,52 @@ export const SPLITTERS: readonly Model[] = [
 export const SPLIT_CHECKERS: readonly Model[] = [sonnet("medium"), sol("medium")];
 
 /**
- * The writer A/B: each armed size's quests split between its first writer
- * and an alternative where published results disagree, until the readout in
- * quest/m0/routing-evidence/README.md deletes it. M, L, and XL run no arm.
+ * The writer A/B's running cohort, which every Implementer line on an armed PR names, as
+ * `(arm B, cohort advisor-2026-11)`, so its readout never counts a PR an earlier A/B drew.
  */
-export const ARMS: Partial<Record<Size, Record<Arm, Model>>> = {
-	XS: { A: sonnet("high"), B: opus("medium") },
-	S: { A: opus("medium"), B: sonnet("high") },
-};
+export const COHORT = "advisor-2026-11";
 
 /**
- * The writers that start quest `doc`, ranked, and its writer A/B arm. A quest
+ * The writer A/B: each armed size's quests split between its first writer and a writer paired with Claude
+ * Code's advisor tool, a stronger model the writer consults mid-task, until the readout in
+ * quest/m0/routing-evidence/README.md deletes it. XS through M test whether Sonnet with Opus advising matches the
+ * size's own writer for less; L and XL test whether Fable advising Opus pays for its price.
+ */
+export const ARMS: Partial<Record<Size, Record<Arm, Model>>> = {
+	XS: { A: sonnet("high"), B: advised(sonnet("high"), "claude-opus-5-5") },
+	S: { A: opus("medium"), B: advised(sonnet("high"), "claude-opus-5-5") },
+	M: { A: opus("high"), B: advised(sonnet("high"), "claude-opus-5-5") },
+	L: { A: opus("high"), B: advised(opus("high"), "claude-fable-5-2") },
+	XL: { A: opus("xhigh"), B: advised(opus("xhigh"), "claude-fable-5-2") },
+};
+
+/** Whether two entries run the same harness, model, effort, and advisor. */
+export const sameEntry = (a: Model, b: Model): boolean =>
+	a.harness === b.harness && a.model === b.model && a.effort === b.effort && a.advisor === b.advisor;
+
+/**
+ * The writers that start quest `doc`, ranked, and its writer A/B arm and cohort. A quest
  * whose size runs an arm starts on the arm's entry, then the size's list
- * without it; the arm hashes the quest's path, so a restart or respawn draws
- * the same one. A `Maintainer:` decision or prose wait leaves it a decision to
+ * without it, so an arm whose advisor cannot run falls to the size's own writer; the arm hashes the quest's path,
+ * so a restart or respawn draws the same one. A `Maintainer:` decision or prose wait leaves it a decision to
  * settle, so it runs the next size's list and no arm, which keeps each arm at
  * its PR's size; an action is only a step for the maintainer, not part of the work.
  */
-export function questWriters(doc: Doc): { arm: Arm | null; models: readonly Model[] } {
+export function questWriters(doc: Doc): { arm: Arm | null; cohort: string | null; models: readonly Model[] } {
 	const sized = size(doc);
 	// `quest check` requires a size of every quest that is not an epic, and only those can be ready.
 	if (sized === null) throw new Error(`${doc.path} has no size`);
 	if (waits(doc).some((wait) => onMaintainer(wait) && wait.kind !== "action"))
-		return { arm: null, models: WRITERS[SIZES[Math.min(SIZES.indexOf(sized) + 1, SIZES.length - 1)]!] };
+		return {
+			arm: null,
+			cohort: null,
+			models: WRITERS[SIZES[Math.min(SIZES.indexOf(sized) + 1, SIZES.length - 1)]!],
+		};
 	const arms = ARMS[sized];
-	if (!arms) return { arm: null, models: WRITERS[sized] };
+	if (!arms) return { arm: null, cohort: null, models: WRITERS[sized] };
 	const arm = ARM_NAMES[createHash("sha256").update(doc.path).digest()[0]! & 1]!;
 	const entry = arms[arm];
-	const same = (e: Model) => e.model === entry.model;
-	return { arm, models: [entry, ...WRITERS[sized].filter((e) => !same(e))] };
+	return { arm, cohort: COHORT, models: [entry, ...WRITERS[sized].filter((e) => !sameEntry(e, entry))] };
 }
 
 /**
