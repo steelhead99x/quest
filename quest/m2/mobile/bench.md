@@ -19,7 +19,7 @@ settles that the site lives.
   the page has nothing to parse, so read the same rows from Kixel Quest's
   records and delete the PR-body parsing in `cloudflare/src/bench/load.ts`,
   keeping token cost off public repositories' pages.
-- Show no eval scores: upstream deleted `quest eval` on 2026-11-23.
+- Show no eval scores: upstream deleted `quest eval` on 2026-11-24 (UTC, its #850).
 - If the site moves into kixel-ai/kixel.quest, this page is its factory
   page's phone view, and this quest is planned there instead.
 
