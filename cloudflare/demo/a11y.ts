@@ -18,8 +18,8 @@ export const AXE_SCRIPT = `axe.run(document, {
 
 /**
  * Script text returning, as JSON, every visible text element whose contrast with the solid background behind it
- * is under WCAG AA: 4.5:1, or 3:1 for large text (24px, or 18.66px bold). Opacity and translucent backgrounds
- * are blended; the page's background colour is the last layer.
+ * is under WCAG AA: 4.5:1, or 3:1 for large text (24px, or 18.66px bold). Each background layer and the text
+ * are blended with the opacity they inherit from every ancestor; the page's background colour is the last layer.
  */
 export const CONTRAST_SCRIPT = `(() => {
 	const parse = (c) => { const m = c.match(/rgba?\\(([^)]+)\\)/); if (!m) return null; const p = m[1].split(/[ ,/]+/).filter(Boolean).map(Number); return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 }; };
@@ -36,18 +36,20 @@ export const CONTRAST_SCRIPT = `(() => {
 		seen.add(el);
 		const s = getComputedStyle(el);
 		if (s.visibility === "hidden" || !el.getClientRects().length || el.closest("[aria-hidden=true]")) continue;
-		let opacity = 1;
-		const layers = [];
-		for (let n = el; n; n = n.parentElement) {
-			const ns = getComputedStyle(n);
-			opacity *= Number(ns.opacity);
-			const c = parse(ns.backgroundColor);
-			if (c && c.a > 0) { layers.push(c); if (c.a >= 1) break; }
-		}
+		// Every ancestor's opacity fades all it holds, an opaque background included, so walk the whole
+		// chain: each background layer and the text take the opacity they inherit from the root down.
+		const chain = [];
+		for (let n = el; n; n = n.parentElement) chain.unshift(n);
+		let inherited = 1;
 		let bg = page;
-		for (const layer of layers.reverse()) bg = over(layer, bg);
+		for (const n of chain) {
+			const ns = getComputedStyle(n);
+			inherited *= Number(ns.opacity);
+			const c = parse(ns.backgroundColor);
+			if (c && c.a > 0) bg = over({ ...c, a: c.a * inherited }, bg);
+		}
 		const color = parse(s.color);
-		const fg = over({ ...color, a: color.a * opacity }, bg);
+		const fg = over({ ...color, a: color.a * inherited }, bg);
 		const [hi, lo] = [lum(fg), lum(bg)].sort((a, b) => b - a);
 		const ratio = (hi + 0.05) / (lo + 0.05);
 		const size = parseFloat(s.fontSize);
@@ -56,4 +58,32 @@ export const CONTRAST_SCRIPT = `(() => {
 		if (ratio < need) low.push({ text: walker.currentNode.textContent.trim().slice(0, 40), ratio: Math.round(ratio * 100) / 100, need });
 	}
 	return JSON.stringify({ checked, low });
+})()`;
+
+/**
+ * Script text planting two texts the contrast check must flag, one faint and one in an opaque card inside a
+ * faded wrapper, then removing them: returns, as JSON, the planted texts it flagged.
+ */
+export const CONTRAST_CONTROL = `(() => {
+	const faint = document.createElement("p");
+	faint.textContent = "control: faint text";
+	faint.style.color = "#334155";
+	// The fade is above the card's opaque background, where a check that stops at it misses it.
+	const wrapper = document.createElement("div");
+	wrapper.style.opacity = "0.3";
+	const card = document.createElement("div");
+	card.style.background = "#0f172a";
+	const faded = document.createElement("p");
+	faded.textContent = "control: faded card";
+	faded.style.color = "#eef2f8";
+	card.append(faded);
+	wrapper.append(card);
+	const host = document.querySelector("main") || document.body;
+	host.prepend(faint, wrapper);
+	try {
+		return JSON.stringify(JSON.parse(${CONTRAST_SCRIPT}).low.map((l) => l.text).filter((t) => t.startsWith("control: ")));
+	} finally {
+		faint.remove();
+		wrapper.remove();
+	}
 })()`;

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { CONTROLLED_SCRIPT, OFFLINE_NOTICE_SCRIPT } from "../device/driver.ts";
-import { AXE_SCRIPT, AXE_SOURCE, CONTRAST_SCRIPT } from "./a11y.ts";
+import { AXE_SCRIPT, AXE_SOURCE, CONTRAST_CONTROL, CONTRAST_SCRIPT } from "./a11y.ts";
 import { Offline } from "../device/offline.ts";
 import { Rpc } from "../device/rpc.ts";
 import { sleep } from "../device/shell.ts";
@@ -188,6 +188,10 @@ try {
 		const review = await value<string>(
 			`[...document.querySelectorAll(".entry")].find((e) => e.textContent.includes("In review")).querySelector("a.entry-title").getAttribute("href")`,
 		);
+		// The contrast check must catch its planted controls first, or its passes mean nothing.
+		await go(`${base}/offline`);
+		const caught = JSON.parse(await value<string>(CONTRAST_CONTROL)) as string[];
+		if (caught.length !== 2) throw new Error(`the contrast check caught ${caught.length} of its 2 controls`);
 		const problems: string[] = [];
 		let checked = 0;
 		for (const path of ["/", "/repos/steelhead99x/quest", review, "/repos/steelhead99x/quest/bench", "/offline"])
