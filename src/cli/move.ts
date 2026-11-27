@@ -124,11 +124,7 @@ export function removeQuest(root: string, arg: string, recursive: boolean): Repo
 
 	// A quest document git does not track is a draft: rm keeps it on disk and names it,
 	// since git cannot restore what it never held.
-	const tracked = new Set(
-		git(root, ["ls-files", "-z", "--", ...doomed.map((doc) => literal(doc.path))])
-			.split("\0")
-			.filter(Boolean),
-	);
+	const tracked = new Set(git(root, ["ls-files", "-z", "--", "quest"]).split("\0").filter(Boolean));
 	const removed = doomed.filter((doc) => tracked.has(doc.path));
 	const drafts = doomed.filter((doc) => !tracked.has(doc.path));
 	if (removed.length === 0) {
@@ -141,6 +137,8 @@ export function removeQuest(root: string, arg: string, recursive: boolean): Repo
 
 	const gone = new Set(removed.map((doc) => doc.path));
 	const edited = remove(docs, (path) => gone.has(path));
+	// Drafts may reference a removed quest. Leave their contents and index status alone.
+	for (const path of edited.keys()) if (!tracked.has(path)) edited.delete(path);
 	// Only the quest documents go: notes, designs, and other files beside them stay.
 	git(root, ["rm", "-q", "--", ...removed.map((doc) => literal(doc.path))]);
 	write(root, edited);

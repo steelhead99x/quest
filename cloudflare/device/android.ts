@@ -148,14 +148,26 @@ export class Android implements Driver {
 			await page.call("Emulation.setEmulatedMedia", {
 				features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }],
 			});
-			await this.navigate(page, url);
+			const load = await this.navigate(page, url);
+			if (load.status !== 200 || load.url !== new URL(url).href)
+				throw new Error(`Chrome could not capture ${url}: loaded ${load.url} (HTTP ${load.status})`);
 			const shot = (await page.call("Page.captureScreenshot", { format: "png" })) as { data?: string };
 			if (!shot.data) throw new Error("Chrome returned no screenshot");
 			return Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
 		} finally {
-			await page.call("Emulation.setEmulatedMedia", { features: [] });
-			// "null" means the user never set one; put back Android's default.
-			await this.adb(["shell", "settings", "put", "system", "font_scale", before === "null" ? "1.0" : before]);
+			try {
+				await page.call("Emulation.setEmulatedMedia", { features: [] });
+			} finally {
+				// "null" means the user never set one; put back Android's default.
+				await this.adb([
+					"shell",
+					"settings",
+					"put",
+					"system",
+					"font_scale",
+					before === "null" ? "1.0" : before,
+				]);
+			}
 		}
 	}
 
@@ -168,9 +180,8 @@ export class Android implements Driver {
 		return this.sh("adb", ["-s", this.id, ...args]);
 	}
 
-	private async json(path: string, method = "GET"): Promise<unknown> {
+	private async json(path: string): Promise<unknown> {
 		const response = await fetch(`http://127.0.0.1:${this.port}${path}`, {
-			method,
 			signal: AbortSignal.timeout(this.timeout),
 		});
 		if (!response.ok) throw new Error(`Chrome's DevTools ${path} answered ${response.status}`);
@@ -179,8 +190,18 @@ export class Android implements Driver {
 
 	private async connect(): Promise<Rpc> {
 		if (this.page) return this.page;
-		const target = (await this.json("/json/new?about:blank", "PUT")) as { webSocketDebuggerUrl?: string };
-		if (!target.webSocketDebuggerUrl) throw new Error("Chrome opened a tab without a DevTools socket");
+		// Android Chrome may refuse /json/new even while its existing tabs are debuggable.
+		// Use the blank tab opened through adb, keeping other pages out of the benchmark.
+		const targets = (await this.json("/json/list")) as {
+			type?: string;
+			url?: string;
+			webSocketDebuggerUrl?: string;
+		}[];
+		const target = targets.find(
+			(tab) => tab.type === "page" && tab.url === "about:blank" && tab.webSocketDebuggerUrl,
+		);
+		if (!target?.webSocketDebuggerUrl)
+			throw new Error("Chrome has no debuggable blank tab; unlock the phone and open about:blank in Chrome");
 		const page = await Rpc.connect(target.webSocketDebuggerUrl, this.timeout);
 		await page.call("Page.enable");
 		await page.call("Network.enable");
@@ -188,10 +209,18 @@ export class Android implements Driver {
 		return page;
 	}
 
-	private async navigate(page: Rpc, url: string): Promise<Load> {
+	private async navigate(page: Rpc, url: string, retryAborted = true): Promise<Load> {
 		const loaded = page.event("Page.loadEventFired");
+		// The navigation command can fail before the event is awaited.
+		void loaded.catch(() => undefined);
 		const start = performance.now();
 		const nav = (await page.call("Page.navigate", { url })) as { errorText?: string };
+		if (nav.errorText === "net::ERR_ABORTED" && retryAborted) {
+			// Chrome can replace a navigation during an activity or configuration change.
+			// Keep only the successful attempt's timing.
+			await sleep(500);
+			return this.navigate(page, url, false);
+		}
 		if (nav.errorText) throw new Error(`Chrome could not load ${url}: ${nav.errorText}`);
 		await loaded;
 		const wall = performance.now() - start;

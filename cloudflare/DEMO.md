@@ -11,7 +11,7 @@ Nothing in `demo/` ships in the real Worker (`src/index.tsx`).
 
 ```sh
 cd cloudflare
-bun run demo        # http://localhost:8790
+bun run demo --port 8790        # http://localhost:8790
 bun run demo:e2e    # in another shell, with Chrome installed
 ```
 
@@ -23,3 +23,24 @@ report, and exits 1 on any failure. `bun run test` also walks the demo's
 sign-in, board, re-run, dispatch, and bench inside workerd.
 
 The demo keeps its claims and runs in memory, so restarting it resets them.
+
+## Run the Android bench against the demo
+
+Start the demo on port 8790. On a computer with an authorized Android
+device attached over USB, forward that port to the phone:
+
+```sh
+adb reverse tcp:8790 tcp:8790
+```
+
+Open `http://localhost:8790/` in Chrome on the phone and select **Sign in
+with GitHub**. The demo signs in as `demo`. From `cloudflare/`, run:
+
+```sh
+bun run device-bench --device android --runs 5 --shots ../.tmp/shots \
+  --url http://localhost:8790/ --url http://localhost:8790/repos/steelhead99x/quest
+adb reverse --remove tcp:8790
+```
+
+Use the report for a local smoke test. Reserve `--record` for baselines
+measured against the deployed site.
