@@ -74,8 +74,10 @@
             packages =
               with pkgs;
               [
-                # Installs dependencies, runs every script and tool, and compiles the release binaries.
+                # Installs dependencies, runs the CLI and its scripts and tests, and compiles the release binaries.
                 bun
+                # Wrangler and the Worker's workerd tests in `cloudflare/`, which support Node, not Bun.
+                nodejs
                 # `quest resolve` for the merge driver; `just` and `bun run quest` run the checkout.
                 questPinned
                 just

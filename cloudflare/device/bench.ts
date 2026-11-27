@@ -2,7 +2,14 @@
 // timings, check the device's clock against the driver's, and compare with a
 // stored baseline for that device model.
 
-import type { DeviceInfo, Driver, Installable, Load } from "./driver.ts";
+import type { DeviceInfo, Driver, Installable, Load, OfflineView } from "./driver.ts";
+
+/** What the bench table says a page shows offline. */
+const OFFLINE_CELL: Record<OfflineView, string> = {
+	page: "yes",
+	notice: "notice only",
+	none: "no",
+};
 import { median, type Regression, regressions, spread, type Summary, summarize } from "./stats.ts";
 
 /** The metrics each load reports, and the least growth that can fail a comparison. */
@@ -172,7 +179,7 @@ export function markdown(reports: DeviceReport[], failed: { path: string; phase:
 		);
 		for (const p of pages)
 			lines.push(
-				`| \`${p.path}\` | first paint ${ms(p.cold.paint)} | ${ms(p.cold.load)} | ${ms(p.warm.load)} | ${ms(p.cold.worker)} | ${Math.round(p.cold.bytes?.median ?? 0)} | ${installs(p.installable) ? "yes" : `no (${[...p.installable.errors, ...(p.installable.serviceWorker ? [] : ["no service worker"])].join(", ") || "no manifest"})`} | ${p.installable.offline ? "yes" : "no"} | ${p.disagreements === 0 ? "agree" : `${p.disagreements} disagree`} |`,
+				`| \`${p.path}\` | first paint ${ms(p.cold.paint)} | ${ms(p.cold.load)} | ${ms(p.warm.load)} | ${ms(p.cold.worker)} | ${Math.round(p.cold.bytes?.median ?? 0)} | ${installs(p.installable) ? "yes" : `no (${[...p.installable.errors, ...(p.installable.serviceWorker ? [] : ["no service worker"])].join(", ") || "no manifest"})`} | ${OFFLINE_CELL[p.installable.offline]} | ${p.disagreements === 0 ? "agree" : `${p.disagreements} disagree`} |`,
 			);
 		for (const limit of device.limits) lines.push("", `- Not measured: ${limit}`);
 		lines.push("");

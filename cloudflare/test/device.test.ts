@@ -53,7 +53,7 @@ function fake(info: DeviceInfo, loads: Load[]): Driver & { calls: string[] } {
 			const l = loads[i++ % loads.length]!;
 			return { ...l, url: l.url || url };
 		},
-		installable: async () => ({ manifest: true, serviceWorker: true, offline: true, errors: [] }),
+		installable: async () => ({ manifest: true, serviceWorker: true, offline: "page" as const, errors: [] }),
 		screenshot: async (_, dark) => new Uint8Array([dark ? 1 : 0]),
 		close: async () => undefined,
 	};
@@ -265,10 +265,17 @@ describe("bench", () => {
 		);
 		expect(md).toContain("- Not measured: text size: by hand");
 		expect(md).toContain("No regressions");
+		// A page that opens offline only as the site's notice doesn't count as opening offline.
+		const pages = report.pages.map((p) => ({
+			...p,
+			installable: { ...p.installable, offline: "notice" as const },
+		}));
+		const notice = markdown([{ ...report, pages }], []);
+		expect(notice).toContain("| yes | notice only | agree |");
 	});
 
 	test("a browser's installability error means the page does not install", () => {
-		const ok = { manifest: true, serviceWorker: true, offline: true, errors: [] };
+		const ok = { manifest: true, serviceWorker: true, offline: "page" as const, errors: [] };
 		expect(installs(ok)).toBe(true);
 		expect(installs({ ...ok, errors: ["no-acceptable-icon"] })).toBe(false);
 		expect(installs({ ...ok, serviceWorker: false })).toBe(false);

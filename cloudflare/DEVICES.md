@@ -24,7 +24,10 @@ two disagree are counted.
 
 Offline checks take the page and each of its service workers offline
 through Chrome's browser endpoint: a page's own offline switch leaves its
-service worker's fetches on the network.
+service worker's fetches on the network. The report's offline column says
+what opened: `yes` for the page itself from the worker's cache, `notice
+only` for the site's offline notice (which marks its `<html>` with
+`data-offline-notice`, and which signed-in pages always get), or `no`.
 
 Without `--record`, each device compares with `bench/<kind>-<model>.json`
 and exits 1 when a median grew by more than three times the baseline's
@@ -48,7 +51,7 @@ Settings, Apps, Safari, Advanced, Web Inspector, and leave Safari open with
 one tab. iPadOS does not let the inspector set text size, cut the network,
 or read thermal state, so the report says so: set Larger Text by hand
 before screenshots; offline is checked as the page being in the service
-worker's cache. Dark mode goes through WebKit's
+worker's cache, else the notice when the worker keeps it. Dark mode goes through WebKit's
 `Page.overrideUserPreference`; an iPadOS whose inspector lacks it fails the
 screenshot with that reason. A cold load first opens the page so the
 service worker and caches are cleared on its own origin, and waits for

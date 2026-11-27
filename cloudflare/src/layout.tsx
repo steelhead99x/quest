@@ -24,13 +24,15 @@ export type Page = {
 	crumbs?: Crumb[];
 	/** The site's origin, for the social preview's absolute URLs; given on public pages. */
 	origin?: string;
+	/** The offline notice the service worker serves, marked so the device bench can tell it from the page asked for. */
+	offlineNotice?: boolean;
 };
 
 /** The page shell. */
 export function Layout(props: Page & { children: Child }) {
 	const title = props.title ? `${props.title} · Quest` : "Quest · Find your next quest";
 	return (
-		<html lang="en">
+		<html lang="en" data-offline-notice={props.offlineNotice ? "" : undefined}>
 			<head>
 				<meta charset="utf-8" />
 				<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
