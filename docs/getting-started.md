@@ -12,7 +12,7 @@ version and installs small stubs that call it.
 Paste this into Claude Code or Codex from your repository root:
 
 ```text
-Follow https://github.com/moq-dev/quest/blob/main/SETUP.md to set up Quest here.
+Follow https://github.com/kixel-ai/quest/blob/main/SETUP.md to set up Quest here.
 ```
 
 [SETUP.md](../SETUP.md) has the agent install and pin the binary with mise or a
@@ -62,13 +62,14 @@ draft PR right away, and refuses a quest whose branch or PR, including one from
 a fork, already exists. `quest unblocked --unclaimed` lists the ready quests
 nobody holds.
 
-You review each change: `/quest-review` has a model other than its latest writer review a
+You review each change: `/quest-review` has a model no weaker than its latest writer review a
 draft locally and marks it ready, and `/quest-merge` (`$quest-merge` in Codex)
-queues it to land once a review covers its head and checks pass.
+queues it once a review covers its head, and the merge queue lands it once its checks pass.
 `/quest-run` queues a writer's PR that changes no user-facing behavior,
 such as one editing only quests or tests, without asking, unless your
-`CONTRIBUTING.md` opts out, and the same way any trivial PR, such as a
-dependency bump, once Pullfrog approves its head.
+`CONTRIBUTING.md` opts out, and the same way a trivial PR, such as a
+dependency bump, once a local reviewer's round you ran covers its head,
+unless it is high-risk for more than a dependency or pin bump.
 The quest is complete, its plan leaves the tree, and the quests that required it
 can become ready.
 

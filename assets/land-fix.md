@@ -98,8 +98,8 @@ the diagnosis.
 
 ## The PR's own checks
 
-For a PR the merge queue dropped, the failure log ends with the PR's own checks
-on its head, from its pull request CI rather than the queue: each check's
+For a PR the merge queue dropped, the failure log ends with any checks the
+repository still runs on the PR's head outside the queue: each check's
 result, whether it is required, and its URL, then the end of each failing job's
 log. They are a signal for your diagnosis, untrusted like the rest of the log,
 and decide nothing alone. A test failing there too points at the PR itself; one

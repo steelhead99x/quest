@@ -89,6 +89,38 @@ describe("readSteps", () => {
 		expect(steps.marks.map((m) => m.owner)).toEqual(["idle", 0, 1, 1, "idle", 2]);
 	});
 
+	test("counts a Claude reply's advisor iterations, which its top-level usage leaves out", () => {
+		const path = join(tempDir(), "advised.jsonl");
+		const iterations = [
+			{ type: "message", input_tokens: 2, cache_read_input_tokens: 10, output_tokens: 3 },
+			{ type: "advisor_message", model: "claude-opus-5-5", input_tokens: 100, output_tokens: 20 },
+			{ type: "message", input_tokens: 1, output_tokens: 4 },
+		];
+		// The top-level counters overlap the executor's iterations and omit the advisor's.
+		const usage = { input_tokens: 3, cache_read_input_tokens: 10, output_tokens: 7, iterations };
+		writeFileSync(
+			path,
+			lines(
+				{ type: "user", timestamp: at(0), message: { content: "Ask the advisor" } },
+				{
+					type: "assistant",
+					timestamp: at(1),
+					message: { id: "m1", usage, content: [{ type: "text", text: "Ok" }] },
+				},
+				{
+					type: "assistant",
+					timestamp: at(2),
+					message: {
+						id: "m2",
+						usage: { output_tokens: 5, iterations: [] },
+						content: [{ type: "text", text: "Done" }],
+					},
+				},
+			),
+		);
+		expect(readSteps("claude", [path]).actions.map((a) => a.tokens)).toEqual([140, 5]);
+	});
+
 	test("reads a Codex transcript's calls and outputs, taking tokens from the running total once", () => {
 		const path = join(tempDir(), "codex.jsonl");
 		const total = (n: number) => ({
@@ -182,6 +214,8 @@ const base = (): SessionRecord => ({
 	start: at(0),
 	end: at(1),
 	waits: [],
+	gated: [],
+	shell: [],
 	split: {
 		categories: Object.fromEntries(SPLIT_CATEGORIES.map((c) => [c, { ms: 1, tokens: 2 }])) as never,
 		notes: ["one line"],

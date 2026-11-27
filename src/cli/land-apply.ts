@@ -4,10 +4,11 @@ import { rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { remoteRepository, requireRemote } from "./github";
-import { GitHub, type GitHubDependencies, type PullRequest, object, string } from "../github/client";
+import { GitHub, type GitHubDependencies, object, string } from "../github/client";
+import type { PullRequest } from "../core";
 import { discoveryEnv } from "./git";
 import { contains, git, gitEnvironment, tryGit } from "./land";
-import { Refusal } from "./start";
+import { Refusal } from "../core";
 
 /** GitHub refuses a comment body longer than this many characters. */
 export const COMMENT_LIMIT = 65_536;
@@ -129,14 +130,14 @@ export function resolutionSection(number: number, resolution: Resolution, room: 
 	const { head, base, tree, patch, cause } = resolution;
 	const why =
 		cause === "protected"
-			? "The fixer's resolution edits protected paths beyond what the base merge carries, and only a maintainer's push lands those"
+			? "The fixer's resolution edits protected paths beyond what a clean base merge carries, and only a maintainer's push lands those"
 			: "GitHub refused the fixer's push";
 	const merge = base === head ? "no base merge" : `base \`${base}\``;
 	const review = cause === "protected" ? "reviews its protected edits" : "reviews it";
 	const text =
 		`\n\n${why}, so its validated resolution travels in this comment: PR head \`${head}\`, ` +
 		`${merge}, resolved tree \`${tree}\`. A maintainer session rebuilds the commit with ` +
-		`\`quest land apply ${number}\`, ${review}, pushes it to the PR branch, and picks the PR again.` +
+		`\`quest land apply ${number}\`, ${review}, pushes it to the PR branch, and picks the PR again once a review counts for the new head, as \`/quest-merge\` defines one, since this commit is no recorded mechanical fix.` +
 		`\n\n<!-- quest land apply v1 head=${head} base=${base} tree=${tree} patch=${patch} -->`;
 	if (text.length <= room) return text;
 	return `\n\nThe fixer's resolution is too large for a comment (${patch.length} characters encoded), so redo the merge by hand.`;

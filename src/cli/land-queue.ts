@@ -9,10 +9,10 @@ import {
 	object,
 	type ObjectValue,
 	type RequiredCheck,
-	type Repository,
 	requirements,
 	string,
 } from "../github/client";
+import type { Repository } from "../core";
 import {
 	baseRemote,
 	eject,

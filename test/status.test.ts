@@ -1,234 +1,30 @@
 import { describe, expect, test } from "vitest";
 
-import { GitHub, type GitHubDependencies } from "../src/github/client";
+import { REVIEW_MARK } from "../src/core";
+import { GitHubReader } from "../src/github/client";
 import { main } from "../src/cli/main";
 import { statusLines } from "../src/cli/status";
 import { pullRequestStatus, requiredOf } from "../src/github/status";
-
-const A = "a".repeat(40);
-const B = "b".repeat(40);
-const pr = { owner: "example", repo: "project", number: 1 };
-const URL_ = "https://github.com/example/project/pull/1";
-
-type Node = Record<string, unknown>;
-const page = (nodes: Node[], next?: string) => ({
-	pageInfo: { hasNextPage: next !== undefined, endCursor: next ?? null },
-	nodes,
-});
-
-/** A recorded GraphQL response; omitted connections stand for ones the query skipped. */
-const CI = ".github/workflows/ci.yml";
-
-function pull(
-	fields: {
-		head?: string;
-		checks?: ReturnType<typeof page> | null;
-		reviews?: ReturnType<typeof page>;
-		threads?: ReturnType<typeof page>;
-		reactions?: Node[];
-	} & Node = {},
-) {
-	const { head = A, checks, reviews, threads, reactions = [], ...rest } = fields;
-	return {
-		data: {
-			repository: {
-				pullRequest: {
-					id: "PR_1",
-					url: URL_,
-					body: "Summary.",
-					updatedAt: "2026-10-07T12:00:00Z",
-					baseRefName: "main",
-					baseRefOid: "b".repeat(40),
-					headRefName: "quest/m0/example",
-					isMergeQueueEnabled: false,
-					labels: { nodes: [] },
-					state: "OPEN",
-					isDraft: false,
-					headRefOid: head,
-					mergeable: "MERGEABLE",
-					mergeStateStatus: "BLOCKED",
-					reviewDecision: "REVIEW_REQUIRED",
-					autoMergeRequest: null,
-					mergeQueueEntry: null,
-					timelineItems: { nodes: [] },
-					reactions: { nodes: reactions },
-					commits: {
-						nodes: [
-							{
-								commit: {
-									oid: head,
-									statusCheckRollup:
-										checks === null
-											? null
-											: { state: "FAILURE", ...(checks ? { contexts: checks } : {}) },
-								},
-							},
-						],
-					},
-					...(reviews ? { reviews } : {}),
-					...(threads ? { reviewThreads: threads } : {}),
-					...rest,
-				},
-			},
-		},
-	};
-}
-
-function run(name: string, status: string, conclusion: string | null, isRequired: boolean) {
-	return {
-		__typename: "CheckRun",
-		name,
-		status,
-		conclusion,
-		detailsUrl: `https://github.com/example/project/actions/runs/1/job/${name}`,
-		isRequired,
-	};
-}
-
-function review(login: string, state: string, commit: string | null, id: number, reactions: Node[] = []) {
-	return {
-		author: { login },
-		state,
-		submittedAt: `2026-10-07T12:0${id}:00Z`,
-		url: `${URL_}#pullrequestreview-${id}`,
-		commit: commit === null ? null : { oid: commit },
-		reactions: { nodes: reactions },
-	};
-}
-
-function thread(id: string, isResolved: boolean, line: number | null = 3, author = "reviewer") {
-	return {
-		id,
-		isResolved,
-		isOutdated: line === null,
-		path: "src/a.ts",
-		line,
-		originalLine: 2,
-		comments: { nodes: [{ author: { login: author }, url: `${URL_}#discussion_r${id}` }] },
-	};
-}
-
-function setup(
-	bodies: unknown[],
-	options: {
-		now?: number;
-		holdFields?: Node;
-		eventPages?: { rows: Node[]; next?: string }[];
-		/** Pages of the head repository's activity, newest first. */
-		activity?: { rows: Node[]; next?: string; status?: number }[];
-		warnings?: string[];
-		/** The base-to-head diff per compared head, or the status GitHub refuses it with. */
-		diffs?: Record<string, string | number>;
-		/** The PR's reviews, threads, and comments as the signal reader reads them; none by default. */
-		signals?: Node;
-		/** The base's active ruleset rules. */
-		rules?: Node[];
-		/** The base branch is gone, so reading it fails. */
-		noBase?: boolean;
-		/** The head's workflow runs, as `GET /actions/runs` lists them. */
-		runs?: Node[];
-	} = {},
-) {
-	const queries: Record<string, unknown>[] = [];
-	const texts: string[] = [];
-	const holdQueries: Record<string, unknown>[] = [];
-	const eventRequests: string[] = [];
-	let last: ReturnType<typeof pull> | undefined;
-	const eventPages = [...(options.eventPages ?? [])];
-	const activityPages = [...(options.activity ?? [])];
-	const activityRequests: string[] = [];
-	const deps: GitHubDependencies = {
-		token: "test-token",
-		quota: "wait",
-		now: () => options.now ?? 0,
-		sleep: async () => {},
-		warn: (message) => options.warnings?.push(message),
-		fetch: async (url, init) => {
-			const path = new URL(String(url));
-			if (path.pathname === "/repos/fork/project/activity") {
-				activityRequests.push(`${path.pathname}${path.search}`);
-				const page = activityPages.shift();
-				if (!page) return Response.json({ message: "Not Found" }, { status: 404 });
-				if (page.status === 403)
-					return Response.json({ message: "Resource not accessible by integration" }, { status: 403 });
-				return Response.json(page.rows, { headers: page.next ? { Link: `<${page.next}>; rel="next"` } : {} });
-			}
-			// Ruleset workflows name their repository by ID: 1 is this one, 2 another.
-			if (path.pathname === "/repositories/1") return Response.json({ full_name: "example/project" });
-			if (path.pathname === "/repositories/2") return Response.json({ full_name: "example/policies" });
-			if (path.pathname === "/repos/example/project/branches/main")
-				return options.noBase
-					? Response.json({ message: "Branch not found" }, { status: 404 })
-					: Response.json({ protection: { enabled: false } });
-			if (path.pathname === "/repos/example/project/rules/branches/main")
-				return Response.json(options.rules ?? []);
-			if (path.pathname === "/repos/example/project/actions/runs") {
-				if (!options.runs) throw new Error("unexpected workflow run request");
-				return Response.json({ total_count: options.runs.length, workflow_runs: options.runs });
-			}
-			const compare = /^\/repos\/example\/project\/compare\/main\.\.\.([0-9a-f]{40})$/.exec(path.pathname);
-			if (compare) {
-				expect(new Headers(init?.headers).get("Accept")).toBe("application/vnd.github.diff");
-				const diff = options.diffs?.[compare[1]!];
-				if (diff === undefined) throw new Error("unexpected compare request");
-				return typeof diff === "number"
-					? Response.json({ message: "No diff" }, { status: diff })
-					: new Response(diff);
-			}
-			if (path.pathname !== "/graphql") {
-				expect(path.pathname).toBe("/repos/example/project/issues/1/events");
-				eventRequests.push(String(url));
-				const page = eventPages.shift();
-				if (!page) throw new Error("unexpected event request");
-				return Response.json(page.rows, { headers: page.next ? { Link: `<${page.next}>; rel="next"` } : {} });
-			}
-			const request = JSON.parse(String(init?.body));
-			if (request.query.includes("p1: pullRequest(number: 1)")) {
-				if (!last) throw new Error("signals read before PR state");
-				const head = last.data.repository.pullRequest.headRefOid;
-				const empty = { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
-				return Response.json({
-					data: {
-						repository: {
-							p1: {
-								headRefOid: head,
-								commits: { nodes: [{ commit: { oid: head, committedDate: "2026-10-16T00:00:00Z" } }] },
-								reviews: empty,
-								reviewThreads: empty,
-								comments: empty,
-								...options.signals,
-							},
-						},
-					},
-				});
-			}
-			if (request.query.includes("query HoldOwnership(")) {
-				holdQueries.push(request.variables);
-				if (!last) throw new Error("ownership read before PR state");
-				const row = last.data.repository.pullRequest;
-				const events = (row.timelineItems as { nodes: Node[] }).nodes.filter((event) =>
-					["LabeledEvent", "AutoMergeEnabledEvent", "AddedToMergeQueueEvent"].includes(
-						String(event.__typename),
-					),
-				);
-				return Response.json({
-					data: {
-						repository: {
-							pullRequest: { ...row, timelineItems: { nodes: events }, ...options.holdFields },
-						},
-					},
-				});
-			}
-			queries.push(request.variables);
-			texts.push(request.query);
-			const body = bodies.shift();
-			if (body === undefined) throw new Error("unexpected request");
-			last = body as ReturnType<typeof pull>;
-			return Response.json(body);
-		},
-	};
-	return { deps, queries, texts, holdQueries, eventRequests, activityRequests };
-}
+import { attestation } from "../src/github/review-trust";
+import {
+	A,
+	baseTree,
+	B,
+	pr,
+	URL_,
+	type Node,
+	page,
+	CI,
+	pull,
+	run,
+	review,
+	thread,
+	setup,
+	reviewStatus,
+	MERGE_BASE,
+	RISK_BLOB,
+	RISK_ID,
+} from "./status-fakes";
 
 test("reports checks by requiredness, each reviewer's latest review against the head, and open threads", async () => {
 	const fixture = setup(
@@ -284,6 +80,7 @@ test("reports checks by requiredness, each reviewer's latest review against the 
 		"review-decision review_required",
 		"review-record -",
 		"risk -",
+		"class -",
 		"auto-merge -",
 		"merge-queue -",
 		"landing-stopped -",
@@ -304,13 +101,24 @@ test("reports checks by requiredness, each reviewer's latest review against the 
 	]);
 });
 
-test("lists the signals that hold the head: unanswered online findings and newer maintainer decisions", async () => {
+test("lists the signals that hold the head: required reviewers' unanswered findings and newer maintainer decisions", async () => {
 	const body = pull({ checks: null, reviews: page([]), threads: page([]) });
 	const decision = `${URL_}#issuecomment-9`;
+	const review = (id: string, login: string, finding: string) => ({
+		id,
+		url: `${URL_}#pullrequestreview-${id}`,
+		author: { __typename: "Bot", login },
+		body: finding,
+		submittedAt: "2026-10-16T00:30:00Z",
+		commit: { oid: body.data.repository.pullRequest.headRefOid },
+	});
 	const status = await pullRequestStatus(
 		pr,
 		setup([body], {
+			// Only frog posts a check the base requires; rabbit's finding is a suggestion.
+			requiredBy: ["frog[bot]"],
 			signals: {
+				reviews: page([review("1", "rabbit", "[P2] Rename it"), review("2", "frog", "[P1] Drops a frame")]),
 				comments: page([
 					{
 						author: { __typename: "User", login: "kixelated" },
@@ -323,9 +131,10 @@ test("lists the signals that hold the head: unanswered online findings and newer
 			},
 		}).deps,
 	);
-	expect(statusLines(status)).toContain(
+	expect(statusLines(status).filter((line) => line.startsWith("signal "))).toEqual([
+		`signal finding ${URL_}#pullrequestreview-2 frog[bot]: drops a frame`,
 		`signal decision ${decision} kixelated: Maintainer decision: raise the timeout.`,
-	);
+	]);
 });
 
 test("a queued PR with auto-merge and no checks reports both, and JSON is deterministic", async () => {
@@ -344,7 +153,7 @@ test("a queued PR with auto-merge and no checks reports both, and JSON is determ
 		threads: page([]),
 	});
 	const status = await pullRequestStatus(pr, setup([body]).deps);
-	expect(statusLines(status).slice(2, 13)).toEqual([
+	expect(statusLines(status).slice(2, 14)).toEqual([
 		"draft true",
 		`head ${A}`,
 		"mergeable mergeable",
@@ -352,6 +161,7 @@ test("a queued PR with auto-merge and no checks reports both, and JSON is determ
 		"review-decision -",
 		"review-record -",
 		"risk -",
+		"class -",
 		"auto-merge squash kixelated 2026-10-07T12:00:00Z -",
 		"merge-queue awaiting_checks 2 2026-10-07T12:01:00Z",
 		"landing-stopped -",
@@ -634,7 +444,7 @@ test("a base's requirements read once give the status a read of its own would, a
 	expect(own.reads).not.toEqual([]);
 
 	const shared = counted();
-	const needs = await requiredOf(new GitHub(shared.deps), pr, "main");
+	const needs = await requiredOf(new GitHubReader(shared.deps), pr, "main");
 	const before = shared.reads.length;
 	expect(await pullRequestStatus(pr, shared.deps, { ...pr, branch: "main", needs })).toEqual(expected);
 	expect(shared.reads).toHaveLength(before);
@@ -1025,28 +835,36 @@ test("refuses a head moved between the paged state and ownership read", async ()
 
 describe("the review record", () => {
 	const C = "c".repeat(40);
+	const RISK = `\n- Risk: low, \`docs only\`\n- Classified: low by default\n- Risk file: ${RISK_ID}`;
+	// The maintainer's passing status on `sha`, attesting the record above.
+	const on = (sha: string) => ({
+		statuses: { [sha]: reviewStatus("SUCCESS", `Risk low, risk file ${RISK_ID}: passed`, sha) },
+	});
+	const RECORD = `## Review\n\n${REVIEW_MARK}\n\n`;
 	const line = async (body: string, options: Parameters<typeof setup>[1] = {}) => {
 		const fixture = setup([pull({ body, checks: null, reviews: page([]), threads: page([]) })], options);
 		return statusLines(await pullRequestStatus(pr, fixture.deps)).find((l) => l.startsWith("review-record "));
 	};
 
 	test("is current when the section's last full SHA is the head, without comparing", async () => {
-		expect(await line(`## Review\n\n- Head: ${B}\n- Low findings fixed at ${A}`)).toBe(
-			`review-record current ${A}`,
-		);
+		expect(await line(`${RECORD}- Head: ${A}${RISK}`)).toBe(`review-record current ${A} local-review`);
 	});
 
 	test("carries across a head whose diff from the base matches the reviewed head's, and not otherwise", async () => {
-		const body = `## Review\n\n- Head: ${B}`;
-		expect(await line(body, { diffs: { [A]: "same", [B]: "same" } })).toBe(`review-record diff-identical ${B}`);
-		expect(await line(body, { diffs: { [A]: "new", [B]: "old" } })).toBe(`review-record stale ${B}`);
+		const body = `${RECORD}- Head: ${B}${RISK}`;
+		expect(await line(body, { ...on(B), diffs: { [A]: "same", [B]: "same" } })).toBe(
+			`review-record diff-identical ${B} local-review`,
+		);
+		expect(await line(body, { ...on(B), diffs: { [A]: "new", [B]: "old" } })).toBe(
+			`review-record stale ${B} local-review`,
+		);
 	});
 
 	test("is unknown, with a warning, when GitHub cannot compare a head", async () => {
 		for (const status of [406, 403]) {
 			const warnings: string[] = [];
-			expect(await line(`## Review\n\n- Head: ${B}`, { diffs: { [A]: status }, warnings })).toBe(
-				`review-record unknown ${B}`,
+			expect(await line(`${RECORD}- Head: ${B}${RISK}`, { ...on(B), diffs: { [A]: status }, warnings })).toBe(
+				`review-record unknown ${B} local-review`,
 			);
 			expect(warnings).toHaveLength(1);
 		}
@@ -1054,6 +872,173 @@ describe("the review record", () => {
 
 	test("reads only the Review section, so a SHA elsewhere names no review", async () => {
 		expect(await line(`Fixes ${A}.\n\n## Review\n\nSkipped.\n\n## Models\n\n${C}`)).toBe("review-record -");
+	});
+
+	test("names no review for a section `quest review` never wrote, such as a skip naming the head", async () => {
+		expect(await line(`## Review\n\nSkipped as trivial at ${A}.`)).toBe("review-record -");
+	});
+});
+
+describe("whose review record counts", () => {
+	const C = "c".repeat(40);
+	const RISK = `\n- Risk: low, \`docs only\`\n- Classified: low by default\n- Risk file: ${RISK_ID}`;
+	const record = (head: string, risk = RISK) =>
+		`Fixes it.\n\n## Review\n\n${REVIEW_MARK}\n\n- Head: ${head}${risk}\n\n## Models\n\nSize: S`;
+	const permissions = { maintainer: "admin", writer: "write", alice: "read" };
+	const passed = (sha: string, login?: string) =>
+		reviewStatus("SUCCESS", `Risk low, risk file ${RISK_ID}: passed`, sha, login);
+	const read = async (body: string, options: Parameters<typeof setup>[1] = {}) => {
+		const warnings: string[] = [];
+		const fixture = setup([pull({ body, checks: null, reviews: page([]), threads: page([]) })], {
+			warnings,
+			permissions,
+			...options,
+		});
+		const lines = statusLines(await pullRequestStatus(pr, fixture.deps));
+		const line = (type: string) => lines.find((l) => l.startsWith(`${type} `));
+		return { record: line("review-record"), risk: line("risk"), warnings, fixture };
+	};
+	const untrusted = (why: string) => [`example/project#1's ## Review record does not count: ${why}`];
+
+	test("counts a record a writer's passing status attests on the head it names", async () => {
+		for (const login of ["maintainer", "writer"]) {
+			const attested = await read(record(A), { statuses: { [A]: passed(A, login) } });
+			expect(attested).toMatchObject({
+				record: `review-record current ${A} local-review`,
+				risk: "risk low current low docs only",
+				warnings: [],
+			});
+			expect(attested.fixture.statusQueries).toEqual([A]);
+			expect(attested.fixture.permissionRequests).toEqual([login]);
+		}
+	});
+
+	test("carries an attested record to a head with the same diff, reading the status of the head it names", async () => {
+		const carried = await read(record(B), { statuses: { [B]: passed(B) }, diffs: { [A]: "same", [B]: "same" } });
+		expect(carried).toMatchObject({ record: `review-record diff-identical ${B} local-review`, warnings: [] });
+		expect(carried.fixture.statusQueries).toEqual([B]);
+	});
+
+	test("counts no record without a passing status from a user who can write, and hides its risk", async () => {
+		const cases: [Record<string, ReturnType<typeof reviewStatus> | null>, string][] = [
+			[{}, `${A} has no quest review status`],
+			[{ [A]: null }, `example/project has no commit ${A}`],
+			[
+				{ [A]: reviewStatus("FAILURE", "Risk low: findings open", A) },
+				`the quest review status on ${A} is failure, not success`,
+			],
+			[
+				{ [A]: passed(B) },
+				`the quest review status on ${A} attests another diff than main's, from ${MERGE_BASE}: https://github.com/example/project/compare/${MERGE_BASE}...${B}`,
+			],
+			// Reviewed from another merge base, as before a retarget or a base reset.
+			[
+				{ [A]: { ...passed(A), targetUrl: `https://github.com/example/project/compare/${C}...${A}` } },
+				`the quest review status on ${A} attests another diff than main's, from ${MERGE_BASE}: https://github.com/example/project/compare/${C}...${A}`,
+			],
+			[
+				{ [A]: passed(A, "alice") },
+				`alice, who set the quest review status on ${A}, has read access to example/project, not write`,
+			],
+			[
+				{ [A]: passed(A, "stranger") },
+				`stranger, who set the quest review status on ${A}, has no access to example/project, not write`,
+			],
+			[
+				{ [A]: reviewStatus("SUCCESS", "Risk low: passed", A, "github-actions", "Bot") },
+				`github-actions, who set the quest review status on ${A}, is a Bot, not a user`,
+			],
+			[
+				{ [A]: { ...passed(A), creator: null as unknown as ReturnType<typeof passed>["creator"] } },
+				`the account that set the quest review status on ${A} is gone`,
+			],
+			[
+				{ [A]: reviewStatus("SUCCESS", "looks good", A) },
+				`the quest review status on ${A} names no risk: looks good`,
+			],
+		];
+		for (const [statuses, why] of cases)
+			expect(await read(record(A), { statuses })).toMatchObject({
+				record: "review-record -",
+				risk: "risk -",
+				warnings: untrusted(why),
+			});
+		const hidden = await read(record(A), { statuses: { [A]: passed(A) }, permissions: { maintainer: 403 } });
+		expect(hidden.warnings).toEqual(
+			untrusted(
+				`cannot read the permission of maintainer, who set the quest review status on ${A}: Must have push access`,
+			),
+		);
+	});
+
+	test("counts a record whose risk, class, and risk file are the ones its status attests, and hides a forged one", async () => {
+		const risk = `${RISK.replace("by default", "by Claude Code, m, low effort, session `s`")}\n- Class: \`test\``;
+		const attest = (description: string) => ({ statuses: { [A]: reviewStatus("SUCCESS", description, A) } });
+		// Whether a local reviewer ran comes from the status alone, whatever the body claims.
+		for (const [outcome, review] of [
+			["passed", "local-review"],
+			["findings accepted", "local-review"],
+			["passed with no local reviewer", "no-local-review"],
+		] as const)
+			expect(
+				await read(
+					record(A, risk),
+					attest(attestation({ tier: "low", class: "test", riskFile: RISK_ID }, outcome)),
+				),
+			).toMatchObject({
+				record: `review-record current ${A} ${review}`,
+				risk: "risk low current low docs only",
+				warnings: [],
+			});
+		for (const description of [
+			"Risk high, class test: passed",
+			"Risk low: passed",
+			"Risk low, class chore: passed",
+			// So a body edited to name the base's current risk file still reads as the file the classifier read.
+			"Risk low, class test: passed",
+			"Risk low, class test, risk file none: passed",
+			`Risk low, class test, risk file ${"0".repeat(12)}: passed`,
+		])
+			expect(await read(record(A, risk), attest(description))).toMatchObject({
+				record: "review-record -",
+				risk: "risk -",
+				warnings: untrusted(`its risk differs from the quest review status on ${A}: ${description}`),
+			});
+		// A record whose risk was deleted after the status attested one counts for nothing either.
+		expect((await read(record(A, ""), attest("Risk high: passed"))).warnings).toEqual(
+			untrusted(`it names no risk, which the quest review status on ${A} attests`),
+		);
+	});
+
+	test("reads the status of the last full SHA, so a land fixer's head or a hand-written line needs its own", async () => {
+		const open = `Fixes it.\n\n## Review\n\nmechanical fix by codex: merged (head ${A})\n\n${REVIEW_MARK}\n\n- Head: ${B.slice(0, 12)}, named in full once no reviewer reports a finding${RISK}`;
+		expect(await read(open, { statuses: { [B]: passed(B) } })).toMatchObject({
+			record: "review-record -",
+			warnings: untrusted(`${A} has no quest review status`),
+		});
+		const added = record(B, `${RISK}\n- Low findings fixed at ${C}`);
+		expect((await read(added, { statuses: { [B]: passed(B) } })).warnings).toEqual(
+			untrusted(`${C} has no quest review status`),
+		);
+	});
+
+	test("counts no record GitHub cannot compare with its base, still reading the PR", async () => {
+		for (const status of [403, 404, 422]) {
+			const unread = await read(record(A), { mergeBase: status });
+			expect(unread.record).toBe("review-record -");
+			expect(unread.warnings).toHaveLength(1);
+			expect(unread.warnings[0]).toMatch(
+				new RegExp(
+					`^example/project#1's ## Review record does not count: GitHub cannot compare ${A} with main`,
+				),
+			);
+		}
+	});
+
+	test("reads no status for a section that names no full SHA", async () => {
+		const skipped = await read("## Review\n\nSkipped.");
+		expect(skipped.fixture.statusQueries).toEqual([]);
+		expect(skipped.fixture.permissionRequests).toEqual([]);
 	});
 });
 
@@ -1063,39 +1048,89 @@ describe("the risk tier", () => {
 		const status = await pullRequestStatus(pr, fixture.deps);
 		return { line: statusLines(status).find((l) => l.startsWith("risk ")), risk: status.risk };
 	};
-	const record = (head: string, extra = "") =>
-		`## Review\n\n- Head: ${head}\n- Base: origin/main at bbbbbbbbbbbb\n- Risk: high, \`it rewrites the wire format\`\n` +
-		`- Classified: medium by Claude Code, claude-haiku-5-5, low effort, session \`s-1\`${extra}`;
+	const record = (head: string, file: string | null = RISK_ID) =>
+		`## Review\n\n${REVIEW_MARK}\n\n- Head: ${head}\n- Base: origin/main at bbbbbbbbbbbb\n- Risk: high, \`it rewrites the wire format\`\n` +
+		`- Classified: medium by Claude Code, claude-haiku-5-5, low effort, session \`s-1\`` +
+		(file === null ? "" : `\n- Risk file: ${file}`);
 
 	test("names the record's tier, the classifier's, and whether it covers the head", async () => {
 		expect(await risk(record(A))).toEqual({
 			line: "risk high current medium it rewrites the wire format",
-			risk: { tier: "high", reason: "it rewrites the wire format", classified: "medium", state: "current" },
+			risk: {
+				tier: "high",
+				reason: "it rewrites the wire format",
+				classified: "medium",
+				class: null,
+				state: "current",
+			},
 		});
-		// A record with an open finding names its head by 12 characters, and no full SHA.
-		expect((await risk(record(A.slice(0, 12)))).line).toBe("risk high current medium it rewrites the wire format");
-		expect((await risk(record(B.slice(0, 12)))).line).toBe("risk high stale medium it rewrites the wire format");
+		// A record with an open finding names its head by 12 characters, and no full SHA, so no status attests its risk.
+		expect((await risk(record(A.slice(0, 12)))).line).toBe("risk -");
 	});
 
 	test("carries to a later head as the review record does", async () => {
-		expect((await risk(record(B, `\n- Low findings fixed at ${A}`))).line).toMatch(/^risk high current /);
-		expect((await risk(record(B), { diffs: { [A]: "same", [B]: "same" } })).line).toMatch(
+		const statuses = { [B]: reviewStatus("SUCCESS", `Risk high, risk file ${RISK_ID}: passed`, B) };
+		expect((await risk(record(B), { statuses, diffs: { [A]: "same", [B]: "same" } })).line).toMatch(
 			/^risk high diff-identical /,
 		);
-		expect((await risk(record(B), { diffs: { [A]: "new", [B]: "old" } })).line).toMatch(/^risk high stale /);
+		expect((await risk(record(B), { statuses, diffs: { [A]: "new", [B]: "old" } })).line).toMatch(
+			/^risk high stale /,
+		);
 	});
 
-	test("is absent from a record without one, and fails on a malformed one", async () => {
-		expect((await risk(`## Review\n\n- Head: ${A}`)).line).toBe("risk -");
-		const fixture = setup([
-			pull({
-				body: `## Review\n\n- Head: ${A}\n- Risk: dire`,
-				checks: null,
-				reviews: page([]),
-				threads: page([]),
-			}),
+	test("is stale with its review record once the base's risk file is not the one it was classified against", async () => {
+		const base = (file: { oid: string } | null) => ({ baseRef: baseTree(file) });
+		const read = async (body: string, fields: Node, state = "OPEN", statuses?: Record<string, Node>) => {
+			const warnings: string[] = [];
+			const fixture = setup(
+				[pull({ body, state, checks: null, reviews: page([]), threads: page([]), ...fields })],
+				{ warnings, ...(statuses && { statuses }) },
+			);
+			const status = await pullRequestStatus(pr, fixture.deps);
+			return { risk: status.risk?.state, record: status.reviewRecord?.state, warnings };
+		};
+		const stale = (why: string) => ({
+			risk: "stale",
+			record: "stale",
+			warnings: [
+				`example/project#1's ## Review record ${why}, so it covers the head no longer: run quest review again`,
+			],
+		});
+		const current = { risk: "current", record: "current", warnings: [] };
+		// The base changed RISK.md after the review, so it may no longer hold the tier or offer the class, and the tier
+		// decided how much review the head got.
+		expect(await read(record(A), base({ oid: "0".repeat(40) }))).toEqual(
+			stale(`was classified against RISK.md ${RISK_ID}, but the base's is ${"0".repeat(12)}`),
+		);
+		expect(await read(record(A, "none"), base(null))).toEqual(current);
+		expect(await read(record(A, "none"), base({ oid: RISK_BLOB }))).toEqual(
+			stale(`was classified when the base had no RISK.md, but the base's is ${RISK_ID}`),
+		);
+		expect(await read(record(A), base(null))).toEqual(
+			stale(`was classified against RISK.md ${RISK_ID}, but the base has none`),
+		);
+		// A record and status from before the risk file line name none, so they cover a base that has none.
+		const before = { [A]: reviewStatus("SUCCESS", "Risk high: passed", A) };
+		expect(await read(record(A, null), base(null), "OPEN", before)).toEqual(current);
+		expect(await read(record(A, null), {}, "OPEN", before)).toEqual(
+			stale(`was classified when the base had no RISK.md, but the base's is ${RISK_ID}`),
+		);
+		// A closed PR cannot land, and its base may be gone, so only its head is compared.
+		expect(await read(record(A), { baseRef: null }, "MERGED")).toEqual(current);
+	});
+
+	test("is absent from a record without one, and marks a malformed one without failing the read", async () => {
+		expect((await risk(`## Review\n\n${REVIEW_MARK}\n\n- Head: ${A}`)).line).toBe("risk -");
+		// Read beside a well-formed PR, as a reader of many PRs does: only the malformed one's risk is marked.
+		const [malformed, sound] = await Promise.all([
+			risk(`## Review\n\n${REVIEW_MARK}\n\n- Head: ${A}\n- Risk:dire`),
+			risk(record(A)),
 		]);
-		await expect(pullRequestStatus(pr, fixture.deps)).rejects.toThrow("risk is malformed");
+		expect(malformed).toEqual({
+			line: "risk - malformed - the ## Review record's risk is malformed: dire",
+			risk: { state: "malformed", error: "the ## Review record's risk is malformed: dire" },
+		});
+		expect(sound.line).toBe("risk high current medium it rewrites the wire format");
 	});
 });
 
@@ -1109,17 +1144,21 @@ describe("checkpoint", () => {
 		commit: { oid: commit },
 		reactions: { nodes: [] },
 	});
-	const line = async (reviews: Node[]) =>
+	// Both bots post a check the base requires unless a test names fewer.
+	const line = async (reviews: Node[], requiredBy = ["pullfrog[bot]", "other[bot]"]) =>
 		statusLines(
 			await pullRequestStatus(
 				pr,
-				setup([
-					pull({
-						checks: null,
-						reviews: page(reviews),
-						threads: page([]),
-					}),
-				]).deps,
+				setup(
+					[
+						pull({
+							checks: null,
+							reviews: page(reviews),
+							threads: page([]),
+						}),
+					],
+					{ requiredBy },
+				).deps,
 			),
 		).filter((entry) => entry.startsWith("checkpoint "));
 
@@ -1163,6 +1202,15 @@ describe("checkpoint", () => {
 		]);
 	});
 
+	test("ignores a reviewer the base does not require", async () => {
+		const rounds = [B, C, A].map((commit, index) => bot("pullfrog", "CHANGES_REQUESTED", commit, index + 1));
+		const other = [B, C, A].map((commit, index) => bot("other", "CHANGES_REQUESTED", commit, index + 5));
+		expect(await line([...rounds, ...other], ["other[bot]"])).toEqual([
+			`checkpoint other round 3 ${URL_}#pullrequestreview-7`,
+		]);
+		expect(await line(rounds, [])).toEqual([]);
+	});
+
 	test("ignores reviewers that only comment, and people", async () => {
 		const commented = [B, C, A].map((commit, index) => bot("coderabbitai", "COMMENTED", commit, index + 1));
 		expect(await line(commented)).toEqual([]);
@@ -1171,5 +1219,91 @@ describe("checkpoint", () => {
 			author: { __typename: "User", login: "alice" },
 		}));
 		expect(await line(person)).toEqual([]);
+	});
+});
+
+describe("duplicate quests", () => {
+	const other = "https://github.com/example/project/pull/2";
+	const third = "https://github.com/example/project/pull/3";
+	const files = (paths: [string, string][], more = false) => ({
+		pageInfo: { hasNextPage: more },
+		nodes: paths.map(([path, changeType]) => ({ path, changeType })),
+	});
+
+	test("reports each quest the PR adds that another open PR adds at its path or under its title", async () => {
+		const body = pull({ checks: null, reviews: page([]), threads: page([]) });
+		const status = await pullRequestStatus(
+			pr,
+			setup([body], {
+				open: {
+					pulls: [
+						{
+							number: 1,
+							url: URL_,
+							headRefOid: A,
+							files: files([
+								["quest/m0/hang.md", "ADDED"],
+								["quest/m1/fips.md", "ADDED"],
+								["quest/m0/edited.md", "MODIFIED"],
+								["quest/AGENTS.md", "ADDED"],
+								["src/a.ts", "ADDED"],
+							]),
+						},
+						{
+							number: 2,
+							url: other,
+							headRefOid: B,
+							files: files([
+								["quest/m0/hang.md", "ADDED"],
+								["quest/m0/edited.md", "ADDED"],
+							]),
+						},
+						{
+							number: 3,
+							url: third,
+							headRefOid: "c".repeat(40),
+							// Over 100 files, so REST lists them.
+							files: files([["quest/m0/edited.md", "MODIFIED"]], true),
+						},
+					],
+					files: {
+						3: [
+							{ filename: "quest/m0/fips-hang.md", status: "added" },
+							{ filename: "quest/m0/edited.md", status: "modified" },
+						],
+					},
+					blobs: {
+						[`${A}:quest/m0/hang.md`]: "# [S] Dart iOS hang\n\n## Goal\n\nx\n",
+						[`${A}:quest/m1/fips.md`]: "# [M] Fix the  FIPS fork-test hang\n\n## Goal\n\nx\n",
+						[`${B}:quest/m0/hang.md`]: "# [S] Something else\n\n## Goal\n\nx\n",
+						[`${B}:quest/m0/edited.md`]: "# [S] Edited\n\n## Goal\n\nx\n",
+						[`${"c".repeat(40)}:quest/m0/fips-hang.md`]:
+							"# [S] fix the fips fork-test hang\n\n## Goal\n\nx\n",
+					},
+				},
+			}).deps,
+		);
+		expect(status.duplicates).toEqual([
+			{ path: "quest/m0/hang.md", url: other, other: "quest/m0/hang.md" },
+			{ path: "quest/m1/fips.md", url: third, other: "quest/m0/fips-hang.md" },
+		]);
+		expect(statusLines(status).filter((line) => line.startsWith("duplicate "))).toEqual([
+			`duplicate quest/m0/hang.md ${other} quest/m0/hang.md`,
+			`duplicate quest/m1/fips.md ${third} quest/m0/fips-hang.md`,
+		]);
+	});
+
+	test("a PR that adds no quest reads no titles, and a closed one reads no open PRs", async () => {
+		const open = {
+			pulls: [
+				{ number: 1, url: URL_, headRefOid: A, files: files([["quest/m0/a.md", "MODIFIED"]]) },
+				{ number: 2, url: other, headRefOid: B, files: files([["quest/m0/a.md", "ADDED"]]) },
+			],
+		};
+		const body = pull({ checks: null, reviews: page([]), threads: page([]) });
+		expect((await pullRequestStatus(pr, setup([body], { open }).deps)).duplicates).toEqual([]);
+		const closed = pull({ checks: null, reviews: page([]), threads: page([]), state: "CLOSED" });
+		const opened = { pulls: [{ ...open.pulls[0]!, files: files([["quest/m0/a.md", "ADDED"]]) }, open.pulls[1]!] };
+		expect((await pullRequestStatus(pr, setup([closed], { open: opened }).deps)).duplicates).toEqual([]);
 	});
 });

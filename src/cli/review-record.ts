@@ -1,47 +1,36 @@
-// `quest review` rewrites the `## Review` section of its branch's open PR after each round, so the head
-// it reviewed counts without an agent copying the round into the body by hand.
-import { type Counts, DEFAULT, PATHS, REVIEW_MARK, reviewSection, SEVERITIES } from "../core";
+// `quest review` posts each run to Kixel Quest and attests it with a `quest review` commit status on GitHub, on its
+// branch's open PR. The readers below parse the PR body's `## Review` record earlier versions wrote, which `quest usage`
+// still reads from merged PRs.
+import {
+	REVIEW_MARK,
+	type ReviewRun,
+	type ReviewUpload,
+	type RunOutcome,
+	parseReviews,
+	reviewSection,
+	riskFileId,
+	type Counts,
+} from "../core";
+
+// The PR-body record's reader lives in core, which the quest log Worker shares; callers keep importing it here.
+export { type Counts, type ReviewSummary, parseReview } from "../core";
 import { recorded } from "./models-record";
 import { type ClaimDependencies, upstream } from "./claims";
-import { repositoryPath } from "../github/client";
+import { pullsFrom } from "../github/claims";
+import { object, repositoryPath } from "../github/client";
+import { REVIEW_CONTEXT, attestation, reviewTarget } from "../github/review-trust";
 import { git } from "./git";
+import { contains } from "./land";
 import { requireRemote } from "./github";
-import { string } from "../github/client";
-import {
-	type PullModels,
-	type Reviewed,
-	type Risk,
-	type Round,
-	type Tally,
-	located,
-	parseBase,
-	sameSeat,
-} from "./review";
+import { type ForgeDependencies, KixelQuest } from "./forge";
+import { kixelUrl, requireToken } from "./tokens";
+import { type PullModels, type Reviewed, type Round, SEVERITIES, type Tally, parseBase } from "./review";
 
-// The record's reader lives in core, which the Worker shares; callers keep importing it here.
-export { type Counts, type ReviewSummary, parseReview } from "../core";
-
-const HARNESSES: Record<Round["reviewer"], string> = { claude: "Claude Code", codex: "Codex" };
-
-/**
- * Model text as one inline code span, so a mention, issue reference, or Markdown in it renders as text.
- * `quest status` takes the last full SHA the section names as its reviewed head, so no full SHA appears in it.
- */
-function code(text: string): string {
-	const flat = text
-		.replace(/\s+/g, " ")
-		.trim()
-		.replace(/\b[0-9a-f]{40}\b/g, (sha) => sha.slice(0, 12));
-	const fence = "`".repeat(Math.max(0, ...(flat.match(/`+/g) ?? []).map((run) => run.length)) + 1);
-	const pad = /^`|`$/.test(flat) ? " " : "";
-	return `${fence}${pad}${flat}${pad}${fence}`;
-}
-
-const capitalized = (word: string) => word[0]!.toUpperCase() + word.slice(1);
-
-/** A block's Reviewer line, ending in `, shadow` for the shadow, the size's pick one effort lower. */
-const reviewerLine = (seat: Pick<Tally, "reviewer" | "model" | "effort" | "shadow">) =>
-	`- Reviewer: ${HARNESSES[seat.reviewer]}, ${seat.model}, ${seat.effort} effort${seat.shadow ? ", shadow" : ""}`;
+/** The name a PR body's review record gives each reviewer's CLI. */
+export const HARNESSES: Record<Round["reviewer"], string> = {
+	claude: "Claude Code",
+	codex: "Codex",
+};
 
 /** Findings as their total, then each severity found, such as `3 (high 1, low 2)`. */
 export function severityText(findings: Tally["findings"]): string {
@@ -65,70 +54,6 @@ const counted = ({ first, ...tally }: Tally): Counts => ({
 	open: SEVERITIES.reduce((sum, severity) => sum + tally.findings[severity], 0) - tally.fixed - tally.refuted,
 });
 
-/** How the record names what set the classifier's tier, as `recordedRisk` reads it back. */
-function classifiedBy({ by }: Risk["classified"]): string {
-	if (by.kind === "paths") return PATHS;
-	if (by.kind === "default") return DEFAULT;
-	return `${HARNESSES[by.harness]}, ${by.model}, ${by.effort} effort, session ${code(by.session)}`;
-}
-
-/**
- * The `## Review` section's text for a run's `rounds` of the same head, without its heading: the head's risk, then
- * every tally on the branch, each round's reviewer's beside its round, and a reviewer the run left out on its own.
- */
-export function reviewRecord({ rounds, tallies, risk }: Reviewed): string {
-	const [shared] = rounds;
-	// A reviewer the run left out may still hold open findings, which keep the head from passing too.
-	const clean =
-		rounds.every((round) => round.findings.length === 0) && tallies.every((tally) => counted(tally).open === 0);
-	const lines = [
-		MARK,
-		"",
-		// `quest status` counts a full SHA here as a review of that head, which an open finding has not passed.
-		`- Head: ${clean ? shared!.head : `${shared!.head.slice(0, 12)}, named in full once no reviewer reports a finding`}`,
-		`- Base: ${shared!.base.ref} at ${shared!.base.sha.slice(0, 12)}`,
-		`- Risk: ${risk.tier}, ${code(risk.reason)}`,
-		`- Classified: ${risk.classified.tier} by ${classifiedBy(risk.classified)}`,
-	];
-	for (const round of rounds) {
-		lines.push(
-			"",
-			reviewerLine(round),
-			`- Session: ${code(round.session)}, round ${round.round}`,
-			`- Score: ${round.score}/10, ${code(round.rationale)}`,
-			...(round.raised ? [`- Raised the risk to ${round.raised.tier}: ${code(round.raised.reason)}`] : []),
-		);
-		const tally = tallies.find((each) => sameSeat(each, round));
-		if (tally === undefined) throw new Error(`no tally for ${round.reviewer}'s round`);
-		lines.push(`- Rounds: ${tally.rounds}; ${findingsText(counted(tally))}`);
-		if (round.findings.length === 0) lines.push("- Findings: none");
-		else lines.push("- Findings, open until the next round settles them:");
-		for (const finding of round.findings)
-			lines.push(`  - ${capitalized(finding.severity)}, ${code(located(finding))}: ${code(finding.title)}`);
-		const settled = round.earlier?.findings ?? [];
-		if (settled.length > 0) lines.push(`- The last round's findings, at ${round.earlier!.head.slice(0, 12)}:`);
-		for (const finding of settled)
-			lines.push(
-				`  - ${capitalized(finding.disposition)}: ${finding.severity}, ${code(located(finding))}: ${code(finding.title)}; ${code(finding.reason)}`,
-			);
-	}
-	for (const tally of tallies.filter((each) => !rounds.some((round) => sameSeat(round, each))))
-		lines.push(
-			"",
-			reviewerLine(tally),
-			// Its session, still named so `quest usage` counts it as reviewing.
-			...(tally.session === undefined ? [] : [`- Session: ${code(tally.session)}`]),
-			// Its last round reviewed this head, so its raise still holds.
-			...(risk.raisedBy && sameSeat(risk.raisedBy, tally)
-				? [`- Raised the risk to ${risk.tier}: ${code(risk.reason)}`]
-				: []),
-			`- Rounds: ${tally.rounds}; ${findingsText(counted(tally))}`,
-		);
-	return lines.join("\n");
-}
-
-const MARK = REVIEW_MARK;
-
 /**
  * The reviewer sessions `body`'s `## Review` record names, read from its `Session:` lines alone, so a record whose
  * other lines this version cannot parse, as one a newer `quest review` wrote, still names them.
@@ -137,7 +62,7 @@ export function reviewSessions(body: string): string[] {
 	const section = reviewSection(body);
 	if (!section) return [];
 	const all = body.slice(section.start, section.end);
-	const at = all.indexOf(MARK);
+	const at = all.indexOf(REVIEW_MARK);
 	if (at < 0) return [];
 	return [...all.slice(at).matchAll(/^- Session: (`+) ?(.*?) ?\1(?:, round \d+)?\r?$/gm)].map((found) => found[2]!);
 }
@@ -153,48 +78,117 @@ export function classifierSessions(body: string): string[] {
 	return found ? [found[2]!] : [];
 }
 
-/** `body` with `record` as its `## Review` section, which it gains when it has none; the rest stays as written. */
-export function withReview(body: string, record: string): string {
-	const section = reviewSection(body);
-	if (!section) {
-		const appended = `${body.trimEnd()}${body.trim() ? "\n\n" : ""}## Review\n\n${record}\n`;
-		// A body that ends inside an unclosed code fence or HTML comment would swallow the heading.
-		if (reviewSection(appended) === null)
-			throw new Error(
-				"the PR body ends inside an unclosed code fence or HTML comment; close it so the record can follow",
-			);
-		return appended;
-	}
-	const { start, end } = section;
-	return `${body.slice(0, start)}\n\n${record}\n${end < body.length ? "\n" : ""}${body.slice(end)}`;
-}
-
-/** Where a round's record went: the PR whose body holds it, or why no body changed. */
-export type Recorded = { url: string } | { skipped: string };
+/** Whether a run passed its head: no finding open, including a reviewer's the run left out, or the maintainer accepted them. */
+export const passed = ({ rounds, tallies, accepted }: Pick<Reviewed, "rounds" | "tallies" | "accepted">) =>
+	accepted !== undefined ||
+	(rounds.every((round) => round.findings.length === 0) && tallies.every((tally) => counted(tally).open === 0));
 
 /**
- * The open PR from `branch` into the base `<remote>/<branch>` names, found among the upstream's PRs from the
- * repository the base's remote pushes to, as claims find a branch's PR; or why there is none.
+ * Where a run's record went: the PR it was posted for, and why its status was not set, skipped for a token that cannot
+ * push, whose status would count for nothing, else refused; or why nothing was posted.
  */
-async function openPull(root: string, baseRef: string, branch: string, deps: ClaimDependencies) {
+export type Recorded = { url: string; status?: Unattested } | { skipped: string };
+
+/** Why `quest review` set no status on the head it recorded. */
+type Unattested = { skipped: string } | { refused: string };
+
+/**
+ * The open PR from `branch` into the base `<remote>/<branch>` names, or why there is none: the one from the repository
+ * the base's remote pushes to, else the only one from any repository whose head `HEAD` contains, as a maintainer's
+ * checkout of a contributor's fork PR finds it. The list comes from the forge, and on GitHub the body from the PR itself.
+ */
+async function openPull(
+	root: string,
+	baseRef: string,
+	branch: string,
+	deps: ClaimDependencies,
+): Promise<
+	| {
+			url: string;
+			/** The base repository as lowercase `owner/repo`, and the PR's number, as Kixel Quest names it. */
+			repository: string;
+			number: number;
+			/** The PR's base branch. */
+			base: string;
+			/** Whether Kixel Quest hosts the repository, rather than GitHub. */
+			hosted: boolean;
+			/** The PR's body as it is now. */
+			body(): Promise<string>;
+			/** Set the `quest review` status on `head`, for its diff from the merge base `from`, or say why not. */
+			attest(status: {
+				head: string;
+				from: string;
+				state: "success" | "failure";
+				description: string;
+			}): Promise<Unattested | null>;
+	  }
+	| { skipped: string }
+> {
 	// The checkout's top level: a subdirectory would look for the quest tree below it.
 	const top = git(root, ["rev-parse", "--show-toplevel"]);
 	const { remote, branch: base } = parseBase(top, baseRef);
 	const up = await upstream(top, requireRemote(top, remote), deps);
-	if (up.github === null) return { skipped: `${remote} is not on GitHub` };
-	const { client, repository, head } = up.github;
-	const from = `${head.owner}:${branch}`;
-	const query = `state=open&head=${encodeURIComponent(from)}&base=${encodeURIComponent(base)}&per_page=100`;
-	const [pull] = await client.all(`${repositoryPath(repository)}/pulls?${query}`);
-	if (pull === undefined) return { skipped: `no open PR from ${from} into ${base}` };
-	const path = `${repositoryPath(repository)}/pulls/${Number(pull.number)}`;
+	const hosting = up.hosting;
+	if (hosting === null) return { skipped: `${remote} is not on GitHub or Kixel Quest` };
+	const { repository, head } = hosting;
+	const name = `${head.owner}/${head.repo}`.toLowerCase();
+	const candidates = pullsFrom((await (await hosting.forge()).pulls(repository)).value, branch).filter(
+		(each) => each.base === base,
+	);
+	const own = candidates.find((each) => each.head?.toLowerCase() === name);
+	// Another repository's PR counts only when this checkout holds its pushed head, so a stranger's PR from a
+	// branch of the same name neither sets the round's size nor receives its record.
+	const held = candidates.filter((each) => each.sha !== undefined && contains(top, each.sha, "HEAD"));
+	const pull = own ?? (held.length === 1 ? held[0] : undefined);
+	if (pull === undefined)
+		return {
+			skipped:
+				candidates.length === 0
+					? `no open PR from ${branch} into ${base}`
+					: held.length === 0
+						? `no open PR from ${branch} into ${base} from ${head.owner} or with a head this checkout holds: ${candidates.map((each) => each.url).join(", ")}`
+						: `several open PRs from ${branch} into ${base} with heads this checkout holds, none from ${head.owner}: ${held.map((each) => each.url).join(", ")}`,
+		};
+	const github = up.github;
 	return {
-		client,
-		path,
-		number: Number(pull.number),
-		repository,
-		url: string(pull.html_url),
-		body: typeof pull.body === "string" ? pull.body : "",
+		url: pull.url,
+		repository: `${repository.owner}/${repository.repo}`.toLowerCase(),
+		number: pull.number,
+		base,
+		hosted: github === null,
+		// The forge's list may predate an edit just made, such as the `## Models` record written before a round, so on
+		// GitHub the body comes fresh from the PR itself, on the person's token.
+		body: async () =>
+			github === null
+				? pull.body
+				: ((object(
+						await (
+							await github.client.request(`${repositoryPath(repository)}/pulls/${pull.number}`)
+						).json(),
+					).body as string | null) ?? ""),
+		// The status goes on the person's own token, which the land gate counts only when it can push. Another forge
+		// has no commit statuses here, and counts only a writer's post.
+		attest: async ({ head: sha, from, state, description }) => {
+			if (up.github === null) return null;
+			const { client } = up.github;
+			const response = await client.request(`${repositoryPath(repository)}/statuses/${sha}`, {
+				body: { state, context: REVIEW_CONTEXT, description, target_url: reviewTarget(repository, from, sha) },
+				allow: [403, 404, 422],
+				// The latest status per context wins, so setting it again leaves the same state.
+				repeat: true,
+			});
+			if (response.ok) return null;
+			const message = String(object(await response.json()).message);
+			if (response.status === 422)
+				return { refused: `GitHub refused the status on ${sha}: ${message}; push it, then review it again` };
+			const name = `${repository.owner}/${repository.repo}`;
+			const permissions = object(await (await client.request(repositoryPath(repository))).json()).permissions;
+			return permissions != null && object(permissions).push === true
+				? {
+						refused: `GitHub refused the status (HTTP ${response.status}: ${message}); the token needs write access to ${name}'s commit statuses`,
+					}
+				: { skipped: `you cannot push to ${name}, so only a maintainer's round counts` };
+		},
 	};
 }
 
@@ -207,15 +201,174 @@ export async function pullModels(
 ): Promise<PullModels | null> {
 	const pull = await openPull(root, baseRef, branch, deps);
 	if ("skipped" in pull) return null;
-	return recorded(pull.body);
+	return recorded(await pull.body());
 }
 
-/** Record a run in the `## Review` section of its branch's open PR. The edit is the token's user's, which `/quest-merge` counts only when that user wrote the PR. */
-export async function recordRounds(root: string, reviewed: Reviewed, deps: ClaimDependencies): Promise<Recorded> {
-	const [shared] = reviewed.rounds;
-	const pull = await openPull(root, shared!.base.ref, shared!.branch, deps);
+/**
+ * Fail unless this host can post a run on `branch`'s open PR into `baseRef` before any reviewer spends a round: it must
+ * be signed in to Kixel Quest, and Kixel Quest must serve the PR's repository, since it stores no post for one it does
+ * not. A branch with no such PR posts nothing, so it needs only the sign-in.
+ */
+export async function requirePosting(
+	root: string,
+	baseRef: string,
+	branch: string,
+	deps: ClaimDependencies & Omit<ForgeDependencies, "warn">,
+): Promise<void> {
+	const url = kixelUrl(deps.env);
+	const token = requireToken(url, deps.env);
+	const pull = await openPull(root, baseRef, branch, deps);
+	// A repository Kixel Quest hosts is one it serves.
+	if ("skipped" in pull || pull.hosted) return;
+	const [owner, repo] = pull.repository.split("/") as [string, string];
+	if (!(await new KixelQuest(url, token, deps, false).serves({ owner, repo })))
+		throw new Error(
+			`${url} does not serve ${pull.repository}, so it would store no review of it; install its GitHub App on the repository first`,
+		);
+}
+
+/**
+ * Attest a run with a `quest review` status on its head, which the land gate counts only when the token's user can push,
+ * and post it to Kixel Quest for its branch's open PR, which counts it only when its poster can push. Either failing
+ * fails the run. The status goes first as a failure, which a passing run turns to success only once the post is stored,
+ * so a post that fails leaves the head failing, never an earlier pass or a pending status the land gate would pass over.
+ */
+export async function recordRounds(
+	root: string,
+	reviewed: Reviewed,
+	deps: ClaimDependencies & { env: NodeJS.ProcessEnv; fetch: typeof fetch },
+): Promise<Recorded> {
+	// Checked first, so a host that cannot post sets no status for a run it never records.
+	const url = kixelUrl(deps.env);
+	const token = requireToken(url, deps.env);
+	const pull = await openPull(root, reviewed.base.ref, reviewed.branch, deps);
 	if ("skipped" in pull) return pull;
-	const next = withReview(pull.body, reviewRecord(reviewed));
-	if (next !== pull.body) await pull.client.request(pull.path, { method: "PATCH", body: { body: next } });
-	return { url: pull.url };
+	const outcome = runOutcome(reviewed);
+	const mergeBase = git(root, ["merge-base", reviewed.base.sha, reviewed.head]);
+	const attest = (state: "success" | "failure") =>
+		pull.attest({
+			head: reviewed.head,
+			from: mergeBase,
+			state,
+			description: attestation(
+				{
+					tier: reviewed.risk.tier,
+					class: reviewed.risk.classified.class,
+					riskFile: riskFileId(reviewed.risk.classified.riskFile),
+				},
+				outcome,
+			),
+		});
+	const status = await attest("failure");
+	// An acceptance no status records has not happened, so nothing posts it.
+	if (status !== null && reviewed.accepted !== undefined) return { url: pull.url, status };
+	const at = { repository: pull.repository, number: pull.number };
+	await postReviews(url, token, deps.fetch, {
+		runs: [reviewRun(reviewed, { ...at, base: pull.base, mergeBase })],
+		outcomes: reviewed.outcomes(at),
+	});
+	reviewed.posted?.(at);
+	// A status the token could not set before would fail the same way again.
+	if (status === null && outcome !== "findings open") {
+		const passed = await attest("success");
+		if (passed !== null) return { url: pull.url, status: passed };
+	}
+	return status === null ? { url: pull.url } : { url: pull.url, status };
+}
+
+/** How a run left its head, as its status and post name it. */
+function runOutcome(reviewed: Reviewed): RunOutcome {
+	if (!passed(reviewed)) return "findings open";
+	if (reviewed.accepted !== undefined) return "findings accepted";
+	return reviewed.rounds.length === 0 ? "passed with no local reviewer" : "passed";
+}
+
+/** A run as Kixel Quest stores it, for PR `number` of `repository` into `base`, its head diffed from `mergeBase`. */
+export function reviewRun(
+	reviewed: Reviewed,
+	pull: { repository: string; number: number; base: string; mergeBase: string },
+): ReviewRun {
+	const { risk } = reviewed;
+	const by = risk.classified.by;
+	return {
+		repository: pull.repository,
+		number: pull.number,
+		head: reviewed.head,
+		base: { ref: pull.base, sha: pull.mergeBase },
+		risk: {
+			tier: risk.tier,
+			reason: risk.reason,
+			classified: risk.classified.tier,
+			class: risk.classified.class,
+			classifier:
+				by.kind === "model"
+					? { harness: by.harness, model: by.model, effort: by.effort, session: by.session }
+					: null,
+			riskFile: riskFileId(risk.classified.riskFile),
+		},
+		outcome: runOutcome(reviewed),
+		rounds: reviewed.rounds.map((round) => ({
+			harness: round.reviewer,
+			model: round.model,
+			effort: round.effort,
+			seat: round.second ? "second" : "pick",
+			session: round.session,
+			round: round.round,
+			score: round.score,
+			rationale: round.rationale,
+			findings: round.findings.map((finding) => ({
+				path: finding.file,
+				start: finding.line,
+				end: finding.line,
+				severity: finding.severity,
+				title: finding.title,
+			})),
+		})),
+	};
+}
+
+/** POST `upload` to Kixel Quest at `url` with `token`, after checking it is one its own `parseReviews` takes. */
+async function postReviews(
+	url: string,
+	token: string,
+	fetch: typeof globalThis.fetch,
+	upload: ReviewUpload,
+): Promise<void> {
+	try {
+		parseReviews(upload);
+	} catch (error) {
+		throw new Error(`this quest built a review post its own parseReviews refuses: ${(error as Error).message}`);
+	}
+	const endpoint = `${url}/reviews`;
+	let response: Response;
+	let text: string;
+	try {
+		response = await fetch(endpoint, {
+			method: "POST",
+			// The token is Kixel Quest's alone, so it follows no redirect elsewhere.
+			redirect: "error",
+			headers: {
+				Authorization: `Bearer ${token}`,
+				Accept: "application/json",
+				"Content-Type": "application/json",
+				"User-Agent": "quest",
+			},
+			body: JSON.stringify(upload),
+		});
+		text = await response.text();
+	} catch (error) {
+		throw new Error(
+			`posting the run to ${endpoint} failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (response.ok) return;
+	let why = text.slice(0, 500);
+	try {
+		const error = (JSON.parse(text) as { error?: unknown } | null)?.error;
+		if (typeof error === "string") why = error;
+	} catch {}
+	const retry = response.headers.get("retry-after");
+	throw new Error(
+		`${endpoint} answered HTTP ${response.status}: ${why}${retry === null ? "" : `; try again in ${retry} seconds`}`,
+	);
 }

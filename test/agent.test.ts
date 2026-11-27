@@ -7,6 +7,7 @@ import {
 	readFileSync,
 	readdirSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
@@ -323,6 +324,8 @@ test("start runs claude with every launch setting on its own login", async () =>
 		"high",
 		"--permission-mode",
 		"auto",
+		"--settings",
+		'{"crossSessionInbound":"refuse","permissions":{"deny":["SendMessage","ListAgents"]}}',
 		"--session-id",
 		session,
 	]);
@@ -339,6 +342,32 @@ test("start runs claude with every launch setting on its own login", async () =>
 		QUEST_WORKTREE_HOME: process.env.QUEST_WORKTREE_HOME,
 	});
 	expect(result.stdout).toBe(`session ${session}\noutcome finished\n\ndone\n`);
+});
+
+test("an advisor reaches claude with the variable that turns its tool on, and codex refuses one", async () => {
+	const s = setup();
+	const advised = [...launch("claude"), "--advisor", "claude-fable-5-2"];
+	expect((await quest("agent", "start", ...advised, s.worktree, "go")).code).toBe(0);
+	const [call] = s.calls();
+	const argv = call.argv as string[];
+	expect(argv.slice(argv.indexOf("--settings") + 2, argv.indexOf("--session-id"))).toEqual([
+		"--advisor",
+		"claude-fable-5-2",
+	]);
+	expect(call.env).toMatchObject({ CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL: "1" });
+	// A resume keeps the advisor too, as the iterate that resumes it passes the same options.
+	const session = argv[argv.indexOf("--session-id") + 1]!;
+	expect((await quest("agent", "resume", ...advised, s.worktree, session, "next")).code).toBe(0);
+	const resumed = s.calls()[1]!.argv as string[];
+	expect(resumed.slice(resumed.indexOf("--advisor"), resumed.indexOf("--advisor") + 2)).toEqual([
+		"--advisor",
+		"claude-fable-5-2",
+	]);
+	// Codex has no advisor tool, so it refuses before launching anything.
+	const codex = await quest("agent", "start", ...launch("codex"), "--advisor", "claude-opus-5-5", s.worktree, "go");
+	expect(codex.code).toBe(2);
+	expect(codex.stderr).toContain("--advisor runs only on claude, not codex");
+	expect(s.calls()).toHaveLength(2);
 });
 
 test("a launch that died leaves no record that blocks the next launch", async () => {
@@ -374,6 +403,10 @@ test("an account at its usage limit exits 3, and the session resumes once it res
 	expect(call.argv).toContain("--resume");
 	expect(call.argv).toContain(session);
 	expect(call.argv).not.toContain("--session-id");
+	// A resumed session is closed to other sessions as a started one is.
+	expect((call.argv as string[])[(call.argv as string[]).indexOf("--settings") + 1]).toBe(
+		'{"crossSessionInbound":"refuse","permissions":{"deny":["SendMessage","ListAgents"]}}',
+	);
 	expect(call.stdin).toBe("continue");
 });
 
@@ -384,12 +417,12 @@ test("a launch waits for admission before it claims the worktree", async () => {
 		// Nothing holds the worktree while the launch waits.
 		const state = join(s.runtime, "quest", "agent");
 		expect(readdirSync(join(state, readdirSync(state)[0], "agents"))).toEqual([]);
-		deps.notice("waiting for the load average to fall before starting an agent");
+		deps.notice("waiting for free memory before starting an agent");
 	});
 	const started = await quest("agent", "start", ...launch("claude"), s.worktree, "go");
 	expect(started).toMatchObject({
 		code: 0,
-		stderr: "quest: waiting for the load average to fall before starting an agent\n",
+		stderr: "quest: waiting for free memory before starting an agent\n",
 	});
 });
 
@@ -626,11 +659,32 @@ test("the agent CLI is found on PATH, never in the worktree it runs in", async (
 
 test("a missing agent CLI fails before any agent state is written", async () => {
 	const s = setup();
+	const admit = vi.spyOn(admission, "admit");
 	vi.stubEnv("PATH", join(s.runtime, "empty"));
 	const result = await quest("agent", "start", ...launch("claude"), s.worktree, "go");
 	expect(result.code).toBe(1);
 	expect(result.stderr).toContain("claude is not installed");
 	expect(existsSync(join(s.runtime, "quest", "agent"))).toBe(false);
+	// It fails at once instead of queueing for a host slot.
+	expect(admit).not.toHaveBeenCalled();
+});
+
+posix("a launcher replaced during the admission wait runs as the new target", async () => {
+	const s = setup();
+	const bin = join(s.runtime, "..", "bin");
+	const marker = join(s.runtime, "..", "replacement.log");
+	// `claude` on PATH is a symlink to the current version, as a package manager installs it.
+	const v1 = join(bin, "claude-v1");
+	renameSync(join(bin, "claude"), v1);
+	symlinkSync(v1, join(bin, "claude"));
+	vi.spyOn(admission, "admit").mockImplementation(async () => {
+		fake(bin, "claude-next", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "v2");\n${FAKES.claude}`);
+		renameSync(join(bin, "claude-next"), join(bin, "claude"));
+		rmSync(v1);
+	});
+	const result = await quest("agent", "start", ...launch("claude"), s.worktree, "go");
+	expect(result.code).toBe(0);
+	expect(readFileSync(marker, "utf8")).toBe("v2");
 });
 
 test("launch settings reach the agent unchanged, whatever characters they hold", async () => {

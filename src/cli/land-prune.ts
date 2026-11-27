@@ -10,8 +10,8 @@ export const LOG_RETENTION = 7 * 24 * 3_600_000;
  * so they still expire.
  */
 const LOG =
-	/^(?:base-\d+-[0-9a-f]+|check-\d+-\d+|batch-\d+-\d+|removal-\d+-[0-9TZ]+|conflict-\d+-[0-9a-f]+|fixer-input-\d+-[0-9a-z]+|(?:fix-job|fix-base|watch-job)-[^/]+\.json)\.log$/;
-/** The watcher's job records a later pass reads a log from; each also owns `<record>.log`. */
+	/^(?:base-\d+-[0-9a-f]+|check-\d+-\d+|batch-\d+-\d+|removal-\d+-[0-9TZ]+|conflict-\d+-[0-9a-f]+|fixer-input-\d+-[0-9a-z]+|(?:fix-job|fix-base|watch-job)-[^/]+\.json)\.log$|^watch-job-[^/]+\.json\.error$/;
+/** The watcher's job records a later pass reads a log from; each also owns `<record>.log` and `<record>.error`. */
 const JOB = /^watch-job-[^/]+\.json$/;
 const REMOVAL = /^removal-(\d+)\.json$/;
 
@@ -26,6 +26,7 @@ function inUse(state: string, names: string[]): Set<string> {
 	for (const name of names) {
 		if (JOB.test(name)) {
 			used.add(`${name}.log`);
+			used.add(`${name}.error`);
 			cite(read(name).log);
 		} else {
 			const removal = REMOVAL.exec(name);

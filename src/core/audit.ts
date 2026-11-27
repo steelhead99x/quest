@@ -15,6 +15,11 @@ export interface Audit {
 export const AUDITS: readonly Audit[] = [
 	{ name: "tree", title: "[M] Audit the quest tree" },
 	{ name: "deps", title: "[M] Audit dependencies" },
+	{ name: "code", title: "[L] Audit the code" },
+	{ name: "cost", title: "[L] Audit build and CI cost" },
+	{ name: "docs", title: "[M] Audit the docs" },
+	{ name: "tests", title: "[M] Audit test coverage" },
+	{ name: "instructions", title: "[XL] Audit agent instructions" },
 ];
 
 /** The section naming the audit a quest runs. */

@@ -48,8 +48,15 @@ Current decisions, open questions, or implementation guidance.
 
 ## Waiting
 
-- Maintainer: the decision or action only they can take, and how to check it is done
+- Maintainer: the decision only they can take, with the context to answer it
+  - First option (Recommended) - why it wins
+  - Second option - what it trades away
+- Maintainer (action): a step only they can take, and how to check it is done
 - moq-dev/moq: a condition another party must meet, and how to check or advance it
+
+## Parked
+
+- until the mesh ships - why the work is set aside and when to resume it
 
 ## Scheduled
 
@@ -83,8 +90,14 @@ An epic carries no size until its last child is deleted; its README is then the 
 A quest without it runs anywhere; `quest unblocked --json` reports the list as `hosts` so a dispatcher routes work without reading prose.
 
 `Waiting` lists what the work waits on outside the tree; each item opens with who acts, `Maintainer:` or the outside party, before a colon.
-A decision item gives its options and a recommendation.
+A decision is a `Maintainer:` item whose nested list gives each option as `label` or `label - description`, ending exactly one label with `(Recommended)`; clients add "Explain it first" and a free-text answer, so the list names neither.
+Open a step only the maintainer can take with `Maintainer (action):`, or `Maintainer (PC):` when it needs one of their computers, such as a password-manager unlock, a hardware check, or a local login, so a session away from them skips it.
+Write each item to be answered alone, never pointing at text above or elsewhere, since a client may show only the item.
 Remove an item once its condition clears, and the heading with its last item.
+
+`Parked` holds one item saying why the work is set aside, its plans kept, and when to resume it.
+It blocks the quest, and an epic's or milestone's blocks every quest under it; `quest waiting` lists none of their items, since nobody acts on them until the work resumes.
+Unlike a date it never clears on its own: unpark by deleting the section.
 
 `Scheduled` holds one date, `YYYY-MM-DD` on the local calendar, optionally followed by ` - why`.
 The quest is blocked until that day, and an epic's or milestone's date blocks every quest under it.
@@ -107,12 +120,14 @@ End every quest skill with a final summary in sections, such as the PRs and thei
 ## Creation
 
 Quests are created in PRs and reviewed.
-Search the tree and git history before making a new quest.
+Before making a new quest, search the tree, git history, and the quest files each open PR adds or changes, which `quest pr list` lists, a `file <url> <path>` line each, on GitHub and Kixel Quest alike; a search of PR titles and bodies misses a PR that never names the subject.
 
 Split independently completable work into separate quests.
 Group related quests in an epic; its README holds the work no child owns.
 
 Work found along the way that is worth a quest is a follow-up: add it to the PR that found it, as a new quest placed and sized by these rules and the repository's, or an edit to the quest that owns the work; never as an agent-session task or a GitHub issue.
+When another open PR's quest owns the work, add nothing: name that PR and quest in the PR body instead.
+`quest status <pr>` prints a `duplicate` line for each quest the PR adds that another open PR also adds, by path or title; resolve each before marking the PR ready or picking it, unless both PRs need the quest.
 Drop one you would call optional or worth doing only if it matters.
 Answer each of its decisions you can with your recommendation in its Plan, and list each you cannot as a `Maintainer:` decision item under its `Waiting`.
 The PR body's `## Follow-ups` section links each one with its open decisions, which neither keep the PR a draft nor stop its pick.
@@ -125,12 +140,12 @@ A release or pin bump that unblocks work is its own quest.
 So is anything waiting on an outside party or a human action (an upstream fix, a customer, a decision).
 Its `Waiting` section names who acts, the condition, and how to check or advance it; it is deleted once the condition clears.
 Automate a step rather than leave it to a person whenever an agent can take it.
-A `Maintainer:` item says why an agent cannot take the step and what automation was considered.
+A maintainer's action says why an agent cannot take the step and what automation was considered.
 Record a wait there, not in a draft PR holding only evidence or steps for a person.
 Unlike a blocked quest it stays ready, so it resurfaces whenever ready work is triaged instead of stalling in the backlog.
-`quest waiting` lists every waiting item, the maintainer's first, ranked by what each unblocks, and `/quest-complete` walks the maintainer through them.
+`quest waiting` lists every waiting item, the maintainer's first, ranked by what each unblocks, and `/quest-run` walks the maintainer through them.
 
-A PR that launches something new for users to try, such as a site, demo, or feature, adds a follow-up quest for the maintainer to try and promote it, its `Maintainer:` item saying where to find it.
+A PR that launches something new for users to try, such as a site, demo, or feature, adds a follow-up quest for the maintainer to try and promote it, its `Maintainer (action):` item saying where to find it.
 
 ## Execution
 
@@ -164,7 +179,7 @@ it over, saying how long ago it was last active.
 A quest's branch is its path without `.md`.
 For example, `quest/m1/foo/bar.md` is branch `quest/m1/foo/bar`.
 Only claims use that namespace: no other branch is named `quest` or starts with `quest/`, since git cannot hold a branch named after another's directory.
-Branches for `/quest-plan`, `/quest-recurring`, and other skill PRs use a prefix of their own, such as `quest-plan/<slug>`.
+Branches for `/quest-plan`, `/quest-run`, and other skill PRs use a prefix of their own, such as `quest-plan/<slug>`.
 If `quest start` names a branch in the way, stop and report it; never delete or rename it yourself.
 Never rename an open PR's head branch either: GitHub closes the PR.
 Its warning that the quest's local branch already exists is not that refusal: the claim succeeded, and the branch holds an earlier attempt.
@@ -172,7 +187,7 @@ Switch to it, merge the claim commit the warning names, and resume that attempt;
 
 Push the quest branch as `quest context` describes for pull requests. The claim push from `quest start`, made before its PR exists, is exempt from confirming it is open.
 
-Prefer the exhaustive solution: a quest's PR handles every case of its problem, including those its reviews find, instead of splitting the rest into new quests.
+Finish the quest's Goal in its PR instead of splitting the rest into new quests. A case a review finds that will not happen is declined, not built.
 Leave work for later only when it waits on an outside condition or a maintainer decision, or lies outside the quest's Goal.
 
 A quest's PR leaves its quest accurate when it merges.
@@ -190,9 +205,8 @@ Add a closing keyword for every issue under `Closes`.
 ## Deletion
 
 A quest that is no longer needed or cannot be completed is abandoned.
-Delete it and explain why in the PR.
-Use `quest rm`, which deletes the quest and every link to it.
-
+Delete it with `quest rm`, which deletes the quest and every link to it, edit the mentions it reports, and explain why in the PR.
+A quest the user picks to delete at a pick, as `/quest-merge` offers, goes in a PR of quest deletions only, repurposing the quest's open PR if it has one, and that pick is also the pick to merge it; a planning or waits PR deletes quests among its other edits instead.
 Remove the `quest` label from issues no other quest tracks.
 
 ## Coordination
@@ -215,7 +229,6 @@ While the error persists, such as a rate limit before its reset, resume and star
 Answer these requests at any point, without stopping running agents:
 
 - "finish up": start nothing new, let running agents report, then clean up and write the final summary.
-- "pause": start nothing new until the user says to resume; reports are handled as usual.
 - "status": a compact list of each agent with its quest or PR, state, and how long ago it started or last reported.
 
 Once every sub-agent has finished, remove each agent checkout `quest worktree status` lists with `quest worktree remove`, since Claude never removes a subagent's checkout; it refuses one with unpreserved work.
@@ -223,12 +236,12 @@ Remove other local worktrees and branches whose tip is the head of a merged PR; 
 Leave the worktree you are running in and any holding uncommitted work or refused removal; list those in your summary.
 
 Run each agent at an entry of `quest`'s ranked lists unless the repository's `AGENTS.md` names other models: as a native sub-agent on this session's harness, else through `quest agent`.
+Run an entry that names an `advisor` through `quest agent`, passing `--advisor <model>` on its every start and resume, since no native sub-agent or delegated thread takes one.
 Size each `/quest-iterate` you dispatch as a quest, by the work left on its PR, and name that size in its brief.
-Start it on the PR's writer, the model of its first `Implementer:` line, at the entry `quest models <size> --writer <model>` prints, or `quest models <PR size> --arm <arm>` when that line names a writer A/B arm, as `(arm B)`, naming the arm in its brief, waiting out its usage limit so the other model can review; a PR whose writer no list names, such as `unknown` or a retired model, takes its size's first entry that can run.
+Start it on the PR's writer, the model of its first `Implementer:` line, at the entry `quest models <size> --writer <model>` prints; when that line names a writer A/B arm, as `(arm B, cohort advisor-2026-11, advisor claude-opus-5-5)`, it runs the model, effort, and advisor the line records, even after a resize, naming the arm, cohort, and advisor in its brief, and takes an effort the line leaves out from `quest models <PR size> --arm <arm> --cohort <cohort>` while that size and cohort run the arm, else from `--writer`; waiting out its usage limit so one model writes the whole PR; a PR whose writer no list names, such as `unknown` or a retired model, takes its size's first entry that can run.
 
-`quest agent start --harness <claude|codex> --model <model> --effort <level> --permission-mode <mode> <worktree> <prompt>` runs a headless agent on that CLI's own login; start it as a background command in its own isolated worktree, so the harness reports its exit like a sub-agent's.
-`--permission-mode` is Claude Code's permission mode, or Codex's sandbox mode.
-It prints the session id, then the outcome and the agent's final reply, and exits 3 at the account's usage limit, or 4 when the CLI is logged out, printing the login command.
+`quest agent start` runs a headless agent on that CLI's own login, as its `--help` describes; start it as a background command in its own isolated worktree, so the harness reports its exit like a sub-agent's.
+It exits 3 at the account's usage limit, or 4 when the CLI is logged out.
 Tell the agent it cannot prompt, so it ends with its decisions and recommendations in its final reply, and that ending its turn kills its background commands, so it waits in the foreground.
 Answer it in the background with `quest agent resume`, passing the same options, worktree, session id, and the answer.
 Stop one with `quest agent stop <worktree>`, and each you started that still runs before you finish; `--all` would stop other sessions' agents too.
@@ -238,9 +251,14 @@ Stop one with `quest agent stop <worktree>`, and each you started that still run
 Open each prompt with the context to answer it without opening the quest or PR: what the work is, the problem it hit, and what each option would change.
 Name and explain anything the agent or its PR introduced, such as a new term, file, check, or credential, since the user may not have followed it.
 Then give your recommendation and ask synchronously with a blocking interactive question tool when available and allowed in the current mode.
-Recommend in every prompt, a multiple-choice list included: mark each option you recommend and give a one-line reason for each you would leave out.
+Recommend in every prompt, a multiple-choice list included, and give a one-line reason for each option you would leave out.
 An answer such as "whatever you recommend" picks your recommendations; act on them without asking again.
 Do not use asynchronous question tools.
+
+A dialog for a decision, plan, or follow-up offers concrete choices and keeps one option for "Explain it first", which walks the user through the problem, current behavior, and each choice's trade-offs, then asks again without it.
+A `Waiting` decision is asked as its choices and an action as a step only the user can take.
+Write a `Waiting` decision as a `Maintainer:` item holding the question, with its choices in a nested list, one bullet each written `label` or `label - description`, and exactly one label ending in `(Recommended)`; write a step only the maintainer can take as `Maintainer (action):`, or `Maintainer (PC):` when only at one of their computers.
+A dialog for a step only the user can take offers, in this order: the agent taking it, such as by driving the browser, when it plausibly can; "Done / I'll do it now"; "Not at my PC (defer)", which keeps the wait and skips it for the session; and "Drop the wait", which a tool holding fewer options leaves to the user's typed answer.
 
 If no blocking tool is available, or it returns without an answer, put the question and numbered choices in your final reply and end the turn.
 Resume when the user answers; do not bury the question in a progress update or wait with sleeps or timed polls.
@@ -255,11 +273,13 @@ Honor explicit instructions to proceed unattended within their scope; do not ask
 Follow this when writing instructions for other agents: `AGENTS.md`, `CONTRIBUTING.md`, skills, plans, reviews, and delegation briefs.
 Models are trained on outputs, not prompts, so instructions they write drift into slop: understate, and expect to cut half of a draft.
 
-- Keep always-loaded files light. Put area-specific context in nested `AGENTS.md` files, path-scoped rules, or skills, and say each rule once.
+- Keep always-loaded files light. Put area-specific context in nested `AGENTS.md` files, path-scoped rules, or skills, and say each rule once: models resolve contradictions arbitrarily, which costs more than a missing detail.
+- Make sure each harness loads the file: Claude Code skips `AGENTS.md` when a `CLAUDE.md` sits at or above the working directory, so have that `CLAUDE.md` import it with an `@` path relative to itself, such as `@AGENTS.md` beside it, rather than ask in prose.
 - Steer away from mistakes agents actually make. Don't document the repository; its code and docs already do.
 - State the goal, its reason, constraints, and observable outcome. Don't over-prescribe steps or code, since the facts evolve; recommendations are welcome.
 - Separate settled decisions from recommendations and open questions.
-- A delegation brief gives the task and its context, such as the quest or PR and the user's picks, the permitted scope, and the expected result; it leaves repository rules to that repository's own instructions instead of restating them.
-- Scope each rule to the case that prompted it; one failure rarely justifies a universal one. Write it plainly, without capitals or emphasis, and as "ask before X" rather than "never X" when X has exceptions: current models take "never" as absolute. A rule with no exceptions belongs in a hook or check.
+- A delegation brief gives the task and its context, such as the quest or PR and the user's picks, the permitted scope, and the expected result; it leaves repository rules to that repository's own instructions instead of restating them. A standing instruction to delegate makes models over-spawn; say when delegating pays instead.
+- Give a skill one job and a description that opens with when it should and should not run, in the words a request would use. Put its key instructions first, since a harness may keep only a skill's start after compaction.
+- Scope each rule to the case that prompted it; one failure rarely justifies a universal one. Write it plainly, without capitals or emphasis, and as "ask before X" rather than "never X" when X has exceptions: current models take "never" as absolute. Name the routine steps that need no approval, since a broad approval list makes models hold back. A rule with no exceptions belongs in a hook or check.
 - Before adding a rule, try to delete or consolidate one instead. Delete lines whose reason is gone: fixed in code, enforced by a hook or check, or written for older models, such as telling agents to keep going, think harder, or read every doc first.
-- Before changing agent instructions, check the official guidance: [Claude memory](https://code.claude.com/docs/en/memory), [Claude best practices](https://code.claude.com/docs/en/best-practices), [Claude skills](https://code.claude.com/docs/en/skills), [Claude prompting](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices), [Codex AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md), and [agents.md](https://agents.md).
+- Before changing agent instructions, check the official guidance: [Claude memory](https://code.claude.com/docs/en/memory), [Claude best practices](https://code.claude.com/docs/en/best-practices), [Claude skills](https://code.claude.com/docs/en/skills), [Claude prompting](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) and its page for each model, [Codex AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md), [Codex skills](https://learn.chatgpt.com/docs/build-skills), [Codex prompting](https://learn.chatgpt.com/docs/prompting), [the newest GPT model](https://developers.openai.com/api/docs/guides/latest-model), [Agent Skills](https://agentskills.io/specification), and [agents.md](https://agents.md).

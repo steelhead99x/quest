@@ -3,7 +3,7 @@
 	"description": "Versioned Markdown quests: validate plans, find ready work, and name the branches a quest lands on.",
 	"license": "MIT OR Apache-2.0",
 	"author": "Luke Curley",
-	"repository": "github:moq-dev/quest",
+	"repository": "github:kixel-ai/quest",
 	"private": true,
 	"type": "module",
 	"workspaces": [
@@ -32,12 +32,13 @@
 		"mdast-util-gfm-strikethrough": "2.0.1",
 		"mdast-util-gfm-table": "2.0.1",
 		"micromark-extension-gfm-strikethrough": "2.1.0",
-		"micromark-extension-gfm-table": "2.1.2"
+		"micromark-extension-gfm-table": "2.1.2",
+		"smol-toml": "1.9.1"
 	},
 	"devDependencies": {
 		"@types/mdast": "4.0.4",
 		"@types/node": "26.6.6",
-		"prettier": "3.9.10",
+		"prettier": "3.10.1",
 		"typescript": "7.0.2",
 		"vitest": "5.1.0"
 	},

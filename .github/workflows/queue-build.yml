@@ -59,3 +59,30 @@ jobs:
         run: nix develop --command just test
       - name: Check Nix package
         run: nix flake check
+
+  # The required `Queue` context, reported on the same runner. A reusable
+  # workflow's jobs report as `Queue build / <job>`, so this job posts `Queue`
+  # as a check run, which GitHub attributes to GitHub Actions as main's ruleset
+  # requires. It runs even when the build fails or is cancelled, so the group
+  # drops at once instead of at the queue's 90-minute timeout.
+  report:
+    name: Report Queue
+    needs: build
+    if: always() && github.event_name == 'merge_group'
+    runs-on: [self-hosted, quest-queue]
+    timeout-minutes: 5
+    permissions:
+      checks: write
+    steps:
+      - name: Report the build's result as Queue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RESULT: ${{ needs.build.result }}
+        run: |
+          conclusion=failure
+          [[ "$RESULT" == success ]] && conclusion=success
+          gh api "repos/$REPO/check-runs" -f name=Queue -f head_sha="$SHA" -f status=completed -f conclusion="$conclusion" \
+            -f 'output[title]=Queue' -f "output[summary]=The queue build ended $RESULT." --silent
+          [[ "$RESULT" == success ]] || { echo "::error::the queue build ended $RESULT" >&2; exit 1; }

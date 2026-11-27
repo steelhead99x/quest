@@ -1,12 +1,14 @@
 // `quest iterate`, `ready`, `merge`, and `release`, against a PR replayed in memory.
 
+import { createHash } from "node:crypto";
 import { describe, expect, test, vi } from "vitest";
 
 import type { GitHubDependencies, ObjectValue } from "../src/github/client";
 import { finish, land, release, take } from "../src/cli/hold";
 import { withoutHandBack } from "../src/core";
+import { reviewTarget } from "../src/github/review-trust";
 import { type Output, main } from "../src/cli/main";
-import { Refusal } from "../src/cli/start";
+import { Refusal } from "../src/core";
 
 // `quest merge` through main would fetch the PR from GitHub to check it; these PRs exist only in memory.
 vi.mock("../src/cli/landed", async (original) => ({
@@ -18,6 +20,8 @@ const PR = { owner: "example", repo: "project", number: 7 };
 const URL_ = "https://github.com/example/project/pull/7";
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
+/** The head's merge base with the base. */
+const FORK = "f".repeat(40);
 /** A landing check that finds nothing. */
 const clean = async () => [];
 
@@ -70,6 +74,14 @@ class FakePull {
 	/** The error GitHub answers `enqueuePullRequest` with, if any. */
 	beforeEnqueue?: () => { message: string; type?: string } | undefined;
 	reads = 0;
+	/** The base's RISK.md, absent when null. */
+	risk: string | null = null;
+	/** The paths the PR changes, as GitHub's compare lists them. */
+	files: string[] = [];
+	/** Each commit's diff from the base, by SHA; its SHA by default, so no two commits share one. */
+	diffs: Record<string, string> = {};
+	/** The `quest review` status on each commit, as GraphQL's `StatusContext` gives it. */
+	statuses: Record<string, ObjectValue> = {};
 	private clock = Date.parse("2026-10-21T12:00:00Z");
 
 	/** Add a label as GitHub does: re-adding one already on the PR records no event. */
@@ -126,11 +138,25 @@ class FakePull {
 		if (url.pathname === "/repos/example/project/branches/main") return json(200, { protection: {} });
 		if (url.pathname === "/repos/example/project/actions/runs" && url.searchParams.get("head_sha") === this.head)
 			return json(200, { total_count: this.runs.length, workflow_runs: this.runs });
-		if (url.pathname === `/repos/example/project/compare/main...${this.head}`) {
-			this.comparisons.push(`${url.pathname}${url.search}`);
-			this.afterCompare?.();
-			return json(200, { status: this.comparison, base_commit: { sha: this.base } });
+		const compared = /^\/repos\/example\/project\/compare\/main\.\.\.(\w+)$/.exec(url.pathname);
+		if (compared && new Headers(init.headers).get("Accept") === "application/vnd.github.diff")
+			return new Response(this.diffs[compared[1]!] ?? compared[1]);
+		if (compared) {
+			const files = this.files.map((filename) => ({ filename }));
+			// Only `quest merge`'s own check of the head against the base, which asks for one commit.
+			if (compared[1] === this.head && url.search === "?per_page=1") {
+				this.comparisons.push(`${url.pathname}${url.search}`);
+				this.afterCompare?.();
+			}
+			return json(200, {
+				status: compared[1] === this.head ? this.comparison : "ahead",
+				base_commit: { sha: this.base },
+				merge_base_commit: { sha: FORK },
+				files,
+			});
 		}
+		if (url.pathname === "/repos/example/project/collaborators/maintainer/permission")
+			return json(200, { permission: "write" });
 		if (url.pathname === "/repos/example/project/rules/branches/main") {
 			const checks = this.required.map((context) => ({ context }));
 			return json(200, [
@@ -171,6 +197,35 @@ class FakePull {
 				this.queueEntry = { state: "QUEUED" };
 			}
 			return { data: { [name]: { clientMutationId: null } } };
+		}
+		if (query.includes("query ReviewTiers"))
+			return {
+				data: {
+					repository: {
+						pullRequest: {
+							commits: {
+								pageInfo: { hasPreviousPage: false, startCursor: null },
+								nodes: Object.entries(this.statuses).map(([oid, context]) => ({
+									commit: { oid, status: { context } },
+								})),
+							},
+						},
+					},
+				},
+			};
+		if (query.includes("query BaseRisk")) {
+			if (variables.expression !== "refs/heads/main:RISK.md") throw new Error("read RISK.md off another ref");
+			const risk = this.risk;
+			const found = risk === null ? null : { oid: blobId(risk), text: risk, isBinary: false, isTruncated: false };
+			return { data: { repository: { object: found } } };
+		}
+		if (query.includes("query ReviewStatus")) {
+			const status = this.statuses[String(variables.sha)];
+			return {
+				data: {
+					repository: { object: { status: status === undefined ? null : { context: status } } },
+				},
+			};
 		}
 		if (query.includes("p7: pullRequest(number: 7)")) {
 			const empty = { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
@@ -251,7 +306,7 @@ async function refused(work: Promise<unknown>): Promise<string> {
 describe("taking a PR", () => {
 	test("labels it quest:active and prints the event that added the label as the token", async () => {
 		const pull = new FakePull();
-		const hold = await take(PR, undefined, pull.deps());
+		const hold = await take(PR, null, pull.deps());
 		expect(hold).toEqual({ label: "quest:active", token: "LabeledEvent_1" });
 		expect(pull.labels).toEqual(["quest:active"]);
 	});
@@ -259,18 +314,18 @@ describe("taking a PR", () => {
 	test("refuses a draft its starter still holds, and takes one handed back", async () => {
 		const pull = new FakePull();
 		pull.draft = true;
-		expect(await refused(take(PR, undefined, pull.deps()))).toContain("its starter still holds");
+		expect(await refused(take(PR, null, pull.deps()))).toContain("its starter still holds");
 		expect(pull.writes).toEqual([]);
 
 		pull.body = "Summary.\r\n\r\n## Waiting\r\n\r\n1. Pick one.\r\n";
-		expect((await take(PR, undefined, pull.deps())).label).toBe("quest:active");
+		expect((await take(PR, null, pull.deps())).label).toBe("quest:active");
 	});
 
 	test("refuses a merged or closed PR", async () => {
 		for (const state of ["MERGED", "CLOSED"]) {
 			const pull = new FakePull();
 			pull.state = state;
-			expect(await refused(take(PR, undefined, pull.deps()))).toContain(
+			expect(await refused(take(PR, null, pull.deps()))).toContain(
 				`is ${state.toLowerCase()}; a push now would bring its branch back`,
 			);
 			expect(pull.writes).toEqual([]);
@@ -279,8 +334,8 @@ describe("taking a PR", () => {
 
 	test("refuses a second session without handing it the holder's token", async () => {
 		const pull = new FakePull();
-		const first = await take(PR, undefined, pull.deps());
-		const message = await refused(take(PR, undefined, pull.deps()));
+		const first = await take(PR, null, pull.deps());
+		const message = await refused(take(PR, null, pull.deps()));
 		expect(message).toContain("held by quest:active, added just now, so stop and report it");
 		expect(message).not.toContain(first.token);
 		expect(pull.labels).toEqual(["quest:active"]);
@@ -289,13 +344,13 @@ describe("taking a PR", () => {
 	test("ignores the quest:merge label older quest versions left on queued PRs", async () => {
 		const pull = new FakePull();
 		pull.label("quest:merge");
-		expect((await take(PR, undefined, pull.deps())).label).toBe("quest:active");
+		expect((await take(PR, null, pull.deps())).label).toBe("quest:active");
 		expect(pull.labels).toEqual(["quest:merge", "quest:active"]);
 	});
 
 	test("keeps the hold its token names", async () => {
 		const pull = new FakePull();
-		const hold = await take(PR, undefined, pull.deps());
+		const hold = await take(PR, null, pull.deps());
 		expect(await take(PR, hold.token, pull.deps())).toEqual(hold);
 		expect(pull.writes).toEqual(["add quest:active"]);
 	});
@@ -309,9 +364,9 @@ describe("taking a PR", () => {
 
 	test("refuses a token once another session holds the label", async () => {
 		const pull = new FakePull();
-		const stale = await take(PR, undefined, pull.deps());
+		const stale = await take(PR, null, pull.deps());
 		pull.labels = [];
-		const current = await take(PR, undefined, pull.deps());
+		const current = await take(PR, null, pull.deps());
 		expect(await refused(take(PR, stale.token, pull.deps()))).toContain(
 			`quest:active was added to ${URL_} again after ${stale.token}`,
 		);
@@ -326,12 +381,32 @@ describe("ready", () => {
 		const pull = new FakePull();
 		pull.draft = true;
 		pull.body = "Summary.\n\n## Waiting\n\n1. Pick one.\n\n## Validation\n\nTests pass.";
-		const hold = await take(PR, undefined, pull.deps());
+		const hold = await take(PR, null, pull.deps());
 		expect(await finish(PR, hold.token, pull.deps())).toEqual(hold);
 		expect(pull.body).toBe("Summary.\n\n## Validation\n\nTests pass.");
 		expect(pull.draft).toBe(false);
 		expect(pull.labels).toEqual(["quest:active"]);
 		expect(pull.writes.slice(-2)).toEqual(["edit body", "markPullRequestReadyForReview"]);
+	});
+
+	test("without a token, marks a draft ready and leaves its body, while no session holds it", async () => {
+		const pull = new FakePull();
+		pull.draft = true;
+		pull.body = "Summary.\n\n## Waiting\n\n1. Pick one.";
+		expect(await finish(PR, null, pull.deps())).toBeNull();
+		expect(pull.draft).toBe(false);
+		expect(pull.body).toBe("Summary.\n\n## Waiting\n\n1. Pick one.");
+		expect(pull.writes).toEqual(["markPullRequestReadyForReview"]);
+	});
+
+	test("without a token, refuses while a session holds it", async () => {
+		const pull = new FakePull();
+		await take(PR, null, pull.deps());
+		pull.draft = true;
+		const writes = pull.writes.length;
+		expect(await refused(finish(PR, null, pull.deps()))).toContain("is held by quest:active");
+		expect(pull.draft).toBe(true);
+		expect(pull.writes).toHaveLength(writes);
 	});
 });
 
@@ -425,6 +500,79 @@ describe("merge --land", () => {
 		expect(pull.writes).not.toEqual([]);
 	});
 
+	test("an online finding holds the head only when its reviewer posts a check the base requires", async () => {
+		const pull = new FakePull();
+		const finding = `${URL_}#pullrequestreview-1`;
+		pull.activity = {
+			reviews: {
+				pageInfo: { hasNextPage: false, endCursor: null },
+				nodes: [
+					{
+						id: "r1",
+						url: finding,
+						author: { __typename: "Bot", login: "rabbit" },
+						body: "[P2] Rename the handle",
+						submittedAt: "2026-10-21T11:30:00Z",
+						commit: { oid: HEAD },
+					},
+				],
+			},
+		};
+		const status = (login: string) => ({
+			__typename: "StatusContext",
+			context: "Rabbit",
+			state: "SUCCESS",
+			createdAt: "2026-10-21T11:31:00Z",
+			isRequired: true,
+			creator: { __typename: "Bot", login },
+		});
+		// Another app posts the check the base requires: the reviewer is optional, and its finding a suggestion.
+		pull.required = ["Rabbit"];
+		pull.checks = [status("ci")];
+		await land(PR, { sha: HEAD, method: "merge", check: clean }, pull.deps());
+		expect(pull.writes).not.toEqual([]);
+
+		const required = new FakePull();
+		required.activity = pull.activity;
+		required.required = ["Rabbit"];
+		required.checks = [status("rabbit")];
+		expect(await refused(land(PR, { sha: HEAD, method: "merge", check: clean }, required.deps()))).toContain(
+			`head ${HEAD} is held by finding by rabbit[bot]: rename the handle (${finding})`,
+		);
+		expect(required.writes).toEqual([]);
+
+		// A named reviewer is required by the account it posts under: a bot's holds, a person's never does.
+		const named = (author: ObjectValue) => ({
+			reviews: {
+				pageInfo: { hasNextPage: false, endCursor: null },
+				nodes: [
+					{
+						id: "r1",
+						url: finding,
+						author,
+						authorAssociation: "OWNER",
+						body: "Automated review by Claude\n\n[P2] Rename the handle",
+						submittedAt: "2026-10-21T11:30:00Z",
+						commit: { oid: HEAD },
+					},
+				],
+			},
+		});
+		const viaBot = new FakePull();
+		viaBot.activity = named({ __typename: "Bot", login: "rabbit" });
+		viaBot.required = ["Rabbit"];
+		viaBot.checks = [status("rabbit")];
+		expect(await refused(land(PR, { sha: HEAD, method: "merge", check: clean }, viaBot.deps()))).toContain(
+			"finding by Claude: rename the handle",
+		);
+		const viaPerson = new FakePull();
+		viaPerson.activity = named({ __typename: "User", login: "maintainer" });
+		viaPerson.required = ["Rabbit"];
+		viaPerson.checks = [{ ...status("maintainer"), creator: { __typename: "User", login: "maintainer" } }];
+		await land(PR, { sha: HEAD, method: "merge", check: clean }, viaPerson.deps());
+		expect(viaPerson.writes).not.toEqual([]);
+	});
+
 	test("rechecks signals right before a direct merge", async () => {
 		const pull = new FakePull();
 		pull.allowAutoMerge = false;
@@ -494,7 +642,7 @@ describe("merge --land", () => {
 
 	test("takes no label, and refuses while a session holds the PR", async () => {
 		const pull = new FakePull();
-		const { token } = await take(PR, undefined, pull.deps());
+		const { token } = await take(PR, null, pull.deps());
 		const message = await refused(land(PR, { sha: HEAD, method: "merge", check: clean }, pull.deps()));
 		expect(message).toContain("held by quest:active, added just now");
 		expect(message).not.toContain(token);
@@ -895,20 +1043,20 @@ describe("merge --land", () => {
 describe("release", () => {
 	test("removes the label its token holds", async () => {
 		const pull = new FakePull();
-		const { token } = await take(PR, undefined, pull.deps());
-		expect(await release(PR, token, pull.deps())).toBe("quest:active");
+		const { token } = await take(PR, null, pull.deps());
+		expect(await release(PR, token, pull.deps())).toEqual({ label: "quest:active", token });
 		expect(pull.labels).toEqual([]);
 	});
 
 	test("refuses a stale token and treats a label already off as released", async () => {
 		const pull = new FakePull();
-		const stale = await take(PR, undefined, pull.deps());
+		const stale = await take(PR, null, pull.deps());
 		pull.labels = [];
 		const warnings: string[] = [];
-		expect(await release(PR, stale.token, pull.deps(warnings))).toBe("quest:active");
+		expect((await release(PR, stale.token, pull.deps(warnings))).label).toBe("quest:active");
 		expect(warnings).toEqual([`quest:active is already off ${URL_}`]);
 
-		await take(PR, undefined, pull.deps());
+		await take(PR, null, pull.deps());
 		expect(await refused(release(PR, stale.token, pull.deps()))).toContain("another session holds it");
 		expect(pull.labels).toEqual(["quest:active"]);
 	});
@@ -933,7 +1081,7 @@ describe("arguments", () => {
 	}
 
 	test.each([
-		[["ready", URL_], "missing required argument 'token'"],
+		[["ready"], "missing required argument 'pr'"],
 		[["merge", URL_], "required option '--land <sha>' not specified"],
 		[["merge", URL_, "--land", "abc"], "--land needs a full 40-character SHA"],
 		[["merge", URL_, "token", "--land", HEAD], "too many arguments"],
@@ -966,6 +1114,160 @@ test("iterate and release exit 0 when stdout returns a value", async () => {
 		vi.unstubAllEnvs();
 		vi.unstubAllGlobals();
 	}
+});
+
+/** A blob's SHA as Git names it. */
+const blobId = (text: string) =>
+	createHash("sha1")
+		.update(`blob ${Buffer.byteLength(text)}\0${text}`)
+		.digest("hex");
+
+describe("merge --land of a high head", () => {
+	const OLD = "c".repeat(40);
+	/** The passing status a maintainer's round of `head` at `tier` sets on it. */
+	let clock = 0;
+	const review = (pull: FakePull, head: string, tier: string) => {
+		// Classified against the base's risk file as it is now.
+		const file = pull.risk === null ? "none" : blobId(pull.risk).slice(0, 12);
+		pull.statuses[head] = {
+			state: "SUCCESS",
+			description: `Risk ${tier}, risk file ${file}: passed`,
+			targetUrl: reviewTarget({ owner: "example", repo: "project" }, FORK, head),
+			createdAt: new Date(Date.UTC(2026, 10, 1) + clock++ * 60_000).toISOString(),
+			creator: { __typename: "User", login: "maintainer" },
+		};
+	};
+	const land_ = (pull: FakePull) => land(PR, { sha: HEAD, method: "merge", check: clean }, pull.deps());
+
+	test("lands one a review status covers, whatever its tier", async () => {
+		const pull = new FakePull();
+		pull.risk = "# Risk\n\n## High\n\n- `assets/` - every agent loads it\n";
+		pull.files = ["assets/a.md"];
+		review(pull, HEAD, "high");
+		await land_(pull);
+		expect(pull.writes).toEqual([`enablePullRequestAutoMerge ${HEAD} MERGE`]);
+	});
+
+	test("lands one whose review predates the risk file line, where the base has no RISK.md", async () => {
+		const pull = new FakePull();
+		pull.risk = null;
+		review(pull, HEAD, "high");
+		pull.body = pull.body.replace("- Risk file: none\n", "");
+		pull.statuses[HEAD]!.description = "Risk high: passed";
+		await land_(pull);
+		expect(pull.writes).toEqual([`enablePullRequestAutoMerge ${HEAD} MERGE`]);
+	});
+
+	test("refuses one a review covers once the base's RISK.md changed, until it touches no high path", async () => {
+		const pull = new FakePull();
+		pull.risk = "# Risk\n";
+		pull.files = ["assets/a.md"];
+		review(pull, HEAD, "low");
+		pull.risk = "# Risk\n\n## High\n\n- `assets/` - every agent loads it\n";
+		expect(await refused(land_(pull))).toContain(`head ${HEAD} is high, since it changes assets/a.md`);
+		// The same review of a head with the same diff covers it no more.
+		pull.risk = "# Risk\n";
+		review(pull, OLD, "high");
+		pull.diffs = { [OLD]: "diff", [HEAD]: "diff" };
+		pull.risk = "# Risk\n\n## High\n\n- `docs/` - published\n";
+		expect(await refused(land_(pull))).toContain(`since the quest review status on ${OLD} rates it high`);
+		expect(pull.writes).toEqual([]);
+		// A low record and no high path still lands, as with no review at all.
+		review(pull, OLD, "low");
+		pull.risk = null;
+		pull.files = ["src/a.ts"];
+		await land_(pull);
+		expect(pull.writes).toEqual([`enablePullRequestAutoMerge ${HEAD} MERGE`]);
+	});
+
+	test("refuses one pushed after the review that rated it high", async () => {
+		const pull = new FakePull();
+		review(pull, OLD, "high");
+		expect(await refused(land_(pull))).toBe(
+			`${URL_} head ${HEAD} is high, since the quest review status on ${OLD} rates it high, and no quest review status covers it; run quest review on it, then land it again`,
+		);
+		expect(pull.writes).toEqual([]);
+	});
+
+	test("refuses an unreviewed head whose change touches a path the base's RISK.md holds high, on either side of a rename", async () => {
+		const pull = new FakePull();
+		pull.risk = "# Risk\n\n## High\n\n- `assets/` - every agent loads it\n";
+		review(pull, OLD, "low");
+		pull.files = ["src/a.ts", "assets/b.md"];
+		expect(await refused(land_(pull))).toContain(
+			`head ${HEAD} is high, since it changes assets/b.md, which is always high: every agent loads it,`,
+		);
+		// RISK.md itself is high even where the base has none.
+		pull.risk = null;
+		pull.files = ["RISK.md"];
+		expect(await refused(land_(pull))).toContain("since it changes RISK.md, which is always high");
+		expect(pull.writes).toEqual([]);
+	});
+
+	test("refuses a high head whose status attests another diff, or was set by no writer", async () => {
+		const pull = new FakePull();
+		review(pull, HEAD, "high");
+		pull.statuses[HEAD]!.targetUrl = reviewTarget({ owner: "example", repo: "project" }, "d".repeat(40), HEAD);
+		expect(await refused(land_(pull))).toContain(`head ${HEAD} is high, since the quest review status on ${HEAD}`);
+		review(pull, HEAD, "high");
+		pull.statuses[HEAD]!.creator = { __typename: "Bot", login: "helper" };
+		expect(await refused(land_(pull))).toContain(`head ${HEAD} is high, since the quest review status on ${HEAD}`);
+		expect(pull.writes).toEqual([]);
+	});
+
+	test("lands a head whose diff is the one a high review covers, as after a clean base merge", async () => {
+		const pull = new FakePull();
+		review(pull, OLD, "high");
+		expect(await refused(land_(pull))).toContain("is high");
+		pull.diffs = { [OLD]: "diff", [HEAD]: "diff" };
+		// A writer's failed round on the head itself since outweighs the earlier pass.
+		review(pull, HEAD, "high");
+		const failed = { ...pull.statuses[HEAD]!, state: "FAILURE", description: "Risk high: findings open" };
+		pull.statuses[HEAD] = failed;
+		expect(await refused(land_(pull))).toContain("is high");
+		// Anyone else's status on it says nothing, failed or bound to another diff.
+		pull.statuses[HEAD] = { ...failed, creator: { __typename: "Bot", login: "helper" } };
+		await land_(pull);
+		pull.statuses[HEAD] = { ...failed, targetUrl: pull.statuses[OLD]!.targetUrl };
+		await land_(pull);
+		delete pull.statuses[HEAD];
+		await land_(pull);
+		expect(pull.writes).toEqual(Array(3).fill(`enablePullRequestAutoMerge ${HEAD} MERGE`));
+	});
+
+	test("lets the most recently set status of the head's diff decide, whatever commit carries it", async () => {
+		const pull = new FakePull();
+		const MID = "e".repeat(40);
+		pull.diffs = { [OLD]: "diff", [MID]: "diff", [HEAD]: "diff" };
+		// The older commit's failed round was set after the newer one's pass, as from an older checkout.
+		review(pull, OLD, "high");
+		review(pull, MID, "high");
+		pull.statuses[OLD] = {
+			...pull.statuses[OLD]!,
+			state: "FAILURE",
+			description: "Risk high: findings open",
+			createdAt: new Date(Date.UTC(2026, 11, 1)).toISOString(),
+		};
+		expect(await refused(land_(pull))).toContain("is high");
+		expect(pull.writes).toEqual([]);
+	});
+
+	test("refuses a head an earlier commit's status rates high", async () => {
+		const pull = new FakePull();
+		review(pull, OLD, "high");
+		expect(await refused(land_(pull))).toContain(
+			`head ${HEAD} is high, since the quest review status on ${OLD} rates it high`,
+		);
+	});
+
+	test("lands a head pushed after a low review that touches no high path", async () => {
+		const pull = new FakePull();
+		pull.risk = "# Risk\n\n## High\n\n- `assets/` - every agent loads it\n";
+		review(pull, OLD, "low");
+		pull.files = ["src/a.ts"];
+		await land_(pull);
+		expect(pull.writes).toEqual([`enablePullRequestAutoMerge ${HEAD} MERGE`]);
+	});
 });
 
 describe("merge --land on a base that requires an approval the head lacks", () => {

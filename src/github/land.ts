@@ -27,7 +27,8 @@ export type Reason =
 	| "tree_mismatch"
 	| "merge_refused"
 	| "fork_head"
-	| "unanswered_signal";
+	| "unanswered_signal"
+	| "unreviewed";
 
 /** The hidden line an ejection comment carries, which `quest status` reads. */
 export const EJECTED = /^<!-- quest land: ([a-z_]+) -->$/m;

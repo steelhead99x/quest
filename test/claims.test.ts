@@ -43,6 +43,7 @@ function github(world: {
 const pull = (n: number, ref: string, created: string) => ({
 	number: n,
 	head: { ref, repo: { full_name: "someone/project" } },
+	base: { ref: "main" },
 	draft: true,
 	body: null,
 	created_at: created,

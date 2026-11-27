@@ -25,6 +25,7 @@ test("prunes expired logs of both daemons and keeps every cited or unrelated fil
 			"fixer-input-7-abc123.log",
 			"fix-job-fix-AAAAAA.json.log",
 			"watch-job-old-7.json.log",
+			"watch-job-old-7.json.error",
 			// Records serve left no longer keep their logs, since nothing reads them.
 			"base-1730000000001-aaaaaaaaaaaa.log",
 			"batch-1730000000002-3.log",
@@ -43,6 +44,7 @@ test("prunes expired logs of both daemons and keeps every cited or unrelated fil
 		write("fixer-input-9-xyz.log");
 		json("watch-job-live-9.json", { log: join(state, "fixer-input-9-xyz.log") });
 		write("watch-job-live-9.json.log");
+		write("watch-job-live-9.json.error");
 		json("fix-base-fix-BBBBBB.json", { log: join(state, "base-1730000000001-aaaaaaaaaaaa.log") });
 		json("failure.json", { log: join(state, "batch-1730000000002-3.log") });
 		// Recent, unrelated, or not a regular file.
@@ -63,6 +65,7 @@ test("prunes expired logs of both daemons and keeps every cited or unrelated fil
 			"conflict-8-fedcba987654.log",
 			"fixer-input-9-xyz.log",
 			"watch-job-live-9.json.log",
+			"watch-job-live-9.json.error",
 			"check-1730000000003-4.log",
 			"notes.log",
 			"removal-7-x.log.bak",

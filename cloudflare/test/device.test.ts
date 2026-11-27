@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "vitest";
-import { health, serial } from "../device/android.ts";
+import { blankTab, health, navigate, notCaptured, type Page, serial } from "../device/android.ts";
 import {
 	type Baseline,
 	baseline,
@@ -265,6 +265,17 @@ describe("bench", () => {
 		);
 		expect(md).toContain("- Not measured: text size: by hand");
 		expect(md).toContain("No regressions");
+		expect(markdown([report], [], [report.device.model])).toContain("No baseline comparison was run.");
+		// With two devices and one baseline, the report names the one that wasn't compared.
+		const other = { ...report, device: { ...report.device, model: "iPad Air" } };
+		const partly = markdown([report, other], [], ["iPad Air"]);
+		expect(partly).toContain("Not compared, with no stored baseline: iPad Air.");
+		expect(partly).toContain("No regressions in the baselines compared.");
+		// --record compares nothing, and says the baseline now exists.
+		const recorded = markdown([report], [], [], [report.device.model]);
+		expect(recorded).toContain(`Recorded a baseline for ${report.device.model}`);
+		expect(recorded).not.toContain("no stored baseline");
+		expect(recorded).toContain("No baseline comparison was run.");
 		// A page that opens offline only as the site's notice doesn't count as opening offline.
 		const pages = report.pages.map((p) => ({
 			...p,
@@ -285,6 +296,65 @@ describe("bench", () => {
 		expect(slug("/repos/moq-dev/quest")).toBe("repos-moq-dev-quest");
 		expect(slug("/")).toBe("root");
 		expect(slug("../../etc")).toBe("etc");
+	});
+});
+
+describe("android", () => {
+	test("benchmarks only the blank tab adb opened, never one of the person's pages", () => {
+		const ws = "ws://127.0.0.1:9222/devtools/page/2";
+		expect(
+			blankTab([
+				{ type: "page", url: "https://mail.example/", webSocketDebuggerUrl: "ws://x/1" },
+				{ type: "service_worker", url: "about:blank", webSocketDebuggerUrl: "ws://x/sw" },
+				{ type: "page", url: "about:blank", webSocketDebuggerUrl: ws },
+			]),
+		).toBe(ws);
+		// Another client already attached to the blank tab leaves it without a socket.
+		expect(() => blankTab([{ type: "page", url: "about:blank" }])).toThrow("no debuggable blank tab");
+		expect(() => blankTab([])).toThrow("unlock the phone");
+	});
+
+	test("refuses a screenshot of a redirect, saying where it went", () => {
+		const url = "https://quest.example/repos/o/r";
+		expect(notCaptured(url, { url, status: 200 })).toBeNull();
+		expect(notCaptured(url, { url: "https://quest.example/?signed-out", status: 200 })).toContain(
+			"redirected to https://quest.example/?signed-out; sign the phone's Chrome in",
+		);
+		expect(notCaptured(url, { url, status: 500 })).toBe(`Chrome could not capture ${url}: HTTP 500`);
+	});
+
+	/** A page whose navigations answer `errors` in turn, then load. */
+	function fakePage(errors: (string | undefined)[]) {
+		const navigations: string[] = [];
+		const page: Page = {
+			call: (async (method: string, params?: Record<string, unknown>) => {
+				if (method !== "Page.navigate") return {};
+				navigations.push(String(params?.url));
+				const errorText = errors.shift();
+				return errorText ? { errorText } : {};
+			}) as Page["call"],
+			event: (async () => ({ method: "Page.loadEventFired", params: {} })) as Page["event"],
+		};
+		return { page, navigations };
+	}
+	const timing = async () => ({ url: "https://quest.example/", status: 200 }) as unknown as Omit<Load, "wall">;
+
+	test("retries one aborted navigation and times only the load that worked", async () => {
+		const { page, navigations } = fakePage(["net::ERR_ABORTED"]);
+		const load = await navigate(page, "https://quest.example/", timing);
+		expect(navigations).toEqual(["https://quest.example/", "https://quest.example/"]);
+		expect(load.status).toBe(200);
+		// The 500 ms pause before the retry is outside the timed attempt.
+		expect(load.wall).toBeLessThan(400);
+	});
+
+	test("gives up after a second abort, and never retries other errors", async () => {
+		const twice = fakePage(["net::ERR_ABORTED", "net::ERR_ABORTED"]);
+		await expect(navigate(twice.page, "https://quest.example/", timing)).rejects.toThrow("net::ERR_ABORTED");
+		expect(twice.navigations).toHaveLength(2);
+		const dns = fakePage(["net::ERR_NAME_NOT_RESOLVED"]);
+		await expect(navigate(dns.page, "https://quest.example/", timing)).rejects.toThrow("ERR_NAME_NOT_RESOLVED");
+		expect(dns.navigations).toHaveLength(1);
 	});
 });
 

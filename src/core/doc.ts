@@ -9,7 +9,7 @@
 // None of those are special cases here; the parser simply reports the
 // structure that Markdown actually has.
 
-import type { Nodes, Root } from "mdast";
+import type { ListItem, Nodes, Root } from "mdast";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { gfmStrikethroughFromMarkdown } from "mdast-util-gfm-strikethrough";
 import { gfmTableFromMarkdown } from "mdast-util-gfm-table";
@@ -66,6 +66,28 @@ export interface Entry {
 	 * happens to mention one.
 	 */
 	target: string | null;
+	/** The item's blocks in source order: each a paragraph's rendered text, or a list nested directly in it. */
+	parts: Part[];
+}
+
+/** One block of a list item: its rendered text, or a list nested directly in it. */
+export type Part = string | NestedList;
+
+/** A list nested directly in a top-level item, such as a `## Waiting` decision's choices. */
+export interface NestedList {
+	/** 1-based source line of its first bullet. */
+	line: number;
+	bullets: Bullet[];
+}
+
+/** One bullet of a nested list. */
+export interface Bullet {
+	/** 1-based source line, for findings. */
+	line: number;
+	/** The rendered text with whitespace collapsed, any list nested in it included. */
+	text: string;
+	/** Its own opening paragraph's text, collapsed the same way: `text` without the detail nested under it. */
+	lead: string;
 }
 
 /** One heading as the rules need to see it. */
@@ -177,6 +199,9 @@ export function hosts(doc: Doc): Host[] {
 	const named = new Set(entries(doc, HOSTS).map(hostOf));
 	return HOST.filter((h) => named.has(h));
 }
+
+/** The section that sets work aside: nothing under it is offered until the section is deleted. */
+export const PARKED = "Parked";
 
 /** The section holding the date a quest waits for before it can start. */
 export const SCHEDULED = "Scheduled";
@@ -324,7 +349,50 @@ export function rooted(target: string): string | null {
 const CONTAINERS = new Set(["root", "blockquote", "listItem"]);
 
 /** Block-level nodes, which separate the words of an entry that spans more than one. */
-const BLOCKS = new Set(["paragraph", "heading", "blockquote", "list", "listItem", "code", "table", "thematicBreak"]);
+const BLOCKS = new Set([
+	"blockquote",
+	"code",
+	"heading",
+	"list",
+	"listItem",
+	"paragraph",
+	"table",
+	"tableCell",
+	"tableRow",
+	"thematicBreak",
+]);
+
+/** A node's rendered text, as a reader sees it, before whitespace is collapsed. */
+export function rendered(node: Nodes): string {
+	const gap = BLOCKS.has(node.type) ? " " : "";
+	if (node.type === "break") return " ";
+	// Raw HTML renders as nothing, so `<strong>Maintainer</strong>:` names the maintainer
+	// and a section written only in block HTML reads as one that says nothing.
+	if (node.type === "html") return "";
+	if (node.type === "image" || node.type === "imageReference") return node.alt ?? "";
+	if ("value" in node) return node.value + gap;
+	return "children" in node ? node.children.map(rendered).join("") + gap : "";
+}
+
+/** A list item's blocks, as `Entry.parts` holds them; a block that renders as nothing is left out. */
+export function itemParts(item: ListItem): Part[] {
+	const line = (node: Nodes) => node.position?.start.line ?? 1;
+	return item.children
+		.map((child): Part =>
+			child.type === "list"
+				? {
+						line: line(child),
+						bullets: child.children.map((bullet) => ({
+							line: line(bullet),
+							text: collapse(rendered(bullet)),
+							lead:
+								bullet.children[0]?.type === "paragraph" ? collapse(rendered(bullet.children[0])) : "",
+						})),
+					}
+				: collapse(rendered(child)),
+		)
+		.filter((part) => part !== "");
+}
 
 /** Markdown's tree as GitHub renders it, for quests and PR bodies alike. */
 export function markdown(text: string): Root {
@@ -334,6 +402,14 @@ export function markdown(text: string): Root {
 		extensions: [gfmStrikethrough(), gfmTable()],
 		mdastExtensions: [gfmStrikethroughFromMarkdown(), gfmTableFromMarkdown()],
 	});
+}
+
+/** One-line `text` as an inline code span that renders it whole, whatever backticks it holds. */
+export function codeSpan(text: string): string {
+	const fence = "`".repeat(Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length)) + 1);
+	// Markdown strips one space from each edge of a span that has one at both and is not all spaces.
+	const pad = /^`|`$/.test(text) || (/^ [^]* $/.test(text) && /[^ ]/.test(text)) ? " " : "";
+	return `${fence}${pad}${text}${pad}${fence}`;
 }
 
 /** Parse already-loaded Markdown. `path` stays repository-relative. */
@@ -415,6 +491,7 @@ export function parse(path: string, text: string): Doc {
 						section,
 						text: "",
 						target: null,
+						parts: itemParts(node),
 					};
 				}
 				itemDepth++;

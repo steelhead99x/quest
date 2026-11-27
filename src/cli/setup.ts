@@ -224,14 +224,23 @@ function removeLine(root: string, path: string, marker: string): boolean {
 }
 
 /**
- * What `quest init` would change in `root`'s skill stubs, one line each: a
- * missing, outdated, or retired stub, or the edited file it refuses to
- * rewrite. Reusing init's plan keeps this from drifting from what init writes.
+ * What `quest init` would change in `root`'s stubs, one line each: a missing,
+ * outdated, or retired skill stub, a shipped audit's missing stub, or the file
+ * in the way that init refuses to touch. Reusing init's plans keeps this from
+ * drifting from what init writes.
  */
 export function stubFindings(root: string): string[] {
+	const repo = checkout(root);
+	return [...skillFindings(repo), ...auditFindings(repo)];
+}
+
+const FIX = "run the repository's pinned `quest init` and commit the result";
+
+/** The skill stubs `quest init` would write or remove. */
+function skillFindings(repo: Checkout): string[] {
 	let changes: ReturnType<typeof planInit>;
 	try {
-		changes = planInit(checkout(root), SKILLS);
+		changes = planInit(repo, SKILLS);
 	} catch (error) {
 		// Refusals elsewhere, such as on `quest/README.md`, are not about stubs.
 		if (error instanceof InitRefused)
@@ -246,9 +255,29 @@ export function stubFindings(root: string): string[] {
 			const why =
 				content === null
 					? "is a retired skill's stub"
-					: existsSync(join(root, path))
+					: repo.stat(path) !== null
 						? "is outdated"
 						: "is missing";
-			return `${path}: ${why}; run the repository's pinned \`quest init\` and commit the result`;
+			return `${path}: ${why}; ${FIX}`;
+		});
+}
+
+/** The stubs `quest init` would plant for shipped audits no quest names, not the milestone READMEs they sit in. */
+function auditFindings(repo: Checkout): string[] {
+	// Without a quest tree there are no audits to run, and init would recreate one the repository dropped.
+	if (repo.stat("quest/README.md") !== "file") return [];
+	let changes: ReturnType<typeof planAudits>;
+	try {
+		changes = planAudits(repo);
+	} catch (error) {
+		// Every refusal here is about a path an audit's stub or its milestone needs.
+		if (error instanceof InitRefused) return [error.message];
+		throw error;
+	}
+	return changes
+		.filter(({ path }) => !path.endsWith("/README.md"))
+		.map(({ path }) => {
+			const name = path.slice(path.lastIndexOf("/audit-") + "/audit-".length, -".md".length);
+			return `${path}: is missing; ${FIX}, or, if the maintainer declines the audit, list \`${name}\` under \`## Skipped audits\` in \`quest/README.md\``;
 		});
 }

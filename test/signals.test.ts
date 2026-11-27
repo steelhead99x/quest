@@ -148,6 +148,20 @@ group("signals", () => {
 		expect(signals(pull, WRITERS)).toEqual([]);
 	});
 
+	test("a named pass under a person's account supersedes none under a bot's of the same name", () => {
+		const named = (finding: string) => `Automated review by Claude\n\n${finding}`;
+		const pull = activity({
+			reviews: [
+				review("r1", bot("claude"), named("[P1] Guard null"), "2026-11-10T17:05:00Z"),
+				review("r2", person, named("[P2] Rename it"), "2026-11-10T17:10:00Z"),
+			],
+		});
+		expect(signals(pull, WRITERS).map(({ text, poster }) => [text, poster])).toEqual([
+			["guard null", "claude[bot]"],
+			["rename it", null],
+		]);
+	});
+
 	test("a later pass that only opens threads supersedes an earlier body's findings", () => {
 		const pull = activity({
 			reviews: [

@@ -32,6 +32,8 @@ import {
 	REQUEUE_LIMIT,
 	history,
 	historyPath,
+	outputTail,
+	wrapperError,
 	redactTokens,
 	saveRound,
 	type Round,
@@ -826,17 +828,27 @@ describe.skipIf(process.platform === "win32")("quest land", () => {
 		expect(plan.waiting?.map(({ number }) => number)).toEqual([2, 4]);
 	});
 
-	test("ejects a pick whose head draws an unanswered online finding", async () => {
+	test("ejects a pick whose head draws an unanswered finding from a reviewer the base requires", async () => {
 		const forge = new Forge();
-		const runs = [{ name: "test", conclusion: "SUCCESS", url: "u" }];
+		forge.repo.required!.push("Rabbit");
+		const runs = [
+			{ name: "test", conclusion: "SUCCESS", url: "u" },
+			{ name: "Rabbit", conclusion: "SUCCESS", url: "r", context: true, poster: "rabbit[bot]" },
+		];
 		forge.pull("Ready", { "1.txt": "1\n" }, { pull: { runs } });
 		forge.pull(
 			"Found",
 			{ "2.txt": "2\n" },
 			{ pull: { runs, reviews: [{ state: "COMMENTED", author: "rabbit[bot]", body: "[P1] Drops a frame" }] } },
 		);
+		// No check of its reviewer's is required, so its finding is a suggestion.
+		forge.pull(
+			"Suggested",
+			{ "3.txt": "3\n" },
+			{ pull: { runs, reviews: [{ state: "COMMENTED", author: "frog[bot]", body: "[P2] Rename it" }] } },
+		);
 		const plan = await resolveQueue(REPOSITORY, { base: "main", method: "squash" }, await forge.deps());
-		expect(plan.queue.map((entry) => entry.number)).toEqual([1]);
+		expect(plan.queue.map((entry) => entry.number)).toEqual([1, 3]);
 		expect(plan.eject.map((ejected) => [ejected.number, ejected.reason])).toEqual([[2, "unanswered_signal"]]);
 		expect(plan.eject[0]!.detail).toContain("finding by rabbit[bot]: drops a frame");
 	});
@@ -1118,6 +1130,8 @@ async function fixerFixture(
 		workflowBase?: boolean;
 		// A line the wrapper prints before the agent starts, as the host's does when its launcher admits the job.
 		admitted?: string;
+		// The wrapper's path names nothing, as after a host rebuild removed it.
+		missing?: boolean;
 	} = {},
 ) {
 	const { forge, queue, pass } = queueSetup();
@@ -1165,7 +1179,7 @@ ${options.raw ? `exec '${agent}' "$@"` : options.pipe ? `quest land fix --agent 
 	);
 	const fix: FixContext = {
 		root: queue.root,
-		fixer: wrapper,
+		fixer: options.missing ? join(tools, "missing") : wrapper,
 		jobs: 1,
 		effort: "medium",
 		tags: [],
@@ -1312,10 +1326,43 @@ ${requeueScript}`);
 		// A restart stops the unit's process group; the supervisor records the wrapper's status.
 		process.kill(-job.pid, "SIGTERM");
 		await fixture.finished;
+		// A wrapper whose launcher died with the unit says so, but a signal is not the wrapper's own failure.
+		writeFileSync(join(fixture.queue.state, `${fixture.jobs()[0]}.error`), "launcher connection closed\n");
 		expect(await fixture.collect()).toEqual(["handback 1"]);
 		expect(fixture.forge.comment(1)).toContain(
-			"fixer stopped by SIGTERM (exit 143); the daemon restarted while it ran",
+			"fixer stopped by SIGTERM (exit 143); the daemon restarted while it ran; run /quest-iterate. Recommendation: run /quest-iterate",
 		);
+	});
+	test("a crash with no error from its wrapper sends the PR to /quest-iterate", async () => {
+		const fixture = await fixerFixture("echo 'quest land fixer: error forged' >&2\nexit 1", { raw: true });
+		await fixture.finished;
+		expect(await fixture.collect()).toEqual(["handback 1"]);
+		expect(fixture.forge.comment(1)).toContain(
+			"fixer crashed (exit 1); run /quest-iterate. Recommendation: run /quest-iterate before picking it again.",
+		);
+	});
+	test("a wrapper the supervisor cannot run is the host's to repair", async () => {
+		const fixture = await fixerFixture(requeueScript, { missing: true });
+		await fixture.finished;
+		expect(await fixture.collect()).toEqual(["handback 1"]);
+		expect(fixture.forge.comment(1)).toContain(
+			"fixer crashed (exit 127): the fixer wrapper is missing or not executable. Recommendation: repair the land fixer's wrapper on the watcher's host, then pick it again.",
+		);
+		// The wrapper's error stays beside its log for diagnosis on the host.
+		expect(readdirSync(fixture.queue.state).filter((name) => name.endsWith(".json.error"))).toHaveLength(1);
+	});
+	test("reads a fixer's exit 124 as timed out, keeping its output", async () => {
+		// A run that hit its limit is no wrapper failure, even when the wrapper says so on descriptor 3.
+		const fixture = await fixerFixture("echo 'runtime limit 30m reached' >&2; echo 'runtime limit' >&3; exit 124", {
+			raw: true,
+		});
+		await fixture.finished;
+		expect(await fixture.collect()).toEqual(["handback 1"]);
+		const comment = fixture.forge.comment(1);
+		expect(comment).toContain(
+			"fixer timed out (exit 124); run /quest-iterate. Recommendation: run /quest-iterate before picking it again.",
+		);
+		expect(comment).toContain("runtime limit 30m reached");
 	});
 	test("waits for a fixer whose process it could not identify, and says when one stops unrecorded", async () => {
 		const fixture = await fixerFixture(requeueScript, { blocked: true });
@@ -1413,6 +1460,30 @@ printf '[{"number":1,"action":"handback","diagnosis":"saw %s","recommendation":"
 		expect(bodies).not.toContain(token);
 		expect(redactTokens(`a ${token} github_pat_${"x".repeat(30)} b`)).toBe("a [redacted token] [redacted token] b");
 	});
+	test("redacts a fixer's output before cutting its tail, so a cut never splits a token from its prefix", () => {
+		const token = `ghp_${"A1b2".repeat(9)}`;
+		const job = join(tempDir(), "job");
+		// The 2,000-character cut lands two characters into the token, splitting its `ghp_` prefix.
+		writeFileSync(`${job}.log`, `${"x".repeat(10)} ${token}${"y".repeat(2_000 - token.length + 2)}\n`);
+		const tail = outputTail(job);
+		expect(tail).not.toContain(token.slice(4));
+		expect(tail).toContain("[redacted token]");
+		// A tail window that starts mid-file drops its partial first line, which may hold a token's rest.
+		writeFileSync(`${job}.log`, `${token}${"z".repeat(16_384 - token.length + 10)}\nlast\n`);
+		expect(outputTail(job)).toBe("last");
+		// Without a line break, the whole window is a partial line.
+		writeFileSync(`${job}.log`, `${token}${" ".repeat(16_384 - token.length + 4)}`);
+		expect(outputTail(job)).toBe("");
+	});
+	test("names the wrapper's last error line, tokens redacted, and nothing without one", () => {
+		const job = join(tempDir(), "job");
+		expect(wrapperError(job)).toBeUndefined();
+		writeFileSync(`${job}.error`, " \n\n");
+		expect(wrapperError(job)).toBeUndefined();
+		const token = `ghp_${"A1b2".repeat(9)}`;
+		writeFileSync(`${job}.error`, `first\n  upload ${token} exceeds 256 MiB\n\n`);
+		expect(wrapperError(job)).toBe("upload [redacted token] exceeds 256 MiB");
+	});
 	test("bounds a fixer's import by what it added, not the history fetched at launch or its submodules", () => {
 		const root = tempDir();
 		const commit = (cwd: string, message: string) =>
@@ -1457,19 +1528,19 @@ printf '[{"number":1,"action":"handback","diagnosis":"saw %s","recommendation":"
 		const agent = join(dir, "agent");
 		const log = join(dir, "failure.log");
 		writeFileSync(log, "failed check");
-		vi.stubEnv("OPENAI_BASE_URL", "http://proxy.test/v1");
-		vi.stubEnv("OPENAI_API_KEY", "proxy-client");
+		vi.stubEnv("ANTHROPIC_BASE_URL", "http://proxy.test");
+		vi.stubEnv("ANTHROPIC_API_KEY", "proxy-client");
 		vi.stubEnv("GH_TOKEN", "github-private");
-		vi.stubEnv("CODEX_API_KEY", "host-private");
+		vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "host-private");
 		writeFileSync(
 			agent,
 			`#!/bin/sh
 set -eu
 [ "$#" = 1 ]
 [ "$1" = - ]
-[ "$OPENAI_BASE_URL" = http://proxy.test/v1 ]
-[ "$OPENAI_API_KEY" = proxy-client ]
-[ "$CODEX_API_KEY" = proxy-client ]
+[ "$ANTHROPIC_BASE_URL" = http://proxy.test ]
+[ "$ANTHROPIC_API_KEY" = proxy-client ]
+[ -z "\${CLAUDE_CODE_OAUTH_TOKEN-}" ]
 [ -z "\${GH_TOKEN-}" ]
 cat > prompt.txt
 ${requeueScript}
@@ -1503,10 +1574,10 @@ ${requeueScript}
 		const log = join(dir, "failure.log");
 		writeFileSync(log, "failed check");
 		const planted = join(bin, "..", "planted.log");
-		vi.stubEnv("OPENAI_BASE_URL", "http://proxy.test/v1");
-		vi.stubEnv("OPENAI_API_KEY", "proxy-client");
+		vi.stubEnv("ANTHROPIC_BASE_URL", "http://proxy.test");
+		vi.stubEnv("ANTHROPIC_API_KEY", "proxy-client");
 		// The checkout holds the PRs' code, which supplies its own agent, and PATH names it relatively.
-		writeFileSync(join(dir, "quest-test-agent"), `#!/bin/sh\necho "$OPENAI_API_KEY" > '${planted}'\n`, {
+		writeFileSync(join(dir, "quest-test-agent"), `#!/bin/sh\necho "$ANTHROPIC_API_KEY" > '${planted}'\n`, {
 			mode: 0o755,
 		});
 		vi.stubEnv("PATH", `.::relative:${process.env.PATH}:`);
@@ -1529,13 +1600,11 @@ ${requeueScript}
 		expect(path.every((entry) => entry.startsWith("/"))).toBe(true);
 		expect(JSON.parse(readFileSync(join(dir, "quest-land-result.json"), "utf8"))[0].agent).toBe("quest-test-agent");
 	});
-	test("runs default Codex with an explicit reasoning effort", async () => {
+	test("runs default Claude Code bare, with no configuration and an explicit effort", async () => {
 		const dir = fixRepository();
 		const agent = join(dir, "agent");
 		const log = join(dir, "failure.log");
 		writeFileSync(log, "failed check");
-		vi.stubEnv("OPENAI_BASE_URL", "http://proxy.test/v1");
-		vi.stubEnv("OPENAI_API_KEY", "proxy-client");
 		writeFileSync(
 			agent,
 			`#!/bin/sh
@@ -1546,14 +1615,33 @@ ${requeueScript}
 `,
 			{ mode: 0o755 },
 		);
+		// A session's own proxy settings are not the wrapper's.
+		vi.stubEnv("ANTHROPIC_BASE_URL", undefined);
+		vi.stubEnv("ANTHROPIC_API_KEY", undefined);
+		await expect(fix(dir, log, [1], agent)).rejects.toThrow("fix needs ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY");
+		vi.stubEnv("ANTHROPIC_BASE_URL", "http://proxy.test");
+		vi.stubEnv("ANTHROPIC_API_KEY", "proxy-client");
+		const argv = () => readFileSync(join(dir, "argv.txt"), "utf8").split("\n");
 		await fix(dir, log, [1], agent);
-		expect(readFileSync(join(dir, "argv.txt"), "utf8").split("\n")).toContain('model_reasoning_effort="medium"');
-		// A daemon's --fixer-effort reaches it as --effort.
-		await fix(dir, log, [1], agent, undefined, undefined, "high");
-		expect(readFileSync(join(dir, "argv.txt"), "utf8").split("\n")).toContain('model_reasoning_effort="high"');
-		await expect(fix(dir, log, [1], agent, undefined, undefined, 'high"\nx')).rejects.toThrow(
-			"fix effort must be one of",
-		);
+		const flags = argv();
+		expect(flags.slice(0, 4)).toEqual(["-p", "--bare", "--setting-sources", ""]);
+		expect(flags).toContain("--strict-mcp-config");
+		expect(JSON.parse(flags[flags.indexOf("--settings") + 1]!)).toEqual({
+			enabledPlugins: { "cc-plugin-agents-md@builtin": false },
+		});
+		// The prompt ranks above the data as the system prompt, and stdin holds only the data.
+		expect(readFileSync(join(dir, "argv.txt"), "utf8")).toContain(`--append-system-prompt\n${fixerPrompt}`);
+		expect(readFileSync(join(dir, "prompt.txt"), "utf8")).toMatch(/^Failure log: /);
+		expect(flags).not.toContain("--model");
+		expect(flags[flags.indexOf("--effort") + 1]).toBe("medium");
+		// A daemon's --fixer-effort reaches it as --effort, and --model passes through.
+		await fix(dir, log, [1], agent, undefined, "claude-opus-5-5", "high");
+		expect(argv()[argv().indexOf("--effort") + 1]).toBe("high");
+		expect(argv()[argv().indexOf("--model") + 1]).toBe("claude-opus-5-5");
+		for (const effort of ["max", 'high"\nx'])
+			await expect(fix(dir, log, [1], agent, undefined, undefined, effort)).rejects.toThrow(
+				"fix effort must be one of",
+			);
 	});
 	test("refuses to start an agent without a supplied PR's branch", async () => {
 		const dir = fixRepository();
@@ -1670,22 +1758,42 @@ ${requeueScript}
 		expect(result.model).toBe("actual-model");
 	});
 
-	test("records the model Codex's header names and the effort it ran at", async () => {
-		const dir = fixRepository();
-		const log = join(dir, "failure");
-		writeFileSync(log, "failure");
-		const agent = join(dir, "codex");
-		writeFileSync(
-			agent,
-			`#!/bin/sh\ncat >/dev/null\nprintf 'model: header-model\\nreasoning effort: high\\n' >&2\n${requeueScript}\n`,
-			{ mode: 0o755 },
+	test("records the model Claude Code's init event names and the effort it ran at", async () => {
+		const run = async (script: string, model?: string) => {
+			const dir = fixRepository();
+			const log = join(dir, "failure");
+			writeFileSync(log, "failure");
+			const agent = join(dir, "claude");
+			writeFileSync(agent, `#!/bin/sh\ncat >/dev/null\n${script}\n${requeueScript}\n`, { mode: 0o755 });
+			vi.stubEnv("ANTHROPIC_BASE_URL", "http://proxy.test");
+			vi.stubEnv("ANTHROPIC_API_KEY", "proxy-client");
+			await fix(dir, log, [1], agent, undefined, model, "high");
+			return parseFixResult(readFileSync(join(dir, "quest-land-result.json"), "utf8"), [1], [])[0];
+		};
+		const init = (model: string) => `{"type":"system","subtype":"init","model":"${model}","tools":[]}`;
+		const result = await run(`echo '${init("claude-opus-5-5")}'`, "opus");
+		expect(result).toMatchObject({ agent: "claude", model: "claude-opus-5-5", effort: "high" });
+		expect(author(result)).toBe("claude, claude-opus-5-5, high effort");
+		// A wrapper's own output may come first; a system event before the init, such as a hook's, is skipped.
+		const noise = `i=0; while [ $i -lt 200 ]; do echo "copying path '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x' from 'http://cache'..."; i=$((i+1)); done`;
+		expect(
+			(await run(`${noise}\necho '{"type":"system","subtype":"hook_started"}'\necho '${init("real-model")}'`))
+				.model,
+		).toBe("real-model");
+		// Once the conversation starts, an init line is the agent's output, such as a command printing one.
+		const forged = `echo '{"type":"assistant","message":{}}'\necho '${init("forged")}'`;
+		expect((await run(forged)).model).toBe("unknown");
+		expect((await run(forged, "named-model")).model).toBe("named-model");
+		expect((await run(`echo '${init("bad model\\n")}'`)).model).toBe("unknown");
+		// A JSON value that is no object, such as a wrapper printing a number, is noise, not the conversation's start.
+		expect((await run(`echo 7\necho true\necho '"x"'\necho '${init("after-scalars")}'`)).model).toBe(
+			"after-scalars",
 		);
-		vi.stubEnv("OPENAI_BASE_URL", "http://proxy.test/v1");
-		vi.stubEnv("OPENAI_API_KEY", "proxy-client");
-		await fix(dir, log, [1], agent, undefined, undefined, "high");
-		const [result] = parseFixResult(readFileSync(join(dir, "quest-land-result.json"), "utf8"), [1], []);
-		expect(result).toMatchObject({ agent: "codex", model: "header-model", effort: "high" });
-		expect(author(result)).toBe("codex, header-model, high effort");
+		// A plugin that would feed the agent the checkout's AGENTS.md stops the run.
+		for (const plugin of ['{"source":"cc-plugin-agents-md@builtin"}', '{"name":"agents-md","path":"/p"}'])
+			await expect(
+				run(`echo '{"type":"system","subtype":"init","model":"m","plugins":[${plugin}]}'`),
+			).rejects.toThrow("injects the checkout's AGENTS.md");
 	});
 
 	test("rejects mixing individually approved protected files", async () => {
@@ -1715,6 +1823,24 @@ ${requeueScript}
 		git(root, "update-index", "--add", "--cacheinfo", "160000", entry.head, "vendor/module");
 		git(root, "commit", "-qm", "add gitlink");
 		expect(() => validateFix(root, entry, git(root, "rev-parse", "HEAD"), forge.main())).toThrow("protected set");
+	});
+	test("rejects a fix that merges no base taking a path the base made a submodule", async () => {
+		const forge = new Forge();
+		forge.pull("one", { "one.txt": "yes" });
+		const deps = await forge.deps();
+		const plan = await resolveQueue(REPOSITORY, SQUASH, deps);
+		const root = forge.clone();
+		const entry = plan.queue[0];
+		git(root, "checkout", "--quiet", "--detach", forge.main());
+		git(root, "update-index", "--add", "--cacheinfo", "160000", entry.head, "vendor/module");
+		git(root, "commit", "-qm", "base adds a submodule");
+		const base = git(root, "rev-parse", "HEAD");
+		git(root, "checkout", "--quiet", "--detach", entry.head);
+		mkdirSync(join(root, "vendor"));
+		writeFileSync(join(root, "vendor", "module"), "file\n");
+		git(root, "add", "vendor/module");
+		git(root, "commit", "-qm", "take the path");
+		expect(() => validateFix(root, entry, git(root, "rev-parse", "HEAD"), base)).toThrow("protected set");
 	});
 
 	test("accepts one multiline Markdown comment per result and rejects a malformed one", () => {
@@ -1852,6 +1978,80 @@ ${requeueScript}
 		git(root, "checkout", forge.main(), "--", "flake.nix");
 		git(root, "commit", "-qm", "revert");
 		expect(() => validateFix(root, entry, git(root, "rev-parse", "HEAD"), forge.main())).not.toThrow();
+	});
+	test("refuses any resolution of a protected conflict, the pin's side included", async () => {
+		const forge = new Forge();
+		forge.advance({ "flake.nix": "old" });
+		forge.pull("one", { "flake.nix": "PR" });
+		const deps = await forge.deps();
+		const plan = await resolveQueue(REPOSITORY, SQUASH, deps);
+		forge.advance({ "flake.nix": "base" });
+		const root = forge.clone();
+		const entry = plan.queue[0];
+		git(root, "checkout", "--quiet", "--detach", entry.head);
+		expect(() => git(root, "merge", "--no-edit", forge.main())).toThrow();
+		git(root, "checkout", "--ours", "--", "flake.nix");
+		git(root, "commit", "-qam", "keep the PR's flake.nix");
+		expect(() => validateFix(root, entry, git(root, "rev-parse", "HEAD"), forge.main())).toThrow(
+			"settles a conflict in a protected path",
+		);
+	});
+	test("refuses resolving a conflict that names no conflicted file, beside one that does or not", async () => {
+		for (const text of [false, true]) {
+			const forge = new Forge();
+			forge.advance({ "dir/a": "a\n", "dir/b": "b\n", "f.txt": "1\n" });
+			forge.pull("one", {
+				"dir/a": null,
+				"dir/b": null,
+				"x/a": "a\n",
+				"y/b": "b\n",
+				...(text && { "f.txt": "PR\n" }),
+			});
+			const deps = await forge.deps();
+			const plan = await resolveQueue(REPOSITORY, SQUASH, deps);
+			forge.advance({ "dir/c": "c\n", ...(text && { "f.txt": "base\n" }) });
+			const root = forge.clone();
+			const entry = plan.queue[0];
+			git(root, "checkout", "--quiet", "--detach", entry.head);
+			// The PR splits `dir` between two directories, so where the base's new file goes is a conflict on no file.
+			expect(() => git(root, "merge", "--no-edit", forge.main())).toThrow();
+			expect(git(root, "diff", "--name-only", "--diff-filter=U")).toBe(text ? "f.txt" : "");
+			writeFileSync(join(root, "f.txt"), "both\n");
+			git(root, "commit", "-qam", "resolve");
+			expect(() => validateFix(root, entry, git(root, "rev-parse", "HEAD"), forge.main())).toThrow(
+				"settles a conflict that names no conflicted file, at dir",
+			);
+		}
+	});
+	test("refuses a base merge that keeps the pin's copy of a protected path the base changed", async () => {
+		const forge = new Forge();
+		forge.advance({ "flake.nix": "old" });
+		forge.pull("one", { "one.txt": "yes" });
+		const deps = await forge.deps();
+		const plan = await resolveQueue(REPOSITORY, SQUASH, deps);
+		forge.advance({ "flake.nix": "base" });
+		const root = forge.clone();
+		const entry = plan.queue[0];
+		git(root, "checkout", "--quiet", "--detach", entry.head);
+		git(root, "merge", "--quiet", "--no-edit", "-s", "ours", forge.main());
+		expect(() => validateFix(root, entry, git(root, "rev-parse", "HEAD"), forge.main())).toThrow(
+			"protected set must equal the base merge result's",
+		);
+	});
+	test("refuses a merge of only part of the base", async () => {
+		const forge = new Forge();
+		forge.pull("one", { "one.txt": "yes" });
+		const deps = await forge.deps();
+		const plan = await resolveQueue(REPOSITORY, SQUASH, deps);
+		forge.advance({ "flake.nix": "base" });
+		forge.advance({ "two.txt": "base" });
+		const root = forge.clone();
+		const entry = plan.queue[0];
+		git(root, "checkout", "--quiet", "--detach", entry.head);
+		git(root, "merge", "--quiet", "--no-edit", `${forge.main()}~1`);
+		expect(() => validateFix(root, entry, git(root, "rev-parse", "HEAD"), forge.main())).toThrow(
+			"must merge all of the base",
+		);
 	});
 });
 
@@ -2601,6 +2801,12 @@ describe.skipIf(process.platform === "win32")("the watcher's own queue", () => {
 		const finished = eventFile(queue.state, (name) => name.endsWith(".exit"));
 		expect(await pass(0, fix)).toEqual(["removed 1", "fixing 1"]);
 		await finished;
+		// The reviewer posts a check the base requires, so its finding holds.
+		forge.repo.required!.push("Rabbit");
+		one.runs = [
+			...(one.runs ?? []),
+			{ name: "Rabbit", conclusion: "SUCCESS", url: "r", context: true, poster: "rabbit[bot]" },
+		];
 		one.reviews = [{ state: "COMMENTED", author: "rabbit[bot]", body: "[P1] Drops a frame" }];
 		expect(await pass(0, fix)).toEqual(["handback 1"]);
 		expect(one.landing).toBeFalsy();
@@ -2775,6 +2981,45 @@ describe.skipIf(process.platform === "win32")("the watcher's own queue", () => {
 			expect(forge.comment(1)).toBeUndefined();
 		},
 	);
+
+	// kixel-ai/dotfiles#358: GitHub answered the merge of the queue's own base merge "not mergeable" for
+	// seconds, and the PR read after it already showed settled mergeability.
+	test("a prepared head's 405 not mergeable while GitHub recomputes is retried until it merges", async () => {
+		const context = setup();
+		const { forge, pass, pauses } = context;
+		const pull = await behind(context);
+		pull.mergeRefusals = [
+			{ status: 405, message: "Pull Request is not mergeable" },
+			{ status: 405, message: "Pull Request is not mergeable" },
+		];
+		expect(await pass()).toEqual(["landed 1"]);
+		expect(pauses).toEqual([500, 1000]);
+		expect(forge.comment(1)).toBeUndefined();
+	});
+
+	test("a prepared head's 405 not mergeable that persists is ejected with what GitHub reported", async () => {
+		const context = setup();
+		const { forge, pass, pauses } = context;
+		const pull = await behind(context);
+		pull.mergeRefusals = Array.from({ length: 6 }, () => ({
+			status: 405 as const,
+			message: "Pull Request is not mergeable",
+		}));
+		expect(await pass()).toEqual(["refused 1"]);
+		expect(pauses).toEqual([500, 1000, 2000, 4000, 8000]);
+		expect(forge.comment(1)).toContain("mergeable true, mergeable_state clean");
+		expect(pull.merged).toBeFalsy();
+	});
+
+	test("a 405 not mergeable with no gate push is ejected without a retry", async () => {
+		const { forge, pass, pauses } = setup();
+		const pull = forge.pull("One", { "one.txt": "1\n" });
+		await pass();
+		report(forge, 1, "SUCCESS");
+		pull.mergeRefusals = [{ status: 405, message: "Pull Request is not mergeable" }];
+		expect(await pass()).toEqual(["refused 1"]);
+		expect(pauses).toEqual([]);
+	});
 
 	test("a prepared head GitHub keeps calling conflicting stays queued, and the next pass lands it", async () => {
 		const context = setup();

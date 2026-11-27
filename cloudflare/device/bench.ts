@@ -165,7 +165,14 @@ export function compare(
 }
 
 /** The report as Markdown for a PR's `## Validation`. */
-export function markdown(reports: DeviceReport[], failed: { path: string; phase: string; regression: Regression }[]) {
+export function markdown(
+	reports: DeviceReport[],
+	failed: { path: string; phase: string; regression: Regression }[],
+	/** The models with no stored baseline, which nothing was compared with. */
+	uncompared: string[] = [],
+	/** The models whose baseline this run recorded (`--record`), which it didn't compare. */
+	recorded: string[] = [],
+) {
 	const lines: string[] = [];
 	const ms = (s: Summary | undefined) => (s ? `${Math.round(s.median)} / ${Math.round(s.p95)} ms` : "n/a");
 	for (const { device, pages } of reports) {
@@ -184,6 +191,17 @@ export function markdown(reports: DeviceReport[], failed: { path: string; phase:
 		for (const limit of device.limits) lines.push("", `- Not measured: ${limit}`);
 		lines.push("");
 	}
+	if (recorded.length)
+		lines.push(`Recorded a baseline for ${recorded.join(", ")}; compare against it on the next run.`, "");
+	if (uncompared.length)
+		lines.push(
+			`Not compared, with no stored baseline: ${uncompared.join(", ")}. Run with --record to make one.`,
+			"",
+		);
+	if (uncompared.length + recorded.length >= reports.length) {
+		lines.push("No baseline comparison was run.");
+		return lines.join("\n") + "\n";
+	}
 	if (failed.length) {
 		lines.push("Regressions against the stored baseline:", "");
 		for (const { path, phase, regression: r } of failed)
@@ -192,7 +210,7 @@ export function markdown(reports: DeviceReport[], failed: { path: string; phase:
 					? `- \`${path}\` ${phase} ${r.metric}: ${Math.round(r.baseline)} to ${Math.round(r.current)} (allowed +${Math.round(r.allowed)})`
 					: `- \`${path}\` ${phase} ${r.metric}: runs spread ${Math.round(r.current)} against the baseline's ${Math.round(r.baseline)} (allowed ${Math.round(r.allowed)}); too noisy to judge, rerun the bench`,
 			);
-	} else lines.push("No regressions against the stored baselines.");
+	} else lines.push("No regressions in the baselines compared.");
 	return lines.join("\n") + "\n";
 }
 

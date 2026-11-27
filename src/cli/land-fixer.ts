@@ -40,13 +40,15 @@ export class FixerRefusal extends Error {
 }
 /** A refusal because a finding or decision holds the head, which `quest status` reports as `unanswered_signal`. */
 export class SignalRefusal extends FixerRefusal {}
+/** A refusal because the head is high and no `quest review` status covers it, so it waits for a new round, which `quest status` reports as `unreviewed`. */
+export class ReviewRefusal extends FixerRefusal {}
 /** A fix that edits protected paths beyond what the base merge carries: only a maintainer's push lands it. */
 export class ProtectedEdit extends Error {}
 
 /**
  * The failure log a handback quotes: the lines the fixer cited, else the tail of the gate's failing
- * output, so a fixer that failed for its own reasons still shows why the gate dropped the PR. The
- * fixer's own output stays in its job log on the host; the comment's reason names its error.
+ * output, so a fixer that failed for its own reasons still shows why the gate dropped the PR. Its
+ * own output's tail follows in `outputSection`; the whole stays in its job log on the host.
  */
 export function handbackLog(log: string, lines?: [number, number]): string {
 	if (!lines) return readLog(log, "tail").trimEnd().split("\n").slice(-100).join("\n");
@@ -59,7 +61,11 @@ export function handbackLog(log: string, lines?: [number, number]): string {
 		.trimEnd();
 }
 
-/** Read a bounded window of a log, or "" when it is missing or not a regular file. */
+/**
+ * Read a bounded window of a log, or "" when it is missing or not a regular file. A tail window that
+ * starts mid-file drops its partial first line, or all of it without a line break, so a cut never splits a token from the prefix that
+ * `redactTokens` matches.
+ */
 function readLog(path: string, window: "head" | "tail"): string {
 	if (!path || !existsSync(path)) return "";
 	const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -67,8 +73,12 @@ function readLog(path: string, window: "head" | "tail"): string {
 		const stat = fstatSync(fd);
 		if (!stat.isFile()) return "";
 		const buffer = Buffer.alloc(Math.min(stat.size, 16_384));
-		const length = readSync(fd, buffer, 0, buffer.length, window === "head" ? 0 : stat.size - buffer.length);
-		return buffer.subarray(0, length).toString("utf8");
+		const start = window === "head" ? 0 : stat.size - buffer.length;
+		const length = readSync(fd, buffer, 0, buffer.length, start);
+		const text = buffer.subarray(0, length).toString("utf8");
+		if (start === 0) return text;
+		const newline = text.indexOf("\n");
+		return newline < 0 ? "" : text.slice(newline + 1);
 	} finally {
 		closeSync(fd);
 	}
@@ -113,6 +123,10 @@ export interface Process {
 	/** Packs fetched from the daemon's repository at launch; their objects are already there. */
 	packs?: string[];
 	error?: string;
+	/** The tail of a failed fixer's own output, which its handback quotes so the failure names its cause. */
+	output?: string;
+	/** The error a crashed wrapper reported for itself, so its handback recommends repairing the wrapper, not the PR. */
+	wrapperError?: string;
 }
 
 /**
@@ -313,7 +327,7 @@ export async function comment(
 	entry: Pick<Entry, "number" | "enabledAt">,
 	text: string,
 	suffix: string,
-	attribution = "Codex",
+	attribution = "Claude",
 	log = "",
 	reason?: Reason,
 	section?: (room: number) => string,
@@ -346,7 +360,8 @@ export function prepare(root: string, checkout: string, refs: string[], base: { 
 /**
  * Save `job`, then start the fixer wrapper on it under a supervisor that survives a daemon restart
  * and atomically records the wrapper's exit status. Its state path is never passed to the wrapper
- * or mounted in its container.
+ * or mounted in its container; the wrapper reports its own failure on descriptor 3, as does the
+ * supervisor for a wrapper it cannot run.
  */
 export async function launch(
 	path: string,
@@ -356,19 +371,31 @@ export async function launch(
 	numbers: number[],
 	env: NodeJS.ProcessEnv = {},
 ): Promise<void> {
-	save(path, job);
 	const output = openSync(
 		`${path}.log`,
 		constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW,
 		0o600,
 	);
+	// The wrapper's own error channel, apart from the log its payload also writes, so no agent or check can forge it.
+	let channel: number;
+	try {
+		channel = openSync(
+			`${path}.error`,
+			constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_APPEND | constants.O_NOFOLLOW,
+			0o600,
+		);
+	} catch (failure) {
+		closeSync(output);
+		throw failure;
+	}
 	let child: ReturnType<typeof spawn>;
 	try {
+		save(path, job);
 		child = spawn(
 			"sh",
 			[
 				"-c",
-				`trap ':' TERM; status=$1; shift; "$@"; code=$?; printf "%s" "$code" > "$status.new"; mv "$status.new" "$status"`,
+				`trap ':' TERM; status=$1; shift; if [ -x "$1" ]; then "$@"; code=$?; else echo "the fixer wrapper is missing or not executable" >&3; code=127; fi; printf "%s" "$code" > "$status.new"; mv "$status.new" "$status"`,
 				"quest-fixer",
 				`${path}.exit`,
 				fixer,
@@ -379,11 +406,12 @@ export async function launch(
 				cwd: job.checkout,
 				detached: true,
 				env: { ...commandEnvironment(), ...env },
-				stdio: ["ignore", output, output],
+				stdio: ["ignore", output, output, channel],
 			},
 		);
 	} finally {
 		closeSync(output);
+		closeSync(channel);
 	}
 	try {
 		await new Promise<void>((done, reject) => {
@@ -393,7 +421,8 @@ export async function launch(
 		job.pid = child.pid;
 		job.identity = identity(child.pid!);
 	} catch (error) {
-		job.error = `fixer launch failed: ${String(error)}`;
+		job.wrapperError = `launch failed: ${String(error)}`;
+		job.error = `fixer ${job.wrapperError}`;
 	}
 	save(path, job);
 	child.unref();
@@ -412,14 +441,28 @@ export function settle(
 	const restarted = job.daemon && daemon && job.daemon !== daemon ? "; the daemon restarted while it ran" : "";
 	if (existsSync(`${path}.exit`)) {
 		const code = readFileSync(`${path}.exit`, "utf8");
-		if (job.terminating !== undefined) job.error = "fixer timed out; run /quest-iterate";
-		else if (code !== "0") job.error = `fixer ${exited(code)}${restarted}; run /quest-iterate`;
-		else
+		if (job.terminating === undefined && code === "0")
 			try {
 				read();
 			} catch (error) {
+				// The wrapper succeeded, so its output is the agent's transcript, not the cause.
 				job.error = `invalid fixer result: ${String(error)}; run /quest-iterate`;
 			}
+		else {
+			const cause = exited(code);
+			// Only a plain crash is the wrapper's own: a signal or a restart stopped a wrapper that may be fine.
+			job.wrapperError =
+				job.terminating === undefined && !restarted && cause.startsWith("crashed")
+					? wrapperError(path)
+					: undefined;
+			job.error =
+				job.terminating !== undefined
+					? "fixer timed out; run /quest-iterate"
+					: job.wrapperError
+						? `fixer ${cause}: ${job.wrapperError}`
+						: `fixer ${cause}${restarted}; run /quest-iterate`;
+			job.output = outputTail(path);
+		}
 	} else if (deps.now() > deadline(path, job, deps.now(), timeout)) {
 		if (job.terminating === undefined) {
 			job.terminating = deps.now();
@@ -438,15 +481,65 @@ export function settle(
 			} catch {}
 		}
 		job.error = "fixer timed out; run /quest-iterate to diagnose and retry";
+		job.output = outputTail(path);
 	}
 	// Without a launch identity (an unreadable /proc), only its exit status or the timeout can end the job.
 	else if (!job.identity || (job.pid && identity(job.pid) === job.identity)) return false;
-	else job.error = `fixer stopped without recording an exit status${restarted}; run /quest-iterate`;
+	else {
+		job.error = `fixer stopped without recording an exit status${restarted}; run /quest-iterate`;
+		job.output = outputTail(path);
+	}
 	save(path, job);
 	return true;
 }
 
-/** New commits descend from the pin. Protected content/modes at the head must match the pin or its merge with `base`, the base the fixer was given. */
+/** Lines of a failed fixer's output its handback quotes: enough for a stack trace's end, few enough to skip its noise. */
+const OUTPUT_LINES = 20;
+const OUTPUT_LIMIT = 2_000;
+
+/**
+ * The last lines the fixer wrapper at job `path` printed, tokens redacted, or "" when it printed
+ * nothing. Redacting before the cut keeps a cut through a token's prefix from posting the rest.
+ */
+export function outputTail(path: string): string {
+	const tail = redactTokens(readLog(`${path}.log`, "tail").trimEnd().split("\n").slice(-OUTPUT_LINES).join("\n"));
+	return tail.length > OUTPUT_LIMIT ? tail.slice(-OUTPUT_LIMIT) : tail;
+}
+
+/** The last line the fixer wrapper at job `path` wrote to its error descriptor, tokens redacted, or undefined; the handback clips it. */
+export function wrapperError(path: string): string | undefined {
+	const line = readLog(`${path}.error`, "tail")
+		.split("\n")
+		.map((item) => item.trim())
+		.filter(Boolean)
+		.at(-1);
+	return line ? redactTokens(line) : undefined;
+}
+
+/**
+ * The handback section quoting a failed fixer's `output`, so a crash before the agent started, such as
+ * a launcher refusing the upload, names its cause on the PR. Empty when it does not fit in `room`.
+ */
+export function outputSection(output: string, room: number): string {
+	const section = `\n\nThe fixer's output ended with:\n\n<pre>${excerpt(redactTokens(output))}</pre>`;
+	return section.length <= room ? section : "";
+}
+
+/** The build and CI paths a fixer never edits unread. A high head's every path waits for a review at its requeue instead. */
+const BUILD = ["flake.nix", "flake.lock", "shell.nix", "default.nix", ".gitmodules", ".envrc", "nix", ".github"];
+
+/** `git <args> -z`'s NUL-separated paths in `root`, untrimmed, since a path may start with a space. */
+function paths(root: string, args: string[]): string[] {
+	const result = tryGit(root, [...args, "-z"]);
+	if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.trim()}`);
+	return result.stdout.split("\0").filter(Boolean);
+}
+
+/**
+ * New commits descend from the pin. A head that takes no history of `base`, the base the fixer was given, keeps the
+ * pin's protected content and modes; one that does merges all of `base`, settles no conflict in a protected path or
+ * one naming no conflicted file, and keeps the plain merge's.
+ */
 export function validateFix(root: string, entry: Pick<Entry, "head">, head: string, base: string): void {
 	if (!contains(root, entry.head, head) || head === entry.head)
 		throw new Error("fixed head must descend from the pinned PR head");
@@ -456,29 +549,66 @@ export function validateFix(root: string, entry: Pick<Entry, "head">, head: stri
 		if (!contains(root, entry.head, commit)) throw new Error("new fixer commit is not on top of pinned head");
 	}
 
-	const protectedPath = (path: string) =>
-		["flake.nix", "flake.lock", "shell.nix", "default.nix", ".gitmodules", ".envrc", "nix", ".github"].some(
-			(prefix) => path === prefix || path.startsWith(`${prefix}/`),
-		);
-	const merged = tryGit(root, ["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", entry.head, base]);
+	const protectedPath = (path: string) => BUILD.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+	const refuse = (what: string, path: string) => new ProtectedEdit(`off-limits fixer edit: ${what}, at ${path}`);
+	const merged = tryGit(root, ["merge-tree", "--write-tree", "--name-only", "-z", entry.head, base]);
 	if (merged.status !== 0 && merged.status !== 1) throw new Error("cannot compute protected merge result");
-	const [tree, ...conflicts] = merged.stdout.split("\0");
-	if (!/^[a-f0-9]{40}$/.test(tree)) throw new Error("invalid protected merge tree");
-	const entries = (ref: string) => git(root, ["ls-tree", "-rz", ref]).split("\0").filter(Boolean);
-	const maps = [head, entry.head, tree].map(entries);
+	const { tree, conflicts, unlisted } = mergeResult(merged.stdout);
+	// The plain merge's gitlinks count even for a fix that merges no base, so it cannot take a path the base made a submodule.
 	const gitlinks = new Set(
-		maps.flatMap((list) =>
-			list.filter((line) => line.startsWith("160000 ")).map((line) => line.slice(line.indexOf("\t") + 1)),
+		[head, entry.head, tree].flatMap((ref) =>
+			paths(root, ["ls-tree", "-r", ref])
+				.filter((line) => line.startsWith("160000 "))
+				.map((line) => line.slice(line.indexOf("\t") + 1)),
 		),
 	);
-	const protectedEntry = (line: string) => {
-		const path = line.slice(line.indexOf("\t") + 1);
-		return protectedPath(path) || gitlinks.has(path);
-	};
-	const sets = maps.map((list) => list.filter(protectedEntry).sort().join("\0"));
-	const protectedConflict = conflicts.some((path) => protectedPath(path) || gitlinks.has(path));
-	if (sets[0] !== sets[1] && (protectedConflict || sets[0] !== sets[2]))
-		throw new ProtectedEdit("off-limits fixer edit: protected set must equal pinned head or base merge result");
+	// Only the paths whose entries differ need the protection test, not every path of three trees.
+	const edited = (from: string) =>
+		paths(root, ["diff-tree", "-r", "--name-only", "--no-renames", "--ignore-submodules=none", from, head]).find(
+			(path) => protectedPath(path) || gitlinks.has(path),
+		);
+	const count = (...not: string[]) => git(root, ["rev-list", "--count", head, ...not.map((ref) => `^${ref}`)]);
+	if (count(entry.head) === count(entry.head, base)) {
+		const path = edited(entry.head);
+		if (path !== undefined) throw refuse("protected set must equal the pinned head's", path);
+		return;
+	}
+	// With the base's history in the head, the pin's copy of a path the base changed reverts that change.
+	if (!contains(root, base, head)) throw new Error("a head that merges base history must merge all of the base");
+	// Some conflicts, such as a directory rename split, name no conflicted file, so one may fall in a protected path.
+	if (unlisted !== undefined || (merged.status === 1 && conflicts.length === 0))
+		throw refuse("it settles a conflict that names no conflicted file", unlisted ?? "an unnamed path");
+	const conflict = conflicts.find((path) => protectedPath(path) || gitlinks.has(path));
+	if (conflict !== undefined) throw refuse("it settles a conflict in a protected path", conflict);
+	const path = edited(tree);
+	if (path !== undefined) throw refuse("protected set must equal the base merge result's", path);
+}
+
+/**
+ * `git merge-tree --write-tree --name-only -z`'s output: the merged tree, the conflicted files, and the first path a
+ * conflict message names when none of its paths is a conflicted file.
+ */
+function mergeResult(output: string): { tree: string; conflicts: string[]; unlisted?: string } {
+	const fields = output.split("\0");
+	const tree = fields[0];
+	if (!/^[a-f0-9]{40}$/.test(tree)) throw new Error("invalid protected merge tree");
+	// The conflicted files end at an empty field, which opens the messages.
+	let at = fields.indexOf("", 1);
+	if (at < 0) throw new Error("invalid protected merge output");
+	const conflicts = fields.slice(1, at);
+	const listed = new Set(conflicts);
+	let unlisted: string | undefined;
+	// Each message is its path count, those paths, its type, and its text.
+	for (at++; at < fields.length && fields[at] !== "";) {
+		const count = Number(fields[at]);
+		if (!Number.isSafeInteger(count) || count < 0 || at + count + 2 >= fields.length)
+			throw new Error("invalid protected merge message");
+		const named = fields.slice(at + 1, at + 1 + count);
+		if (fields[at + 1 + count].startsWith("CONFLICT") && !named.some((path) => listed.has(path)))
+			unlisted ??= named[0] ?? "an unnamed path";
+		at += count + 3;
+	}
+	return { tree, conflicts, unlisted };
 }
 
 /** Anything the fixer writes may echo a token it read; GitHub tokens never reach a post. */
@@ -516,14 +646,14 @@ export function fixerText(text: string): string {
 }
 /** The fixer's harness, model, and effort, as a PR's `## Models` record names a session. */
 export function author(result?: Pick<FixResult, "agent" | "model" | "effort">): string {
-	const agent = result?.agent ?? "Codex";
+	const agent = result?.agent ?? "Claude";
 	const model = result?.model;
 	return (
 		[agent, model && model !== agent ? model : undefined, result?.effort && `${result.effort} effort`]
 			.filter(Boolean)
 			.join(", ")
 			.replace(/[^a-zA-Z0-9 ,._/-]/g, " ")
-			.slice(0, 100) || "Codex"
+			.slice(0, 100) || "Claude"
 	);
 }
 /** The PR body with the fix recorded in its `## Review` section; the line names the agent, and the author's text stays as written. */
@@ -570,8 +700,8 @@ function ready(
  * edits, the head's objects are imported from the fixer's `checkout`, and it must descend from the
  * pinned head and keep the protected paths, judged against the base the fixer was given rather than
  * the current one, since other PRs may land protected changes while the result waits. A fix that edits
- * them is refused with its resolution, for a maintainer to review and push with `quest land apply`,
- * when the PR stands at `entry`'s pinned head.
+ * them is refused with its resolution, for a maintainer to review and push with `quest land apply`, when the PR
+ * stands at `entry`'s pinned head.
  */
 export async function importFix(
 	root: string,
@@ -658,8 +788,12 @@ export async function publishHead(
 /** Passes in a row that fail to collect the same PR before it is set aside, so its job's other PRs go on. */
 export const COLLECTION_ATTEMPTS = 3;
 
-/** An exit status as a cause: a signal by name (143 is SIGTERM), or a crash with its code (101 is a Rust panic). */
+/**
+ * An exit status as a cause: a timeout (124, which `timeout(1)` and the fixer client use for a limit reached), a signal
+ * by name (143 is SIGTERM), or a crash with its code (101 is a Rust panic).
+ */
 function exited(code: string): string {
+	if (code === "124") return "timed out (exit 124)";
 	const signal = Object.entries(osConstants.signals).find(([, number]) => 128 + number === Number(code))?.[0];
 	return signal ? `stopped by ${signal} (exit ${code})` : `crashed (exit ${code})`;
 }

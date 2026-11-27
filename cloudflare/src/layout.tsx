@@ -77,25 +77,31 @@ export function Layout(props: Page & { children: Child }) {
 							<img src="/theme/logo.svg" alt="" width="30" height="30" />
 							<span class="wordmark">Quest</span>
 						</a>
-						<span class="account">
-							{props.user ? (
-								<>
-									<span class="muted">{props.user.login}</span>
-									<form method="post" action="/sign-out">
-										<button class="button quiet">Sign out</button>
-									</form>
-								</>
-							) : (
-								<a class="button quiet" href={`/sign-in?next=${encodeURIComponent(props.path)}`}>
-									Sign in
-								</a>
-							)}
-						</span>
+						{/* Offline, signing in or out can't work, so the notice offers neither. */}
+						{!props.offlineNotice && (
+							<span class="account">
+								{props.user ? (
+									<>
+										<span class="muted">{props.user.login}</span>
+										<form method="post" action="/sign-out">
+											<button class="button quiet">Sign out</button>
+										</form>
+									</>
+								) : (
+									<a class="button quiet" href={`/sign-in?next=${encodeURIComponent(props.path)}`}>
+										Sign in
+									</a>
+								)}
+							</span>
+						)}
 					</nav>
 				</header>
 				{props.crumbs && <Crumbs crumbs={props.crumbs} />}
 				<main>{props.children}</main>
 				<footer class="wrap site-footer">
+					<a class="moq-brand" href="https://moq.dev/" aria-label="moq.dev">
+						<img src="/theme/moq-dev-wordmark.svg" alt="" width="128" height="28" />
+					</a>
 					<p>
 						Quest is open source, under MIT or Apache-2.0. <a href={repo}>Read the source on GitHub</a>.
 					</p>

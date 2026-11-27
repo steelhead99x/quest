@@ -1,5 +1,17 @@
 name: Check
 
+# Runs after each push to main. In kixel-ai/quest the merge queue already runs
+# `just check`, `just test`, and the flake check on the host's runner; this
+# repeats them on a hosted one and adds the installed lifecycle on Linux and
+# macOS. A newer push cancels an older run, even one in progress, so runs
+# coalesce.
+#
+# A fork has no merge queue and no host runner, so queue.yml never builds its
+# pull requests. There `check` also runs on each pull request, whatever its
+# base, so a PR stacked on another PR's branch is built too: this is the fork's
+# pre-merge build. kixel-ai/quest's pull requests keep only the skipped `Queue`
+# context queue-pr.yml reports. A pull request runs this file as its test merge
+# commit has it, so a PR whose base and head both predate the trigger gets no build.
 on:
   push:
     branches: [main]
@@ -16,13 +28,11 @@ concurrency:
 
 jobs:
   check:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || github.repository != 'kixel-ai/quest'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
-        with:
-          determinate: false
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
       # The full history holds the merge base with the base branch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,12 +55,10 @@ jobs:
 
   lifecycle:
     name: lifecycle (${{ matrix.runner }})
+    # After each push only: the macOS runner is often slow to start.
     if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
-      # Hosted macOS runners can queue past the timeout, which then reports a job
-      # that never ran as failed. Main checks the flake's macOS build,
-      # and tags check the released binaries.
       matrix:
         runner: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.runner }}
@@ -59,9 +67,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
-        with:
-          determinate: false
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
       - name: Install the checkout with the flake's source build
         run: nix build --out-link "$RUNNER_TEMP/quest-lifecycle-install" .#quest
       - name: Verify the installed CLI lifecycle

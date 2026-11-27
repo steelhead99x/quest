@@ -21,7 +21,7 @@ test("usage limits and spent balances match, and other limits do not", () => {
 		"You've hit your team's shared budget. /model to switch models.",
 		// A CLIProxyAPI pool, as Claude Code shows it and in the OpenAI-style formats.
 		"API Error: Request rejected (429) · All credentials for model claude-opus-5-5 are cooling down (last error: rate_limit_error: This request would exceed your account's rate limit.)",
-		'{"error":{"code":"model_cooldown","message":"All credentials for model gpt-6.1-sol are cooling down","reset_seconds":81}}',
+		'{"error":{"code":"model_cooldown","message":"All credentials for model gpt-6.2-sol are cooling down","reset_seconds":81}}',
 	]) {
 		expect(LIMIT.test(message), message).toBe(true);
 	}

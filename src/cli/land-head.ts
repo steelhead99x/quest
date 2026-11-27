@@ -3,7 +3,8 @@ import { existsSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFil
 import { join } from "node:path";
 import { carriedBy } from "./land-fixer";
 import { gitAuthentication } from "./land-git";
-import { GitHub, type GitHubDependencies, type Repository, object, string } from "../github/client";
+import { GitHub, type GitHubDependencies, object, string } from "../github/client";
+import type { Repository } from "../core";
 import {
 	baseRemote,
 	type LandMethod,
@@ -389,7 +390,7 @@ export async function mergePinned(
 		if (current !== head) return { reason: "head_moved", detail };
 		const conflict = pull.mergeable === false || pull.mergeable_state === "dirty";
 		// Once GitHub shows the gate's own merge, it can still call it conflicting from the pin's stale
-		// mergeability, in its refusal or in the PR (moq-dev/quest#342). That merge already holds the
+		// mergeability, in its refusal or in the PR (kixel-ai/quest#342). That merge already holds the
 		// base it was checked on, so it cannot conflict with it: wait. Only a base that moved since can
 		// conflict, and then the retries run out and the next round rebuilds on that base.
 		const stale = previous !== head && (conflict || /merge conflict/i.test(String(result.message)));
@@ -399,7 +400,16 @@ export async function mergePinned(
 			await github.pause(500 * 2 ** attempt);
 			continue;
 		}
-		return { reason: "merge_refused", detail };
+		// Right after the gate's own push, GitHub can refuse a merge it is still recomputing, and the read
+		// above follows the refusal, so it may already show settled mergeability. Retry it, but a refusal
+		// that lasts, such as a disabled merge method, is real: eject it rather than throw, which would
+		// retry it every round.
+		if (previous !== head && response.status === 405 && attempt < SETTLE_RETRIES) {
+			await github.pause(500 * 2 ** attempt);
+			continue;
+		}
+		const state = `mergeable ${String(pull.mergeable)}, mergeable_state ${String(pull.mergeable_state)}`;
+		return { reason: "merge_refused", detail: `${detail} (${state})` };
 	}
 }
 

@@ -14,4 +14,5 @@ process.exitCode = await main(process.argv.slice(2), {
 	stdout: (text) => void process.stdout.write(text),
 	stderr: (text) => void process.stderr.write(text),
 	terminal: detect(process.stdout.isTTY, process.env),
+	entry: [process.argv[1] ?? "", process.execPath],
 });

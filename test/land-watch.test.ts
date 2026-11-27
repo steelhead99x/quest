@@ -1,6 +1,6 @@
 // `quest land watch` against a fake of the GitHub records it reads: merge queue events and `merge_group` builds.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -15,7 +15,7 @@ import { CHECK_LOG } from "../src/cli/land-checks";
 import { COLLECTION_ATTEMPTS, REQUEUE_LIMIT, carriedBy, history } from "../src/cli/land-fixer";
 import { privateRepository } from "../src/cli/land-daemon";
 import { jobsSection, readRemoval, SETTLE, watchPass, watchPermissions } from "../src/cli/land-watch";
-import { endPick, type FixContext, HELD } from "../src/cli/land-watch-fix";
+import { clip, endPick, type FixContext, HELD } from "../src/cli/land-watch-fix";
 import {
 	type FlakyTest,
 	flakyName,
@@ -76,6 +76,8 @@ interface Pull {
 	labels?: string[];
 	/** Its reviews, threads, and comments as the signal reader reads them; none by default. */
 	activity?: Record<string, unknown>;
+	/** The accounts that post a commit status its base requires, by commit; none by default. */
+	requiredBy?: Record<string, string[]>;
 }
 interface Job {
 	id: number;
@@ -202,6 +204,32 @@ function deps(world: World): GitHubDependencies {
 				if (query.includes("viewer")) return Response.json({ data: { viewer: { login: `${APP}[bot]` } } });
 				if (query.includes("defaultBranchRef"))
 					return Response.json({ data: { repository: { defaultBranchRef: { name: "main" } } } });
+				if (query.includes("query BaseRisk")) {
+					const [ref, file] = String(variables.expression).split(":");
+					const read = (args: string[]) =>
+						world.origin ? spawnSync("git", args, { cwd: world.origin, encoding: "utf8" }) : null;
+					const oid = read(["rev-parse", "--verify", "--quiet", `${ref}:${file}`]);
+					const found =
+						oid && oid.status === 0
+							? {
+									oid: oid.stdout.trim(),
+									text: read(["cat-file", "blob", oid.stdout.trim()])!.stdout,
+									isBinary: false,
+									isTruncated: false,
+								}
+							: null;
+					return Response.json({ data: { repository: { object: found } } });
+				}
+				if (query.includes("query ReviewTiers"))
+					return Response.json({
+						data: {
+							repository: {
+								pullRequest: {
+									commits: { pageInfo: { hasPreviousPage: false, startCursor: null }, nodes: [] },
+								},
+							},
+						},
+					});
 				const pullOf = () => world.pulls.find((item) => `PR_${item.number}` === variables.id)!;
 				const aliases = [...query.matchAll(/\bp(\d+): pullRequest\(number: \d+\)/g)].map((m) => Number(m[1]));
 				if (aliases.length) {
@@ -221,6 +249,18 @@ function deps(world: World): GitHubDependencies {
 							),
 						},
 					});
+				}
+				if (query.includes("query RequiredPosters(")) {
+					const pull = world.pulls.find((item) => item.number === variables.number)!;
+					const nodes = (pull.requiredBy?.[String(variables.oid)] ?? []).map((login) => ({
+						__typename: "StatusContext",
+						isRequired: true,
+						creator: login.endsWith("[bot]")
+							? { __typename: "Bot", login: login.slice(0, -5) }
+							: { __typename: "User", login },
+					}));
+					const contexts = { nodes, pageInfo: { hasNextPage: false, endCursor: null } };
+					return Response.json({ data: { repository: { object: { statusCheckRollup: { contexts } } } } });
 				}
 				if (query.includes("statusCheckRollup")) {
 					expect(variables.id).toMatch(/^PR_\d+$/);
@@ -285,6 +325,7 @@ function deps(world: World): GitHubDependencies {
 						data: {
 							node: {
 								number: pull.number,
+								body: pull.body ?? "",
 								repository: { nameWithOwner: "upstream/project" },
 								state: pull.state ?? "OPEN",
 								baseRefName: pull.base ?? "main",
@@ -402,6 +443,20 @@ function deps(world: World): GitHubDependencies {
 						.filter((item) => `upstream:${branchOf(item)}` === head && (item.state ?? "OPEN") === "OPEN")
 						.map((item) => ({ number: item.number, node_id: `PR_${item.number}` })),
 				);
+			}
+			// A PR's files, from the upstream repository when the world has one.
+			const compared = /^\/repos\/upstream\/project\/compare\/([^/]+)\.\.\.(\w+)$/.exec(path);
+			if (compared) {
+				const [, base, head] = compared;
+				const from = world.origin ? git(world.origin, "merge-base", `refs/heads/${base}`, head!) : GROUP;
+				const changed = world.origin
+					? git(world.origin, "diff", "--name-only", "--no-renames", from, head!)
+					: "";
+				const files = changed
+					.split("\n")
+					.filter(Boolean)
+					.map((filename) => ({ filename }));
+				return Response.json({ merge_base_commit: { sha: from }, files });
 			}
 			const pullPath = /^\/repos\/upstream\/project\/pulls\/(\d+)$/.exec(path);
 			if (pullPath) {
@@ -712,6 +767,46 @@ test("a failed build with no failing job found, or a job with no log, still comm
 	expect(github.requests.filter((request) => request.includes("/actions/jobs/90/logs"))).toEqual([]);
 });
 
+test("a build GitHub cancelled past its time limit is its failing job, unless another job failed", async () => {
+	const state = tempDir();
+	// As on kixel-ai/rind#967: the only job ran into the hour limit, so GitHub reported it cancelled, not failed.
+	const timedOut = failedRun(11, at(3));
+	timedOut.jobs = [
+		{
+			id: 80,
+			name: "Build",
+			status: "completed",
+			conclusion: "cancelled",
+			steps: [
+				{ name: "Set up job", conclusion: "success" },
+				{ name: "Check and test", conclusion: "cancelled" },
+			],
+			log: "2026-11-01T12:03:00.1234567Z cargo test\n2026-11-01T13:03:00.1234567Z Terminate orphan process: pid (1) (cargo)\n",
+		},
+	];
+	// A failing job's fail-fast sibling is cancelled in its wake, and is no cause of its own.
+	const sibling = failedRun(12, at(3));
+	sibling.jobs.push({ id: 81, name: "slow", status: "completed", conclusion: "cancelled", log: "canceled" });
+	const github = world(
+		[11, 12].map((number) => ({
+			number,
+			head: HEAD,
+			enqueues: [{ createdAt: at(1), actor: "maintainer" }],
+			removals: [{ id: `R${number}`, createdAt: at(5), reason: "failed_checks", actor: "github-merge-queue" }],
+		})),
+		[timedOut, { ...sibling, id: 8 }],
+	);
+	await watchPass(REPOSITORY, { state }, deps(github));
+	expect(readRemoval(state, 11)).toMatchObject({
+		verdict: "fix",
+		jobs: [{ name: "Build", conclusion: "cancelled", step: "Check and test" }],
+	});
+	expect(github.comments[11][0].body).not.toContain("found no failing");
+	expect(github.comments[11][0].body).toContain("Terminate orphan process");
+	expect(readRemoval(state, 12)!.jobs).toMatchObject([{ name: "test", conclusion: "failure" }]);
+	expect(github.requests.filter((request) => request.includes("/actions/jobs/81/logs"))).toEqual([]);
+});
+
 test("the first pass reads removals from SETTLE before it, and forgets closed PRs", async () => {
 	const state = tempDir();
 	const pull: Pull = {
@@ -784,7 +879,7 @@ test("an armed pick GitHub never queued is enqueued once ready, only at the head
 	expect(github.mutations).toHaveLength(2);
 });
 
-test("a queued or armed pick that draws an online finding leaves the queue, once, and is not enqueued again, unless retargeted", async () => {
+test("a queued or armed pick that draws a required reviewer's finding leaves the queue, once, and is not enqueued again, unless retargeted", async () => {
 	const state = tempDir();
 	const page = (nodes: object[]) => ({ pageInfo: { hasNextPage: false, endCursor: null }, nodes });
 	const finding = {
@@ -808,10 +903,40 @@ test("a queued or armed pick that draws an online finding leaves the queue, once
 			armed: at(2),
 			queued: at(2),
 			activity: finding,
+			requiredBy: { [HEAD]: ["rabbit[bot]"] },
 		},
-		{ number: 31, head: HEAD, enqueues: [], removals: [], armed: at(2), mergeState: "BLOCKED", activity: finding },
+		{
+			number: 31,
+			head: HEAD,
+			enqueues: [],
+			removals: [],
+			armed: at(2),
+			mergeState: "BLOCKED",
+			activity: finding,
+			requiredBy: { [HEAD]: ["rabbit[bot]"] },
+		},
 		// Retargeted after the list read: another base's watcher owns it now.
-		{ number: 33, head: HEAD, enqueues: [], removals: [], armed: at(2), base: "release", activity: finding },
+		{
+			number: 33,
+			head: HEAD,
+			enqueues: [],
+			removals: [],
+			armed: at(2),
+			base: "release",
+			activity: finding,
+			requiredBy: { [HEAD]: ["rabbit[bot]"] },
+		},
+		// The base requires only another account's check, so the reviewer is optional and its finding a suggestion.
+		{
+			number: 34,
+			head: HEAD,
+			enqueues: [{ createdAt: at(2), actor: "maintainer" }],
+			removals: [],
+			armed: at(2),
+			queued: at(2),
+			activity: finding,
+			requiredBy: { [HEAD]: ["ci[bot]"] },
+		},
 		// Nothing holds it.
 		{
 			number: 32,
@@ -839,6 +964,7 @@ test("a queued or armed pick that draws an online finding leaves the queue, once
 	expect(github.mutations).toHaveLength(2);
 	expect(github.comments[31]).toHaveLength(1);
 	expect(github.comments[33]).toBeUndefined();
+	expect(github.comments[34]).toBeUndefined();
 });
 
 test("a signaled pick leaves the queue even when GitHub refuses its comment, which a later pass posts", async () => {
@@ -851,6 +977,7 @@ test("a signaled pick leaves the queue even when GitHub refuses its comment, whi
 				removals: [],
 				armed: at(2),
 				queued: at(2),
+				requiredBy: { [HEAD]: ["rabbit[bot]"] },
 				activity: {
 					reviews: {
 						pageInfo: { hasNextPage: false, endCursor: null },
@@ -975,7 +1102,14 @@ test("an armed pick withdrawn, retargeted, or held while the pass reads it is no
 
 test("the watcher's tokens ask for writes only with a fixer, and pushes for workflows only when they carry one", () => {
 	expect(watchPermissions(false)).toEqual({
-		api: { contents: "write", pull_requests: "write", actions: "read", merge_queues: "write" },
+		api: {
+			contents: "write",
+			pull_requests: "write",
+			actions: "read",
+			merge_queues: "write",
+			checks: "read",
+			statuses: "read",
+		},
 	});
 	expect(watchPermissions(true)).toEqual({
 		api: {
@@ -990,6 +1124,14 @@ test("the watcher's tokens ask for writes only with a fixer, and pushes for work
 		pushWorkflows: { contents: "write", pull_requests: "write", workflows: "write" },
 		read: { contents: "read" },
 	});
+});
+
+test("a handback's summary ends at a word, never mid-sentence", () => {
+	const long = "the site shell stalled at 'waiting for the big garbage collector lock...' and was interrupted";
+	expect(clip(long, 50, ".")).toBe("the site shell stalled at 'waiting for the big…");
+	expect(clip("short.", 50, ".")).toBe("short.");
+	expect(clip("short", 50, ".")).toBe("short.");
+	expect(clip("a".repeat(60), 20)).toBe(`${"a".repeat(19)}…`);
 });
 
 test("failing jobs that do not fit the comment are counted instead", () => {
@@ -1320,7 +1462,7 @@ describe.skipIf(process.platform === "win32")("the watcher's land fixer", () => 
 		pull.labels = undefined;
 		expect(git(repo.origin, "rev-parse", `${fixed}^`)).toBe(head);
 		expect(github.mutations).toEqual([`enqueuePullRequest 5 ${fixed}`]);
-		expect(pull.body).toContain(`mechanical fix by Codex: \`add the missing file\` (head ${fixed})`);
+		expect(pull.body).toContain(`mechanical fix by Claude: \`add the missing file\` (head ${fixed})`);
 		expect(github.comments[5].at(-1)!.body).toContain(
 			`re-enqueued this pull request at ${fixed}, at the back of the merge queue`,
 		);
@@ -1397,6 +1539,7 @@ describe.skipIf(process.platform === "win32")("the watcher's land fixer", () => 
 				],
 			},
 		};
+		pull.requiredBy = { [head]: ["rabbit[bot]"] };
 		github.now = Date.parse(at(10));
 		expect(await watchPass(REPOSITORY, { state }, deps(github), context)).toEqual(["handback 5"]);
 		expect(github.mutations).toEqual([]);
@@ -1455,6 +1598,7 @@ describe.skipIf(process.platform === "win32")("the watcher's land fixer", () => 
 				],
 			},
 		};
+		pull.requiredBy = { [head]: ["rabbit[bot]"] };
 		github.now = Date.parse(at(10));
 		expect(await watchPass(REPOSITORY, { state }, deps(github), context)).toEqual(["handback 5"]);
 		// Leaving the queue disarmed it, so nothing asks GitHub to disarm a request that is gone.
@@ -1498,6 +1642,7 @@ describe.skipIf(process.platform === "win32")("the watcher's land fixer", () => 
 				],
 			},
 		};
+		pull.requiredBy = { [head]: ["rabbit[bot]"] };
 		github.now = Date.parse(at(12));
 		expect(await watchPass(REPOSITORY, { state }, deps(github), context)).toEqual([
 			`dequeued 5 ${fixed()} 1 signals`,
@@ -1533,6 +1678,42 @@ describe.skipIf(process.platform === "win32")("the watcher's land fixer", () => 
 		expect(handback).toContain("off-limits fixer edit");
 		expect(handback).toContain("`quest land apply 5`");
 		expect(parseResolution(handback)).toMatchObject({ head, base: head });
+	});
+
+	test("a fixed head that touches a high path is pushed but waits for a review", async () => {
+		const cases = [
+			{ body: "", file: "high.txt", why: "it changes high.txt, which is always high: every agent loads it" },
+		];
+		for (const { body, file, why } of cases) {
+			const { repo, state, fix, context } = setup();
+			repo.advance({ "RISK.md": "# Risk\n\n## High\n\n- `high.txt` - every agent loads it\n" });
+			const base = repo.main();
+			const head = repo.pull(5, { "feature.txt": "new\n" });
+			const pull: Pull = {
+				number: 5,
+				head,
+				body,
+				enqueues: [{ createdAt: at(1), actor: "maintainer" }],
+				removals: [
+					{ id: "R1", createdAt: at(5), reason: "failed_checks", actor: "github-merge-queue", before: head },
+				],
+			};
+			const github = { ...world([pull], [failedRun(5, at(3), base)]), origin: repo.origin };
+			github.now = Date.parse(at(6));
+			fix.round(5, fixScript(file));
+			await watchPass(REPOSITORY, { state }, deps(github), context);
+			await exited(state);
+			github.now = Date.parse(at(10));
+			expect(await watchPass(REPOSITORY, { state }, deps(github), context)).toEqual(["handback 5"]);
+			const fixed = git(repo.origin, "rev-parse", "refs/heads/branch-5");
+			expect(fixed).not.toBe(head);
+			expect(github.mutations).toEqual([]);
+			const handback = github.comments[5].at(-1)!.body;
+			expect(handback).toContain(`its head ${fixed} is high, since `);
+			expect(handback).toContain(`${why}, and no quest review status covers it.`);
+			expect(handback).toContain("Recommendation: run /quest-review on its head before picking it again.");
+			expect(handback).toContain("<!-- quest land: unreviewed -->");
+		}
 	});
 
 	test("a quest-file conflict is merged with the quest driver, and a code conflict goes to the fixer", async () => {
@@ -1892,7 +2073,7 @@ git commit -qm 'disable render_timeout'`;
 				"#6 ([job 1](https://github.com/upstream/project/actions/runs/60/job/71)), #7 ([job 1](https://github.com/upstream/project/actions/runs/70/job/71))",
 			);
 			expect(opened.body).toContain("adds its follow-up quest, `quest/m0/flaky/render-timeout.md`");
-			expect(opened.body).toContain(`## Review\n\nmechanical fix by Codex: \``);
+			expect(opened.body).toContain(`## Review\n\nmechanical fix by Claude: \``);
 			expect(opened.body).toContain(`(head ${head})`);
 			expect(readFlaky(state)).toMatchObject([
 				{
@@ -1960,7 +2141,11 @@ git commit -qm 'disable render_timeout'`;
 			`printf '[{"number":%s,"action":"handback","diagnosis":"the test asserts the old behavior","recommendation":"decide which behavior is right","log":[1,1]}]' "$2" > quest-land-result.json\n`,
 		);
 		fix.round(10, fixScript("fixed.txt"));
-		fix.round(11, "echo 'agent crashed' >&2\nexit 3\n");
+		// rind's fixers on 2026-11-15 failed so before Codex started: the host's launcher refused the upload.
+		fix.round(
+			11,
+			"echo 'starting' \necho 'quest land check: upload exceeds 256 MiB <@maintainer>' >&2\necho 'upload exceeds 256 MiB <@maintainer>' >&3\nexit 1\n",
+		);
 		fix.round(13, fixScript("fixed.txt"));
 		expect(await watchPass(REPOSITORY, { state }, deps(github), context)).toEqual([
 			"removed 8 failed_checks fix",
@@ -2012,16 +2197,21 @@ git commit -qm 'disable render_timeout'`;
 		expect(github.comments[10].at(-1)!.body).toContain("the pick it was fixing ended");
 		const handback = github.comments[9].at(-1)!.body;
 		expect(handback).toContain(
-			"Codex land fixer: `the test asserts the old behavior. Recommendation: decide which behavior is right`",
+			"Claude land fixer: `the test asserts the old behavior. Recommendation: decide which behavior is right`",
 		);
 		expect(handback).toContain("<pre>The merge queue removed");
 		expect(history(state, 9)!.rounds).toMatchObject([{ outcome: "handback" }]);
 		// A crash ends the pick too, with a round of its own.
-		// Its handback names the crash as the reason and quotes the gate's failure, not the fixer's output.
+		// Its handback names the crash and the wrapper's own error as the reason, recommends repairing the wrapper,
+		// quotes the gate's failure, then the fixer's output, escaped.
 		const crash = github.comments[11].at(-1)!.body;
-		expect(crash).toContain("fixer crashed (exit 3)");
+		expect(crash).toContain(
+			"Claude land fixer: `fixer crashed (exit 1): upload exceeds 256 MiB &lt;[at]maintainer>. Recommendation: repair the land fixer's wrapper on the watcher's host, then pick it again.`",
+		);
 		expect(crash).toContain("running tests\nFAIL queue.test.ts");
-		expect(crash).not.toContain("agent crashed");
+		expect(crash).toContain(
+			"The fixer's output ended with:\n\n<pre>starting\nquest land check: upload exceeds 256 MiB &lt;@maintainer></pre>",
+		);
 		expect(history(state, 11)!.rounds).toMatchObject([
 			{ outcome: "handback", before: crashed, failure: "Check / test: just test" },
 		]);

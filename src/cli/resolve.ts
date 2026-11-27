@@ -33,10 +33,10 @@ export const DRIVER =
  * any other string, a custom driver, is left alone. When `DRIVER` changes, add its old value here.
  */
 export const OLD_DRIVERS: readonly string[] = [
-	// moq-dev/quest#219
+	// kixel-ai/quest#219
 	"if quest help resolve >/dev/null 2>&1; then quest resolve %A %O %B; " +
 		"else git merge-file -L ours -L base -L theirs %A %O %B; fi",
-	// moq-dev/quest#256
+	// kixel-ai/quest#256
 	"if quest help resolve >/dev/null 2>&1; " +
 		"then quest resolve %A %O %B --marker-size=%L --ours-label=%X --base-label=%S --theirs-label=%Y; " +
 		'quest_merge_status=$?; if [ "$quest_merge_status" -le 1 ]; then exit "$quest_merge_status"; fi; fi; ' +

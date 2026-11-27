@@ -41,8 +41,9 @@ _test:
     just worker-test
 
 # Check that `quest review` runs nothing a reviewed head plants, with the real
-# Codex and Claude Code CLIs. Uses each CLI's login and spends its usage; run it
-# after upgrading either CLI. Arguments go to vitest, such as `-t codex`.
+# Codex and Claude Code CLIs. Uses each CLI's login and spends its
+# usage; run it after upgrading any of them. Arguments go to vitest, such as
+# `-t codex`.
 review-sandbox *args:
     QUEST_LIVE=1 bun run vitest run test/live/review-sandbox {{args}}
 
@@ -66,13 +67,14 @@ run *args:
 
 # `quest gate` runs recipes under the root `bun run`, whose `run.bun` puts a Bun `node`
 # shim first on PATH for everything it starts. Wrangler needs Node, so the Worker
-# recipes drop that shim; cloudflare/scripts/require-node.mjs fails if one gets through.
-worker_path := 'PATH="$(tr : "\n" <<<"$PATH" | grep -v /bun-node- | paste -sd: -)"'
+# recipes drop that shim, then say so when no Node is left; cloudflare/scripts/require-node.mjs
+# fails if a shim gets through.
+worker_node := 'export PATH="$(tr : "\n" <<<"$PATH" | grep -v /bun-node- | paste -sd: -)"; command -v node >/dev/null || { echo "cloudflare/ needs Node on PATH for Wrangler: enter the dev shell (nix develop) or install Node" >&2; exit 1; }'
 
 # Check the Worker in cloudflare/: types and formatting.
 worker-check:
-    cd cloudflare && {{worker_path}} bun run check
+    cd cloudflare && {{worker_node}} && bun run check
 
 # Test the Worker in cloudflare/.
 worker-test:
-    cd cloudflare && {{worker_path}} bun run test
+    cd cloudflare && {{worker_node}} && bun run test

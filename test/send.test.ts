@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { expect, test } from "vitest";
@@ -7,38 +7,39 @@ import { expect, test } from "vitest";
 import { REFERENCE_LINE, parseUpload } from "../src/core";
 import { hook } from "../src/cli/hooks";
 import {
+	type Pending,
 	type SendDependencies,
 	parseInstant,
 	queue,
 	reportIncident,
 	runSender,
 	sendPass,
-	tokensPath,
 } from "../src/cli/send";
+import { tokensPath } from "../src/cli/tokens";
 import type { Session } from "../src/cli/usage";
 import { tempDir } from "./fixture";
+import { FakeLogin, writeTokens } from "./kixel-fakes";
+import { login } from "../src/cli/login";
 
-const ENDPOINT = "https://kixel.example/records";
+/** The Kixel Quest the tests' users hold a token for, as `QUEST_KIXEL_URL` names it, and where it takes records. */
+const URL_ = "https://kixel.example";
+const ENDPOINT = `${URL_}/records`;
 
-/** A checkout that uses Quest, with a GitHub origin, naming `endpoint` when given. */
-function checkout(endpoint?: unknown): string {
+/** A checkout that uses Quest, with a GitHub origin. */
+function checkout(): string {
 	const dir = tempDir();
 	execFileSync("git", ["init", "-q", dir]);
 	execFileSync("git", ["-C", dir, "remote", "add", "origin", "https://github.com/acme/proj.git"]);
 	writeFileSync(join(dir, "AGENTS.md"), `${REFERENCE_LINE}\n`);
-	if (endpoint !== undefined) writeFileSync(join(dir, ".quest.json"), JSON.stringify({ records: endpoint }));
 	return dir;
 }
 
-/** A user's state and config, with a token for `ENDPOINT` unless told otherwise, and a sender running. */
+/** A user's state and config, with a token for `URL_` unless told otherwise, and a sender running. */
 function home(token: string | null = "secret"): NodeJS.ProcessEnv {
-	const env = { XDG_STATE_HOME: tempDir(), XDG_CONFIG_HOME: tempDir() };
+	const env = { XDG_STATE_HOME: tempDir(), XDG_CONFIG_HOME: tempDir(), QUEST_KIXEL_URL: URL_ };
 	mkdirSync(join(env.XDG_STATE_HOME, "quest", "records"), { recursive: true });
 	writeFileSync(senderPid(env), String(process.pid));
-	if (token !== null) {
-		mkdirSync(join(env.XDG_CONFIG_HOME, "quest"));
-		writeFileSync(tokensPath(env), JSON.stringify({ [ENDPOINT]: token }));
-	}
+	if (token !== null) writeTokens(env, { [URL_]: token });
 	return env;
 }
 
@@ -52,27 +53,29 @@ const senderPid = (env: NodeJS.ProcessEnv) => join(env.XDG_STATE_HOME!, "quest",
 
 const stopped = (cwd: string) => ({ harness: "claude", session: "s1", transcript: transcript(), cwd });
 
-test("a checkout naming no endpoint, or one without the user's token, queues nothing and says so once", () => {
+test("a user without a token queues nothing and is told once", () => {
 	const env = home(null);
-	const bare = checkout();
-	expect(queue(stopped(bare), env)).toEqual({
-		notices: [expect.stringContaining("acme/proj names no Kixel Code endpoint in .quest.json")],
-		queued: false,
-	});
-	expect(queue(stopped(bare), env)).toEqual({ notices: [], queued: false });
-	const named = checkout(ENDPOINT);
-	expect(queue(stopped(named), env).notices).toEqual([expect.stringContaining(`holds no token for ${ENDPOINT}`)]);
-	expect(queue(stopped(named), env).notices).toEqual([]);
+	const root = checkout();
+	expect(queue(stopped(root), env).notices).toEqual([
+		expect.stringContaining(`is not signed in to ${URL_}; run \`quest login\``),
+	]);
+	expect(queue(stopped(root), env)).toEqual({ notices: [], queued: false });
 	// Outside a checkout that uses Quest, nothing is said.
 	expect(queue(stopped(tempDir()), env)).toEqual({ notices: [], queued: false });
 });
 
-test("a checkout's endpoint must be HTTPS, or HTTP to this host", () => {
-	const env = home();
-	expect(() => queue(stopped(checkout("http://kixel.example/records")), env)).toThrow("not an HTTPS URL");
-	expect(() => queue(stopped(checkout(7)), env)).toThrow("not a URL");
-	expect(queue(stopped(checkout("http://127.0.0.1:8080/records")), env).notices).toEqual([
-		expect.stringContaining("holds no token for http://127.0.0.1:8080/records"),
+test("the Kixel Quest URL defaults to kixel.quest, and must be HTTPS, or HTTP to this host", () => {
+	const root = checkout();
+	const env = home(null);
+	delete env.QUEST_KIXEL_URL;
+	expect(queue(stopped(root), env).notices).toEqual([
+		expect.stringContaining("is not signed in to https://kixel.quest;"),
+	]);
+	expect(() => queue(stopped(root), { ...env, QUEST_KIXEL_URL: "http://kixel.example" })).toThrow("not an HTTPS URL");
+	expect(() => queue(stopped(root), { ...env, QUEST_KIXEL_URL: "kixel" })).toThrow("not a URL");
+	// A trailing slash names the same Kixel Quest, so the token pairs with it.
+	expect(queue(stopped(root), { ...env, QUEST_KIXEL_URL: "http://127.0.0.1:8080/" }).notices).toEqual([
+		expect.stringContaining("is not signed in to http://127.0.0.1:8080;"),
 	]);
 });
 
@@ -110,8 +113,10 @@ function sender(
 	sessions: Session[] | null,
 	during: () => void = () => {},
 	pulls: object[] = [],
+	served: string[] = ["acme/proj"],
 ) {
 	const uploads: { token: string; body: unknown }[] = [];
+	const asked: string[] = [];
 	const windows: Date[] = [];
 	const slept: number[] = [];
 	const clock = clockOf(env);
@@ -119,15 +124,18 @@ function sender(
 		new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
 	const github = async (input: string | URL | Request) => {
 		const url = new URL(String(input));
-		if (url.pathname === "/repos/acme/proj")
+		// A transferred repository: GitHub redirects its former name to the current one.
+		const named = /^\/repos\/(?:acme|old)\/(proj|other)$/.exec(url.pathname)?.[1];
+		if (named)
 			return json({
 				owner: { login: "acme" },
-				name: "proj",
+				name: named,
 				default_branch: "main",
-				clone_url: "https://github.com/acme/proj.git",
-				ssh_url: "git@github.com:acme/proj.git",
+				clone_url: `https://github.com/acme/${named}.git`,
+				ssh_url: `git@github.com:acme/${named}.git`,
 				fork: false,
 			});
+		if (url.pathname === "/repos/acme/other/pulls") return json([]);
 		if (url.pathname === "/repos/acme/proj/pulls/3") return json(CULPRIT);
 		if (url.pathname === "/repos/acme/proj/pulls")
 			return json([
@@ -163,6 +171,7 @@ function sender(
 			return sessions;
 		},
 		waits: () => [],
+		calls: () => [],
 		ask: async () => {
 			throw new Error("no model can label here");
 		},
@@ -173,6 +182,12 @@ function sender(
 		},
 		interval: 60_000,
 		fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+			// Kixel Quest says which repositories it serves, at GET /forge, before anything is posted.
+			if (String(input) === `${URL_}/forge`) {
+				expect(init?.method).toBe("GET");
+				asked.push(String((init?.headers as Record<string, string>).Authorization));
+				return json({ login: "me", repositories: served });
+			}
 			expect(String(input)).toBe(ENDPOINT);
 			// A redirect must reach the sender, never be followed into a GET.
 			expect(init?.redirect).toBe("manual");
@@ -187,7 +202,7 @@ function sender(
 				: new Response("", { status: code });
 		}) as typeof fetch,
 	};
-	return { deps, uploads, windows, slept, clock };
+	return { deps, uploads, asked, windows, slept, clock };
 }
 
 /** A merged PR older than any window, which later PRs name as a culprit. */
@@ -209,7 +224,7 @@ const pending = (env: NodeJS.ProcessEnv) => readdirSync(join(env.XDG_STATE_HOME!
 
 test("the sender posts each queued session with its sub-agents, from its transcript's start", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	expect(queue(stopped(root), env)).toEqual({ notices: [], queued: true });
 	const sessions = [
 		session("s1", "quest/m0/a"),
@@ -231,9 +246,219 @@ test("the sender posts each queued session with its sub-agents, from its transcr
 	expect(pending(env)).toEqual([]);
 });
 
+test("the sender posts with the token quest login stored", async () => {
+	const env = home(null);
+	const root = checkout();
+	const server = new FakeLogin(URL_);
+	await login({
+		env,
+		fetch: server.fetch,
+		now: () => 0,
+		sleep: async () => server.approve(),
+		hostname: "workstation",
+		ask: async () => "n",
+		say: () => {},
+	});
+	expect(queue(stopped(root), env)).toEqual({ notices: [], queued: true });
+	const { deps, uploads } = sender(env, 200, [session("s1", "quest/m0/a")]);
+	await sendPass(deps);
+	expect(uploads.map((upload) => upload.token)).toEqual(["Bearer issued-1"]);
+});
+
+test("a session `quest review` queued is sent on the PR it recorded on, as the role it played", async () => {
+	const env = home();
+	const root = checkout();
+	const start = Date.parse("2026-11-06T10:00:00Z");
+	const reviewed = (session: string, pull: string | null, branch: string, role: "classifying" | "reviewing") =>
+		queue({ harness: "claude", session, cwd: root, start, pull, branch, role }, env);
+	// A round that recorded on no PR, as one whose PR had not opened, pins its branch alone.
+	reviewed("rev", null, "quest/m0/a", "reviewing");
+	queue({ ...stopped(root), session: "impl" }, env);
+	// A fork's PR heads a repository other than the checkout's origin.
+	// Resumed after its PR opened, so only its later queue names the PR, whichever pending file is read last.
+	reviewed("cls", null, "fix/y", "classifying");
+	reviewed("cls", "https://github.com/acme/proj/pull/8", "fix/y", "classifying");
+	reviewed("cls", null, "fix/y", "classifying");
+	// Reviewed before its PR opens.
+	reviewed("early", null, "feature/z", "reviewing");
+	// Its round skipped the only PR on its branch, a stranger fork's whose head the checkout lacks.
+	reviewed("skipped", null, "patch-1", "reviewing");
+	// Its round recorded on another repository's PR of the same number as this one's.
+	reviewed("elsewhere", "https://github.com/other/proj/pull/7", "quest/m0/a", "reviewing");
+	// The runner's review checkout names its own branch, and a detached one names none. A sub-agent anywhere in the
+	// same checkout follows its parent onto the fork's PR.
+	const sessions = [
+		session("rev", "kix-review/1"),
+		session("cls", "x", { branches: [], cwd: root }),
+		session("sub", "x", { branches: [], parent: "cls", cwd: root }),
+		session("deep", "x", { branches: [], parent: "cls", cwd: `${root}/src` }),
+		session("deeper", "x", { branches: [], parent: "sub", cwd: `${root}/src` }),
+		// One whose checkout's own branch heads another PR, as under `quest review --branch`, still follows the review.
+		session("aside", "quest/m0/a", { parent: "cls", cwd: root }),
+		// One in another checkout on a branch no PR heads yet keeps its parent, and the PR its parent recorded on, waiting.
+		session("later", "wip/q", { parent: "cls", repositories: ["acme/proj"], cwd: "/other" }),
+		session("early", "kix-review/2"),
+		session("skipped", "kix-review/3"),
+		session("elsewhere", "kix-review/4"),
+		// An implementer's sub-agent in another checkout keeps out of the fork's PR.
+		session("impl", "fix/y", { repositories: ["ann/proj"], cwd: "/fork" }),
+		session("away", "x", { branches: [], parent: "impl", cwd: "/up" }),
+	];
+	// An editable PR body naming a reviewer as its classifier does not relabel it.
+	const fork = {
+		...opened(8, "fix/y", "2026-11-06T11:30:00Z"),
+		head: { ref: "fix/y", repo: { full_name: "ann/proj" } },
+		body: "## Review\n\n- Classified: medium by Claude Code, session `rev`\n",
+	};
+	const stranger = {
+		...opened(9, "patch-1", "2026-11-06T11:30:00Z"),
+		head: { ref: "patch-1", repo: { full_name: "eve/proj" } },
+	};
+	const { deps, uploads } = sender(env, 200, sessions, () => {}, [fork, stranger]);
+	await sendPass(deps);
+	// No PR body names the classifier, as for one whose reply was unusable.
+	expect(parseUpload(uploads[0]!.body).records.map((r) => [r.session, r.pulls, r.role, r.branch])).toEqual([
+		["rev", [7], "reviewing", "quest/m0/a"],
+		["cls", [8], "classifying", "fix/y"],
+		["sub", [8], "classifying", "fix/y"],
+		["deep", [8], "classifying", "fix/y"],
+		["deeper", [8], "classifying", "fix/y"],
+		["aside", [8], "classifying", "fix/y"],
+		["later", [], "classifying", "wip/q"],
+		["early", [], "reviewing", "feature/z"],
+		["skipped", [], "reviewing", "patch-1"],
+		["elsewhere", [], "reviewing", "quest/m0/a"],
+		["impl", [8], "implementing", "fix/y"],
+		["away", [], "implementing", null],
+	]);
+	// Each waits for a PR on the branch it reviewed, not its checkout's.
+	expect(remembered(env)).toEqual(["cls", "early", "skipped"]);
+	// The classifier is remembered with the copy naming its PR, so a resend still credits it.
+	const dir = join(env.XDG_STATE_HOME!, "quest", "records", "remembered");
+	const pins = readdirSync(dir).flatMap((group) =>
+		readdirSync(join(dir, group)).map(
+			(name) => (JSON.parse(readFileSync(join(dir, group, name), "utf8")) as { pending: Pending }).pending,
+		),
+	);
+	expect(pins.find((p) => p.session === "cls")?.reviewed?.pull).toBe("https://github.com/acme/proj/pull/8");
+});
+
+test("a session that recorded a transferred repository's former name is sent on the PR its branch heads now", async () => {
+	const env = home();
+	const root = checkout();
+	queue(stopped(root), env);
+	const { deps, uploads } = sender(env, 200, [session("s1", "quest/m0/a", { repositories: ["old/proj"] })]);
+	await sendPass(deps);
+	const { records } = parseUpload(uploads[0]!.body);
+	expect(records.map((r) => [r.session, r.pulls])).toEqual([["s1", [7]]]);
+});
+
+test("a repository Kixel Quest does not serve is dropped, unsent and without token-max, and is said once", async () => {
+	const env = home();
+	const root = checkout();
+	queue(stopped(root), env);
+	const refusing = sender(env, 200, [session("s1", "quest/m0/a")], undefined, [], ["acme/other"]);
+	expect(await sendPass(refusing.deps)).toEqual([]);
+	expect(refusing.asked).toEqual(["Bearer secret"]);
+	expect(refusing.uploads).toEqual([]);
+	expect(refusing.windows).toEqual([]);
+	expect(pending(env)).toEqual([]);
+	expect(queue(stopped(root), env).notices).toEqual([
+		expect.stringContaining(`${URL_} does not serve acme/proj, so its sessions' records are dropped`),
+	]);
+	// Said once, and a later stop is dropped without a notice.
+	queue(stopped(root), env);
+	await sendPass(refusing.deps);
+	expect(pending(env)).toEqual([]);
+	expect(queue(stopped(root), env).notices).toEqual([]);
+});
+
+test("a repository Kixel Quest serves is matched by the base its PRs open on, not a fork's origin", async () => {
+	const env = home();
+	const root = checkout();
+	execFileSync("git", ["-C", root, "remote", "set-url", "origin", "https://github.com/me/proj.git"]);
+	queue(stopped(root), env);
+	const pass = sender(env, 200, [session("s1", "quest/m0/a", { repositories: ["me/proj"] })]);
+	const github = pass.deps.github;
+	pass.deps.github = () => ({
+		...github(),
+		fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(String(input));
+			if (url.pathname === "/repos/me/proj")
+				return new Response(
+					JSON.stringify({
+						owner: { login: "me" },
+						name: "proj",
+						default_branch: "main",
+						clone_url: "https://github.com/me/proj.git",
+						ssh_url: "git@github.com:me/proj.git",
+						fork: true,
+						parent: { owner: { login: "acme" }, name: "proj" },
+					}),
+				);
+			if (url.pathname === "/repos/acme/proj/contents/quest/README.md") return new Response("{}");
+			return (github().fetch as typeof fetch)(input, init);
+		}) as typeof fetch,
+	});
+	const [sent] = await sendPass(pass.deps);
+	expect(sent).toMatchObject({ repository: "acme/proj", records: 1 });
+});
+
+test("a token Kixel Quest refuses at GET /forge drops the queue and stops sending until it changes", async () => {
+	const env = home();
+	const root = checkout();
+	queue(stopped(root), env);
+	const refusing = sender(env, 200, [session("s1", "quest/m0/a")]);
+	const fetch = refusing.deps.fetch;
+	refusing.deps.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
+		String(input) === `${URL_}/forge`
+			? new Response("", { status: 401 })
+			: fetch(input, init)) as typeof globalThis.fetch;
+	expect(await sendPass(refusing.deps)).toEqual([
+		{ endpoint: ENDPOINT, repository: "acme/proj", records: 0, breakages: 0, refused: true },
+	]);
+	expect(pending(env)).toEqual([]);
+	expect(queue(stopped(root), env)).toEqual({
+		notices: [expect.stringContaining("refused this host's token (401)")],
+		queued: false,
+	});
+});
+
+test("a refusal at upload stops the pass's other repositories and drops what is queued", async () => {
+	const env = home();
+	queue(stopped(checkout()), env);
+	const other = checkout();
+	execFileSync("git", ["-C", other, "remote", "set-url", "origin", "https://github.com/acme/other.git"]);
+	queue({ ...stopped(other), session: "s2" }, env);
+	const refusing = sender(
+		env,
+		403,
+		[session("s1", "quest/m0/a"), session("s2", "main", { repositories: ["acme/other"] })],
+		undefined,
+		[],
+		["acme/proj", "acme/other"],
+	);
+	expect(await sendPass(refusing.deps)).toHaveLength(1);
+	expect(refusing.uploads).toHaveLength(1);
+	expect(pending(env)).toEqual([]);
+});
+
+test("a Kixel Quest that cannot say what it serves fails the pass, keeping the queue", async () => {
+	const env = home();
+	queue(stopped(checkout()), env);
+	const down = sender(env, 200, [session("s1", "quest/m0/a")]);
+	const fetch = down.deps.fetch;
+	down.deps.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
+		String(input) === `${URL_}/forge`
+			? new Response("", { status: 503 })
+			: fetch(input, init)) as typeof globalThis.fetch;
+	await expect(sendPass(down.deps)).rejects.toThrow("failed GET /forge: HTTP 503; its records stay queued");
+	expect(pending(env)).toHaveLength(1);
+});
+
 test("the sender labels each session's steps and sends its split; one no model could label is sent unsplit", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	queue(stopped(root), env);
 	const file = join(tempDir(), "s1.jsonl");
 	writeFileSync(
@@ -280,7 +505,7 @@ test("the sender labels each session's steps and sends its split; one no model c
 
 test("a failed upload stays queued and is said once; a refused token stops sending", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	queue(stopped(root), env);
 	const failing = sender(env, 500, [session("s1", "quest/m0/a")]);
 	await expect(sendPass(failing.deps)).rejects.toThrow("answered 500");
@@ -300,13 +525,27 @@ test("a failed upload stays queued and is said once; a refused token stops sendi
 		queued: false,
 	});
 	// A new token is tried again.
-	writeFileSync(tokensPath(env), JSON.stringify({ [ENDPOINT]: "fresh" }));
+	writeTokens(env, { [URL_]: "fresh" });
 	expect(queue(stopped(root), env).queued).toBe(true);
+});
+
+test("a token a new sign-in replaced during the pass keeps the queue for the new one", async () => {
+	const env = home();
+	queue(stopped(checkout()), env);
+	const sessions = [session("s1", "quest/m0/a")];
+	// Signing in again revokes the token the pass read before its upload answers.
+	const revoked = sender(env, 401, sessions, () => writeTokens(env, { [URL_]: "fresh" }));
+	expect(await sendPass(revoked.deps)).toEqual([]);
+	expect(pending(env)).toHaveLength(1);
+	const { deps, uploads } = sender(env, 200, sessions);
+	await sendPass(deps);
+	expect(uploads.map((upload) => upload.token)).toEqual(["Bearer fresh"]);
+	expect(pending(env)).toEqual([]);
 });
 
 test("a redirected upload keeps the queue and its cursor, since the endpoint received nothing", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	queue(stopped(root), env);
 	for (const code of [301, 302, 307]) {
 		const moved = sender(env, code, [session("s1", "quest/m0/a")]);
@@ -325,14 +564,14 @@ test("a redirected upload keeps the queue and its cursor, since the endpoint rec
 
 test("the sender fails loud without token-max, keeping the queue", async () => {
 	const env = home();
-	queue(stopped(checkout(ENDPOINT)), env);
+	queue(stopped(checkout()), env);
 	await expect(sendPass(sender(env, 200, null).deps)).rejects.toThrow("token-max is not installed");
 	expect(pending(env)).toHaveLength(1);
 });
 
 test("a failing group backs off, doubling, without widening the others' window", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	queue(stopped(root), env);
 	const failing = sender(env, 500, [session("s1", "quest/m0/a")]);
 	await expect(sendPass(failing.deps)).rejects.toThrow("tried again in 1 minutes");
@@ -345,25 +584,31 @@ test("a failing group backs off, doubling, without widening the others' window",
 	failing.clock.now += 60_000;
 	expect(await sendPass(failing.deps)).toEqual([]);
 	// Another repository's stop, queued later, is sent from its own start meanwhile.
-	const other = checkout(ENDPOINT);
+	const other = checkout();
 	execFileSync("git", ["-C", other, "remote", "set-url", "origin", "https://github.com/acme/other.git"]);
 	writeFileSync(join(other, "later.jsonl"), `{"type":"user","timestamp":"2026-11-06T11:00:00Z"}\n`);
 	queue({ ...stopped(other), session: "s2", transcript: join(other, "later.jsonl") }, env);
-	const others = sender(env, 200, [session("s2", "main", { repositories: ["acme/other"] })]);
-	// The stand-in GitHub knows no acme/other, so that group fails too, after token-max read only its window.
-	await expect(sendPass(others.deps)).rejects.toThrow("acme/other");
+	const others = sender(
+		env,
+		200,
+		[session("s2", "main", { repositories: ["acme/other"] })],
+		undefined,
+		[],
+		["acme/proj", "acme/other"],
+	);
+	expect(await sendPass(others.deps)).toHaveLength(1);
 	expect(others.windows).toEqual([new Date("2026-11-06T11:00:00Z")]);
-	// Once its wait ends, the first group is tried again and sent, and only the other's stop stays queued.
+	// Once its wait ends, the first group is tried again and sent.
 	failing.clock.now += 60_000;
 	const fixed = sender(env, 200, [session("s1", "quest/m0/a")]);
-	await expect(sendPass(fixed.deps)).rejects.toThrow("acme/other");
+	expect(await sendPass(fixed.deps)).toHaveLength(1);
 	expect(fixed.uploads).toHaveLength(1);
-	expect(pending(env)).toHaveLength(1);
+	expect(pending(env)).toEqual([]);
 });
 
 test("an unreadable backoff file reads as none, so it blocks no group", async () => {
 	const env = home();
-	queue(stopped(checkout(ENDPOINT)), env);
+	queue(stopped(checkout()), env);
 	const failing = sender(env, 500, [session("s1", "quest/m0/a")]);
 	await expect(sendPass(failing.deps)).rejects.toThrow("tried again in 1 minutes");
 	const dir = join(env.XDG_STATE_HOME!, "quest", "records", "backoff");
@@ -378,7 +623,7 @@ test("an unreadable backoff file reads as none, so it blocks no group", async ()
 
 test("an upload this version's own parseUpload refuses fails on the host, never posted", async () => {
 	const env = home();
-	queue(stopped(checkout(ENDPOINT)), env);
+	queue(stopped(checkout()), env);
 	const { deps, uploads } = sender(env, 200, [session("s1", "quest/m0/a", { cost: -1 })]);
 	await expect(sendPass(deps)).rejects.toThrow("its own parseUpload refuses");
 	expect(uploads).toEqual([]);
@@ -387,7 +632,7 @@ test("an upload this version's own parseUpload refuses fails on the host, never 
 
 test("a session token-max no longer lists is dropped and said, without holding back the rest", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	queue(stopped(root), env);
 	queue({ ...stopped(root), session: "gone" }, env);
 	const { deps, uploads } = sender(env, 200, [session("s1", "quest/m0/a")]);
@@ -403,19 +648,17 @@ test("a session token-max no longer lists is dropped and said, without holding b
 
 test("a sub-agent is sent only where its own checkout routes it", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	queue(stopped(root), env);
-	const other = checkout(ENDPOINT);
+	const other = checkout();
 	execFileSync("git", ["-C", other, "remote", "set-url", "origin", "https://github.com/acme/fork.git"]);
 	const sessions = [
 		session("s1", "quest/m0/a"),
-		// Live checkouts: this one, another of the same origin and endpoint, one opted out, and another origin's.
+		// Live checkouts: this one, another of the same origin, and another origin's.
 		session("here", "quest/m0/a", { parent: "s1", cwd: root }),
-		session("twin", "quest/m0/a", { parent: "s1", cwd: checkout(ENDPOINT) }),
-		session("optedOut", "quest/m0/a", { parent: "s1", cwd: checkout() }),
+		session("twin", "quest/m0/a", { parent: "s1", cwd: checkout() }),
 		// A deleted folder routes by the checkout still holding its nearest existing parent.
 		session("hereGone", "quest/m0/a", { parent: "s1", cwd: join(root, "deleted", "sub") }),
-		session("optedOutGone", "quest/m0/a", { parent: "s1", cwd: join(checkout(), "deleted", "sub") }),
 		// A deleted nested clone of another repository, inside this checkout.
 		session("nestedGone", "main", {
 			parent: "s1",
@@ -441,7 +684,7 @@ test("a sub-agent is sent only where its own checkout routes it", async () => {
 
 test("an origin that a URL rewrite points at GitHub is read as configured", () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	execFileSync("git", ["-C", root, "remote", "set-url", "origin", "gh:acme/proj"]);
 	execFileSync("git", ["-C", root, "config", "url.https://github.com/.insteadOf", "gh:"]);
 	expect(queue(stopped(root), env).queued).toBe(true);
@@ -453,7 +696,7 @@ test("an origin that a URL rewrite points at GitHub is read as configured", () =
 
 test("Claude Code's and Codex's Stop queue the session", () => {
 	const env = home();
-	const cwd = checkout(ENDPOINT);
+	const cwd = checkout();
 	const deps = { env };
 	const base = { hook_event_name: "Stop", cwd, session_id: "c1", transcript_path: transcript() };
 	expect(hook({ ...base, background_tasks: [] }, deps)).toBe("");
@@ -463,7 +706,7 @@ test("Claude Code's and Codex's Stop queue the session", () => {
 	expect(hook({ ...base, hook_event_name: "SubagentStop", background_tasks: [] }, deps)).toBe("");
 	expect(pending(env)).toHaveLength(2);
 	// What it cannot queue, it says instead of failing the hook.
-	writeFileSync(join(cwd, ".quest.json"), "{");
+	writeFileSync(tokensPath(env), "{");
 	expect(JSON.parse(hook({ ...base, background_tasks: [] }, deps)).systemMessage).toContain(
 		"cannot queue this session's record",
 	);
@@ -475,7 +718,7 @@ test("Claude Code's and Codex's Stop queue the session", () => {
 test("the sender passes every interval, records its PID, and outlives a failed pass", async () => {
 	const env = home();
 	writeFileSync(senderPid(env), "");
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	queue(stopped(root), env);
 	let status = 500;
 	const { deps, uploads, slept, clock } = sender(env, () => status, [session("s1", "quest/m0/a")]);
@@ -500,7 +743,7 @@ test("the sender passes every interval, records its PID, and outlives a failed p
 
 test("a stop with no sender running queues the session and says so once per outage", () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	writeFileSync(senderPid(env), "999999999");
 	const down = queue(stopped(root), env);
 	expect(down).toEqual({
@@ -519,7 +762,7 @@ test("a stop with no sender running queues the session and says so once per outa
 
 test("a stop queued while its earlier record uploads stays queued", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	queue(stopped(root), env);
 	const first = sender(env, 200, [session("s1", "quest/m0/a")], () => {
 		if (first.uploads.length === 1) queue(stopped(root), env);
@@ -534,7 +777,7 @@ test("a stop queued while its earlier record uploads stays queued", async () => 
 
 test("a queued session for an endpoint that refused its token is dropped unsent", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	queue(stopped(root), env);
 	const refusing = sender(env, 403, [session("s1", "quest/m0/a")]);
 	// Queued before the refusal, so queue() could not drop it.
@@ -551,7 +794,7 @@ test("a queued session for an endpoint that refused its token is dropped unsent"
 
 test("the sender sends the breakages a merged fix in its window names, reading an older culprit", async () => {
 	const env = home();
-	queue(stopped(checkout(ENDPOINT)), env);
+	queue(stopped(checkout()), env);
 	const fix = {
 		...CULPRIT,
 		number: 8,
@@ -587,7 +830,7 @@ test("the sender sends the breakages a merged fix in its window names, reading a
 
 test("an incident is posted at once, open until reported again with its culprit, and fails loud", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	const { deps, uploads } = sender(env, 200, []);
 	const report = (pull: number | null) =>
 		reportIncident(
@@ -623,15 +866,12 @@ test("an incident is posted at once, open until reported again with its culprit,
 	).rejects.toThrow("answered 403");
 	await expect(
 		reportIncident({ cwd: root, id: "x", found: "person", pull: null, at: 0 }, sender(home(null), 200, []).deps),
-	).rejects.toThrow("holds no token");
-	await expect(
-		reportIncident({ cwd: checkout(), id: "x", found: "person", pull: null, at: 0 }, deps),
-	).rejects.toThrow("names no record endpoint");
+	).rejects.toThrow("run `quest login`");
 });
 
 test("a fix that merges after its sessions were sent reaches the store with the next session", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	queue(stopped(root), env);
 	const fix = (merged: boolean) => ({
 		...CULPRIT,
@@ -664,7 +904,7 @@ test("a fix that merges after its sessions were sent reaches the store with the 
 
 test("an incident reported from a subdirectory as `.`, as with no --root, finds its checkout", async () => {
 	const env = home();
-	const root = checkout(ENDPOINT);
+	const root = checkout();
 	mkdirSync(join(root, "sub"));
 	const { deps } = sender(env, 200, []);
 	const before = process.cwd();
@@ -679,7 +919,7 @@ test("an incident reported from a subdirectory as `.`, as with no --root, finds 
 
 test("a merged fix naming an open incident sends one record under the incident, once however many name it", async () => {
 	const env = home();
-	queue(stopped(checkout(ENDPOINT)), env);
+	queue(stopped(checkout()), env);
 	const fix = (number: number, updated: string) => ({
 		...CULPRIT,
 		number,
@@ -711,4 +951,375 @@ test("an incident's --at must be a date and time with a Z or offset, on a real c
 		"Nov 6 2026 10:00 UTC",
 	])
 		expect(parseInstant(text), text).toBeNull();
+});
+
+/** A PR of acme/proj from `branch`, opened and last updated at `at`. */
+const opened = (number: number, branch: string, at: string) => ({
+	number,
+	html_url: `https://github.com/acme/proj/pull/${number}`,
+	title: "B",
+	head: { ref: branch, repo: { full_name: "acme/proj" } },
+	state: "open",
+	draft: true,
+	merged_at: null,
+	created_at: at,
+	updated_at: at,
+	closed_at: null,
+	body: "",
+});
+
+const remembered = (env: NodeJS.ProcessEnv) => {
+	const dir = join(env.XDG_STATE_HOME!, "quest", "records", "remembered");
+	if (!existsSync(dir)) return [];
+	return readdirSync(dir)
+		.flatMap((group) => readdirSync(join(dir, group)).map((name) => join(dir, group, name)))
+		.map((path) => (JSON.parse(readFileSync(path, "utf8")) as { pending: { session: string } }).pending.session)
+		.sort();
+};
+
+/** A later session on main in `root`, queued, which only brings its group's next pass. */
+function later(env: NodeJS.ProcessEnv, root: string, id: string): Session {
+	writeFileSync(join(root, `${id}.jsonl`), `{"type":"user","timestamp":"2026-11-06T13:00:00Z"}\n`);
+	queue({ ...stopped(root), session: id, transcript: join(root, `${id}.jsonl`) }, env);
+	const at = Date.parse("2026-11-06T13:00:00Z");
+	return session(id, "main", {
+		start: at,
+		end: at + 60_000,
+		branches: [{ name: "main", first: at, last: at + 60_000 }],
+		files: [join(root, `${id}.jsonl`)],
+	});
+}
+
+test("a session sent before its branch's PR opened is resent with the PR on its group's next pass", async () => {
+	const env = home();
+	const root = checkout();
+	queue(stopped(root), env);
+	const first = session("s1", "fix/x", { files: [transcript()] });
+	const before = sender(env, 200, [first]);
+	await sendPass(before.deps);
+	expect(parseUpload(before.uploads[0]!.body).records.map((r) => [r.session, r.pulls])).toEqual([["s1", []]]);
+	expect(remembered(env)).toEqual(["s1"]);
+	// The PR opens; nothing reads it until the repository's next session is sent, which queues s1 again.
+	const s2 = later(env, root, "s2");
+	const pr = opened(9, "fix/x", "2026-11-06T13:30:00Z");
+	const next = sender(env, 200, [first, s2], () => {}, [pr]);
+	next.clock.now = Date.parse("2026-11-06T14:00:00Z");
+	await sendPass(next.deps);
+	expect(parseUpload(next.uploads[0]!.body).records.map((r) => r.session)).toEqual(["s2"]);
+	expect(pending(env)).toHaveLength(1);
+	// Its resend widens token-max's window back to its start, once, and names the PR; nothing waits after it.
+	const resend = sender(env, 200, [first, s2], () => {}, [pr]);
+	await sendPass(resend.deps);
+	expect(resend.windows).toEqual([new Date("2026-11-06T10:00:00Z")]);
+	expect(parseUpload(resend.uploads[0]!.body).records.map((r) => [r.session, r.pulls, r.role])).toEqual([
+		["s1", [9], "implementing"],
+	]);
+	expect(pending(env)).toEqual([]);
+	// s2 stays remembered, as main heads no PR either.
+	expect(remembered(env)).toEqual(["s2"]);
+});
+
+test("a session remembered under a repository's former name is resent once a PR opens on its branch there", async () => {
+	const env = home();
+	const root = checkout();
+	queue(stopped(root), env);
+	const first = session("s1", "fix/x", { files: [transcript()] });
+	await sendPass(sender(env, 200, [first]).deps);
+	// The record was remembered before the repository moved, so it names the repository's former name.
+	const dir = join(env.XDG_STATE_HOME!, "quest", "records", "remembered");
+	for (const group of readdirSync(dir))
+		for (const name of readdirSync(join(dir, group))) {
+			const path = join(dir, group, name);
+			writeFileSync(path, readFileSync(path, "utf8").replaceAll("acme/proj", "old/proj"));
+		}
+	const s2 = later(env, root, "s2");
+	const next = sender(env, 200, [first, s2], () => {}, [opened(9, "fix/x", "2026-11-06T13:30:00Z")]);
+	next.clock.now = Date.parse("2026-11-06T14:00:00Z");
+	await sendPass(next.deps);
+	expect(pending(env)).toHaveLength(1);
+});
+
+test("a remembered repository GitHub fails to answer for holds the group's upload back, not repeats it", async () => {
+	const env = home();
+	const root = checkout();
+	queue(stopped(root), env);
+	const first = session("s1", "fix/x", { files: [transcript()] });
+	await sendPass(sender(env, 200, [first]).deps);
+	const dir = join(env.XDG_STATE_HOME!, "quest", "records", "remembered");
+	for (const group of readdirSync(dir))
+		for (const name of readdirSync(join(dir, group))) {
+			const path = join(dir, group, name);
+			writeFileSync(path, readFileSync(path, "utf8").replaceAll("acme/proj", "broken/proj"));
+		}
+	const s2 = later(env, root, "s2");
+	const next = sender(env, 200, [first, s2]);
+	const github = next.deps.github;
+	next.deps.github = () => ({
+		...github(),
+		fetch: (async (input: string | URL | Request, init?: RequestInit) =>
+			new URL(String(input)).pathname === "/repos/broken/proj"
+				? new Response("down", { status: 500 })
+				: (github().fetch as typeof fetch)(input, init)) as typeof fetch,
+	});
+	await expect(sendPass(next.deps)).rejects.toThrow("broken/proj");
+	expect(next.uploads).toEqual([]);
+});
+
+test("a pass that fails before its resends are queued reads their PRs again, even ones older than its sessions", async () => {
+	const env = home();
+	const root = checkout();
+	queue(stopped(root), env);
+	const first = session("s1", "fix/x", { files: [transcript()] });
+	await sendPass(sender(env, 200, [first]).deps);
+	expect(remembered(env)).toEqual(["s1"]);
+	// The PR opens at 12:30, before s2 starts, so only the cursor's read still reaches it.
+	const s2 = later(env, root, "s2");
+	const pr = opened(9, "fix/x", "2026-11-06T12:30:00Z");
+	const queueDir = join(env.XDG_STATE_HOME!, "quest", "records", "pending");
+	// The upload succeeds, then queueing s1's resend fails: the queue's directory is a file for the rest of the pass.
+	const failing = sender(
+		env,
+		200,
+		[first, s2],
+		() => {
+			renameSync(queueDir, `${queueDir}.away`);
+			writeFileSync(queueDir, "");
+		},
+		[pr],
+	);
+	failing.clock.now = Date.parse("2026-11-06T14:00:00Z");
+	await expect(sendPass(failing.deps)).rejects.toThrow("EEXIST");
+	rmSync(queueDir);
+	renameSync(`${queueDir}.away`, queueDir);
+	expect(pending(env)).toHaveLength(1);
+	const retry = sender(env, 200, [first, s2], () => {}, [pr]);
+	retry.clock.now += 120_000;
+	await sendPass(retry.deps);
+	expect(pending(env)).toHaveLength(1);
+	const resend = sender(env, 200, [first, s2], () => {}, [pr]);
+	await sendPass(resend.deps);
+	expect(parseUpload(resend.uploads[0]!.body).records.map((r) => [r.session, r.pulls])).toEqual([["s1", [9]]]);
+});
+
+test("a resend names every PR its earlier upload did, even one its own window misses", async () => {
+	const env = home();
+	const root = checkout();
+	const at = (time: string) => Date.parse(`2026-11-06T${time}:00Z`);
+	// s0 starts at 10:00, so the first upload reads PR 7, last updated at 11:00; s1 starts after that update.
+	queue({ ...stopped(root), session: "s0" }, env);
+	writeFileSync(join(root, "s1.jsonl"), `{"type":"user","timestamp":"2026-11-06T11:30:00Z"}\n`);
+	queue({ ...stopped(root), transcript: join(root, "s1.jsonl") }, env);
+	const s0 = session("s0", "main", { files: [transcript()] });
+	const late = { start: at("11:30"), end: at("11:50") };
+	const s1 = session("s1", "quest/m0/a", {
+		...late,
+		files: [join(root, "s1.jsonl")],
+		branches: [{ name: "quest/m0/a", first: at("11:30"), last: at("11:40") }],
+	});
+	const sub = session("sub", "fix/sub", {
+		...late,
+		parent: "s1",
+		branches: [{ name: "fix/sub", first: at("11:30"), last: at("11:40") }],
+	});
+	const first = sender(env, 200, [s0, s1, sub]);
+	await sendPass(first.deps);
+	expect(parseUpload(first.uploads[0]!.body).records.map((r) => [r.session, r.pulls])).toEqual([
+		["s0", []],
+		["s1", [7]],
+		["sub", [7]],
+	]);
+	// The sub-agent's PR opens, so the tree is resent, alone in its group's pass.
+	const s2 = later(env, root, "s2");
+	const pr = opened(11, "fix/sub", "2026-11-06T13:30:00Z");
+	const next = sender(env, 200, [s0, s1, sub, s2], () => {}, [pr]);
+	next.clock.now = at("14:00");
+	await sendPass(next.deps);
+	const resend = sender(env, 200, [s0, s1, sub, s2], () => {}, [pr]);
+	await sendPass(resend.deps);
+	expect(resend.windows).toEqual([new Date(late.start)]);
+	expect(parseUpload(resend.uploads[0]!.body).records.map((r) => [r.session, r.pulls])).toEqual([
+		["s1", [7]],
+		["sub", [11]],
+	]);
+});
+
+test("a moved session and a sub-agent's fresh branch wait for their own PRs; a PR on an older branch triggers nothing", async () => {
+	const env = home();
+	const root = checkout();
+	queue(stopped(root), env);
+	const at = (time: string) => Date.parse(`2026-11-06T${time}:00Z`);
+	// s1 moved from quest/m0/a, whose PR 7 is open, to fix/y; its sub-agent works on fix/sub.
+	const s1 = session("s1", "quest/m0/a", {
+		files: [transcript()],
+		branches: [
+			{ name: "quest/m0/a", first: at("10:00"), last: at("10:10") },
+			{ name: "fix/y", first: at("10:20"), last: at("10:30") },
+		],
+	});
+	const sub = session("sub", "fix/sub", { parent: "s1" });
+	const first = sender(env, 200, [s1, sub]);
+	await sendPass(first.deps);
+	expect(parseUpload(first.uploads[0]!.body).records.map((r) => [r.session, r.pulls])).toEqual([
+		["s1", [7]],
+		["sub", [7]],
+	]);
+	const pass = async (id: string, now: string, pulls: object[]) => {
+		const s = later(env, root, id);
+		const each = sender(env, 200, [s1, sub, s], () => {}, pulls);
+		each.clock.now = Date.parse(`2026-11-06T${now}:00Z`);
+		await sendPass(each.deps);
+		const resend = sender(env, 200, [s1, sub, s], () => {}, pulls);
+		await sendPass(resend.deps);
+		return resend.uploads.map((u) => parseUpload(u.body).records.map((r) => [r.session, r.pulls]));
+	};
+	// Newest update first, as GitHub lists them.
+	const pulls = [
+		opened(12, "fix/y", "2026-11-06T15:30:00Z"),
+		opened(11, "fix/sub", "2026-11-06T14:30:00Z"),
+		opened(10, "quest/m0/a", "2026-11-06T13:30:00Z"),
+	];
+	// Another PR on quest/m0/a changes nothing attribution would send.
+	expect(await pass("s2", "14:00", pulls.slice(2))).toEqual([]);
+	// A PR on the sub-agent's branch resends the tree; s1 still waits for fix/y.
+	expect(await pass("s3", "15:00", pulls.slice(1))).toEqual([
+		[
+			["s1", [7]],
+			["sub", [11]],
+		],
+	]);
+	expect(remembered(env)).toEqual(["s1", "s2", "s3"]);
+	expect(await pass("s4", "16:00", pulls)).toEqual([
+		[
+			["s1", [12]],
+			["sub", [11]],
+		],
+	]);
+	expect(remembered(env)).toEqual(["s2", "s3", "s4"]);
+});
+
+test("a remembered session is forgotten once its transcript is gone, unreadable, or unlisted, without a notice", async () => {
+	const env = home();
+	const root = checkout();
+	const files = [transcript(), transcript(), transcript()];
+	for (const id of ["gone", "garbled", "unlisted"]) queue({ ...stopped(root), session: id }, env);
+	const sessions = ["gone", "garbled", "unlisted"].map((id, i) => session(id, `fix/${id}`, { files: [files[i]!] }));
+	await sendPass(sender(env, 200, sessions).deps);
+	expect(remembered(env)).toEqual(["garbled", "gone", "unlisted"]);
+	rmSync(files[0]!);
+	const dir = join(env.XDG_STATE_HOME!, "quest", "records", "remembered");
+	const [group] = readdirSync(dir);
+	for (const name of readdirSync(join(dir, group!))) {
+		const path = join(dir, group!, name);
+		// Its JSON parses, but a waiting entry is null, which would throw on every pass if read as a branch.
+		const kept = readFileSync(path, "utf8");
+		if (kept.includes('"garbled"')) writeFileSync(path, JSON.stringify({ ...JSON.parse(kept), waiting: [null] }));
+	}
+	// Every branch's PR opens; only the session whose transcript is still there is queued again.
+	const pulls = ["gone", "garbled", "unlisted"].map((id, i) => opened(20 + i, `fix/${id}`, "2026-11-06T13:30:00Z"));
+	const s2 = later(env, root, "s2");
+	const next = sender(env, 200, [...sessions, s2], () => {}, pulls);
+	next.clock.now = Date.parse("2026-11-06T14:00:00Z");
+	await sendPass(next.deps);
+	expect(pending(env)).toHaveLength(1);
+	expect(remembered(env)).toEqual(["s2", "unlisted"]);
+	// token-max no longer lists it, as once its transcript is pruned: it is dropped without a notice.
+	const resend = sender(env, 200, [s2], () => {}, pulls);
+	await sendPass(resend.deps);
+	expect(resend.uploads).toEqual([]);
+	expect(pending(env)).toEqual([]);
+	expect(remembered(env)).toEqual(["s2"]);
+	expect(queue(stopped(root), env).notices).toEqual([]);
+});
+
+/** Two more Kixel Quests, which a user's tokens file pairs with tokens of their own. */
+const OTHER = "https://other.example";
+const GONE = "https://gone.example";
+
+/** Route a sender's requests for `OTHER` and `GONE` to the one fake store, recording each request's host and token. */
+function viaHosts(deps: SendDependencies, refuse: string[] = []) {
+	const hosts: { host: string; path: string; token: string }[] = [];
+	const fetch = deps.fetch;
+	deps.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+		const url = new URL(String(input));
+		const headers = init?.headers as Record<string, string>;
+		hosts.push({ host: url.origin, path: url.pathname, token: headers.authorization ?? headers.Authorization! });
+		if (refuse.includes(url.origin) && url.pathname === "/forge") return new Response("", { status: 401 });
+		return fetch(`${URL_}${url.pathname}`, init);
+	}) as typeof globalThis.fetch;
+	return hosts;
+}
+
+test.each([
+	["names a third Kixel Quest", "https://elsewhere.example"],
+	["names none", undefined],
+])("a record is sent to the Kixel Quest its hook queued it for when the sender's environment %s", async (_, named) => {
+	const env = home();
+	writeTokens(env, { [URL_]: "one", [OTHER]: "two", [GONE]: "three" });
+	const root = checkout();
+	queue({ ...stopped(root), session: "s1" }, env);
+	queue({ ...stopped(root), session: "s2" }, { ...env, QUEST_KIXEL_URL: OTHER });
+	queue({ ...stopped(root), session: "s3" }, { ...env, QUEST_KIXEL_URL: GONE });
+	// The person removed one token after its record was queued.
+	writeTokens(env, { [URL_]: "one", [OTHER]: "two" });
+	const sessions = [session("s1", "quest/m0/a"), session("s2", "quest/m0/a"), session("s3", "quest/m0/a")];
+	const { deps, uploads } = sender({ ...env, QUEST_KIXEL_URL: named }, 200, sessions);
+	const hosts = viaHosts(deps);
+	expect(await sendPass(deps)).toHaveLength(2);
+	// Queue files are named by random IDs, so the Kixel Quests are reached in no fixed order.
+	const reached = hosts.filter((h) => h.path === "/records").map((h) => [h.host, h.token]);
+	expect(reached.sort()).toEqual([
+		[URL_, "Bearer one"],
+		[OTHER, "Bearer two"],
+	]);
+	expect(uploads.map((u) => parseUpload(u.body).records.map((r) => r.session)).sort()).toEqual([["s1"], ["s2"]]);
+	expect(pending(env)).toEqual([]);
+});
+
+test("a Kixel Quest that refuses its token drops only its own records", async () => {
+	const env = home();
+	writeTokens(env, { [URL_]: "one", [OTHER]: "two" });
+	const root = checkout();
+	queue({ ...stopped(root), session: "s1" }, env);
+	queue({ ...stopped(root), session: "s2" }, { ...env, QUEST_KIXEL_URL: OTHER });
+	const { deps, uploads } = sender(env, 200, [session("s1", "quest/m0/a"), session("s2", "quest/m0/a")]);
+	viaHosts(deps, [OTHER]);
+	const sent = await sendPass(deps);
+	expect(sent.map((s) => [s.endpoint, s.refused]).sort()).toEqual([
+		[ENDPOINT, false],
+		[`${OTHER}/records`, true],
+	]);
+	expect(uploads.map((u) => parseUpload(u.body).records.map((r) => r.session))).toEqual([["s1"]]);
+	expect(pending(env)).toEqual([]);
+});
+
+test("a failing Kixel Quest keeps its records without holding back another's", async () => {
+	const env = home();
+	writeTokens(env, { [URL_]: "one", [OTHER]: "two" });
+	const root = checkout();
+	queue({ ...stopped(root), session: "s1" }, env);
+	queue({ ...stopped(root), session: "s2" }, { ...env, QUEST_KIXEL_URL: OTHER });
+	const { deps, uploads } = sender(env, 200, [session("s1", "quest/m0/a"), session("s2", "quest/m0/a")]);
+	const fetch = deps.fetch;
+	deps.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
+		String(input).startsWith(OTHER)
+			? new Response("down", { status: 503 })
+			: fetch(input, init)) as typeof globalThis.fetch;
+	await expect(sendPass(deps)).rejects.toThrow(OTHER);
+	expect(uploads).toHaveLength(1);
+	expect(pending(env)).toHaveLength(1);
+});
+
+test("each Kixel Quest that does not serve a repository says so once, whichever said it first", async () => {
+	const env = home();
+	writeTokens(env, { [URL_]: "one", [OTHER]: "two" });
+	const root = checkout();
+	queue({ ...stopped(root), session: "s1" }, env);
+	queue({ ...stopped(root), session: "s2" }, { ...env, QUEST_KIXEL_URL: OTHER });
+	const { deps } = sender(env, 200, [session("s1", "quest/m0/a"), session("s2", "quest/m0/a")], undefined, [], []);
+	viaHosts(deps);
+	expect(await sendPass(deps)).toEqual([]);
+	expect(pending(env)).toEqual([]);
+	const [notice] = queue({ ...stopped(root), session: "s3" }, env).notices;
+	expect(notice).toContain(`${URL_} does not serve acme/proj`);
+	expect(notice).toContain(`${OTHER} does not serve acme/proj`);
 });

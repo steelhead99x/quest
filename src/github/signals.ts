@@ -1,18 +1,10 @@
-// What holds a PR's head from landing besides its checks: an online reviewer's finding on the head that no writer has
-// answered, and a maintainer decision recorded in a comment after the head was committed that nothing has answered.
-import { type GitHub, type ObjectValue, type Repository, array, object, string } from "./client";
+// What holds a PR's head from landing besides its checks: a finding on the head that no writer has answered, from an
+// online reviewer the base requires, and a maintainer decision recorded in a comment after the head was committed that
+// nothing has answered. An optional reviewer's findings, such as CodeRabbit's on a base that requires none of its
+// checks, are suggestions and hold nothing.
+import type { Repository, Signal } from "../core";
+import { type GitHubReader, type ObjectValue, array, object, string } from "./client";
 import { type Activity, bodyFindings, isBot, login, readActivity, reviewerOf } from "./online-review";
-
-/** One signal on a PR's head that holds it from landing until it is fixed or answered. */
-export interface Signal {
-	/** `finding`: an online reviewer's, on the head. `decision`: a marked comment newer than the head's commit. */
-	kind: "finding" | "decision";
-	/** The review, thread, or comment that raised it. */
-	url: string;
-	author: string;
-	/** The finding's title or thread's first line, or the decision's first line. */
-	text: string;
-}
 
 /** The picked heads whose signals a later commit carries unread, and when the pick was made. */
 export interface Carried {
@@ -48,8 +40,12 @@ const links = (body: string, url: string) =>
 		.slice(1)
 		.some((rest) => !/^[\w-]/.test(rest));
 
+/** A signal as {@link signals} finds it: a finding also names the bot account that posted it, if any, and its commit. */
+export type Found = Signal & { poster?: string | null; commit?: string };
+
 /**
- * The signals holding `pull`'s head, given which accounts can push to its repository. A finding is an online
+ * The signals on `pull`'s head, given which accounts can push to its repository, before {@link readSignals} drops
+ * those of reviewers the base does not require. A finding is an online
  * reviewer's, from its latest pass over the head: a review thread it opened that is unresolved with no writer's reply,
  * or a `[P<n>]` line of that pass's body that no writer's later comment links. A
  * decision is a writer's comment opening with {@link DECISION}, posted after the head was committed, that no writer's
@@ -57,15 +53,17 @@ const links = (body: string, url: string) =>
  * `carried` names heads a writer picked that a commit since carries forward unread, such as the land fixer's: findings on
  * them hold too, and so does a decision posted after its pick.
  */
-export function signals(pull: Activity, writers: ReadonlySet<string>, carried?: Carried): Signal[] {
+export function signals(pull: Activity, writers: ReadonlySet<string>, carried?: Carried): Found[] {
 	const writer = (actor: unknown) => !isBot(actor) && writers.has(login(actor) ?? "");
-	const found: Signal[] = [];
+	const found: Found[] = [];
 	const heads = new Set([pull.head, ...(carried?.heads ?? [])]);
 	const reviews = pull.reviews.map((review) => ({
 		id: String(review.id),
 		url: String(review.url),
 		// A review names its reviewer in its body only under a bot's or a writer's account, so a forged one replaces nothing.
 		reviewer: isBot(review.author) || writer(review.author) ? reviewerOf(review) : null,
+		// The account whose required check can make the reviewer required: a bot's, never a person's.
+		poster: isBot(review.author) ? login(review.author) : null,
 		body: typeof review.body === "string" ? review.body : "",
 		at: Date.parse(String(review.submittedAt)),
 		commit: review.commit != null ? String(object(review.commit).oid) : "",
@@ -107,15 +105,17 @@ export function signals(pull: Activity, writers: ReadonlySet<string>, carried?: 
 			url: String(first!.url ?? opener.url),
 			author: opener.reviewer,
 			text: firstLine(String(first!.body ?? "")),
+			poster: opener.poster,
+			commit: opener.commit,
 		});
 	}
 
 	// Each reviewer's latest pass over each head lists what it still finds there; a pass may only open threads. A late
-	// pass over a carried head says nothing of another.
+	// pass over a carried head says nothing of another, nor one posted under another account of one under a bot's.
 	const latest = new Map<string, (typeof reviews)[number]>();
 	for (const review of reviews)
 		if (review.reviewer !== null && review.head && (review.body.trim() !== "" || opened.has(review.id))) {
-			const key = `${review.reviewer}\n${review.commit}`;
+			const key = `${review.reviewer}\n${review.poster ?? ""}\n${review.commit}`;
 			const prior = latest.get(key);
 			if (!prior || prior.at <= review.at) latest.set(key, review);
 		}
@@ -131,7 +131,14 @@ export function signals(pull: Activity, writers: ReadonlySet<string>, carried?: 
 	for (const pass of passes)
 		if (!pass.answered)
 			for (const title of pass.titles)
-				found.push({ kind: "finding", url: pass.url, author: pass.reviewer!, text: title });
+				found.push({
+					kind: "finding",
+					url: pass.url,
+					author: pass.reviewer!,
+					text: title,
+					poster: pass.poster,
+					commit: pass.commit,
+				});
 
 	const committed = Math.min(Date.parse(pull.committed), carried ? Date.parse(carried.picked) : Infinity);
 	for (const decision of comments) {
@@ -153,7 +160,7 @@ export function signals(pull: Activity, writers: ReadonlySet<string>, carried?: 
  * read, so their permission is read; any other association cannot.
  */
 async function writersOf(
-	client: GitHub,
+	client: GitHubReader,
 	repository: Repository,
 	actors: { actor: unknown; association: unknown }[],
 ): Promise<Set<string>> {
@@ -176,9 +183,71 @@ async function writersOf(
 	return writers;
 }
 
-/** The signals on each PR's current head, by number, with the head they were read for, and those `carried` carries. */
+/** The head's check contexts, each with whether the PR's base requires it and the account that posts it. */
+const REQUIRED = `query RequiredPosters($owner: String!, $name: String!, $number: Int!, $oid: GitObjectID!, $after: String) {
+	repository(owner: $owner, name: $name) { object(oid: $oid) { ... on Commit { statusCheckRollup {
+		contexts(first: 100, after: $after) {
+			pageInfo { hasNextPage endCursor }
+			nodes {
+				__typename
+				... on CheckRun { isRequired(pullRequestNumber: $number) checkSuite { app { slug } } }
+				... on StatusContext { isRequired(pullRequestNumber: $number) creator { __typename login } }
+			}
+		}
+	} } } }
+}`;
+
+/**
+ * The accounts that post a check `number`'s base requires on `head`, as GitHub judges it for the PR: a check run's app
+ * as its bot, and a commit status's creator. A reviewer posting under one of them is one the base requires. Every
+ * GitHub Actions workflow posts as `github-actions[bot]`, so a reviewer posting as that account is required wherever
+ * any Actions job is, and one posting as its own bot from a required workflow is not.
+ */
+export async function requiredPosters(
+	client: GitHubReader,
+	repository: Repository,
+	number: number,
+	head: string,
+): Promise<Set<string>> {
+	const posters = new Set<string>();
+	for (let after: string | null = null; ;) {
+		const data = await client.graphql(REQUIRED, {
+			owner: repository.owner,
+			name: repository.repo,
+			number,
+			oid: head,
+			after,
+		});
+		const commit = object(data.repository).object;
+		if (commit === null || commit === undefined) throw new Error(`commit ${head} of PR #${number} is missing`);
+		const rollup = object(commit).statusCheckRollup;
+		if (rollup === null || rollup === undefined) return posters;
+		const page = object(object(rollup).contexts);
+		for (const context of array(page.nodes)) {
+			if (context.isRequired !== true) continue;
+			const app = object(object(context.checkSuite ?? {}).app ?? {});
+			const poster =
+				context.__typename === "CheckRun"
+					? typeof app.slug === "string"
+						? `${app.slug}[bot]`
+						: null
+					: login(context.creator);
+			if (poster !== null) posters.add(poster);
+		}
+		const info = object(page.pageInfo);
+		if (info.hasNextPage !== true) return posters;
+		after = string(info.endCursor);
+	}
+}
+
+/**
+ * The signals on each PR's current head, by number, with the head they were read for, and those `carried` carries.
+ * A finding holds only when the bot account that posted it also posts a check the base requires on the commit it
+ * reviewed, which a carried head keeps after a push; an optional reviewer's, and one posted under a person's account,
+ * are left out.
+ */
 export async function readSignals(
-	client: GitHub,
+	client: GitHubReader,
 	repository: Repository,
 	numbers: number[],
 	carried?: ReadonlyMap<number, Carried>,
@@ -197,12 +266,25 @@ export async function readSignals(
 		),
 	]);
 	const writers = await writersOf(client, repository, actors);
-	return new Map(
-		[...pulls].map(([number, pull]) => [
-			number,
-			{ head: pull.head, signals: signals(pull, writers, carried?.get(number)) },
-		]),
-	);
+	const read = new Map<number, { head: string; signals: Signal[] }>();
+	for (const [number, pull] of pulls) {
+		const found = signals(pull, writers, carried?.get(number));
+		// Only a commit with a bot's finding pays for reading which accounts post the checks its base requires.
+		const required = new Map<string, Set<string>>();
+		for (const { poster, commit } of found)
+			if (poster && commit && !required.has(commit))
+				required.set(commit, await requiredPosters(client, repository, number, commit));
+		read.set(number, {
+			head: pull.head,
+			signals: found
+				.filter(
+					({ kind, poster, commit }) =>
+						kind !== "finding" || (!!poster && !!commit && required.get(commit)!.has(poster)),
+				)
+				.map(({ kind, url, author, text }) => ({ kind, url, author, text })),
+		});
+	}
+	return read;
 }
 
 /** Signals as one line each, for a refusal or a comment. */

@@ -66,6 +66,27 @@ export function which(name: string, env: NodeJS.ProcessEnv): string | undefined 
 	return undefined;
 }
 
+/**
+ * Whether a command's program word runs something on this host: a name on PATH, or a path, resolved from `cwd` and
+ * then each directory the command changed to, to a launchable file. Each answer is cached, since one script often
+ * names a program many times.
+ */
+export function runs(env: NodeJS.ProcessEnv, cwd: string): (program: string, cd: string[]) => boolean {
+	const platform = process.platform;
+	const paths = platform === "win32" ? win32 : posix;
+	const cache = new Map<string, boolean>();
+	return (program, cd) => {
+		const named = platform === "win32" ? /[\\/]/.test(program) : program.includes("/");
+		const path = named ? paths.resolve(cwd, ...cd, program) : program;
+		let found = cache.get(path);
+		if (found === undefined) {
+			found = named ? launchable(path, platform) : which(program, env) !== undefined;
+			cache.set(path, found);
+		}
+		return found;
+	};
+}
+
 /** `which`, or an error naming the missing program. */
 export function requireProgram(name: string, env: NodeJS.ProcessEnv): string {
 	const found = which(name, env);

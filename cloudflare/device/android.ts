@@ -49,6 +49,60 @@ export function health(battery: string, thermal: string): { battery: number | nu
 	};
 }
 
+/** A DevTools target from Chrome's `/json/list`. */
+export interface DevToolsTarget {
+	type?: string;
+	url?: string;
+	webSocketDebuggerUrl?: string;
+}
+
+/**
+ * The DevTools socket of the blank tab `adb` opened. Android Chrome may refuse `/json/new` even
+ * while its tabs are debuggable, and benchmarking only that tab keeps the person's pages out.
+ */
+export function blankTab(targets: DevToolsTarget[]): string {
+	const target = targets.find((tab) => tab.type === "page" && tab.url === "about:blank" && tab.webSocketDebuggerUrl);
+	if (!target?.webSocketDebuggerUrl)
+		throw new Error("Chrome has no debuggable blank tab; unlock the phone and open about:blank in Chrome");
+	return target.webSocketDebuggerUrl;
+}
+
+/** Why a screenshot load isn't the page asked for, or null when it is. */
+export function notCaptured(url: string, load: Pick<Load, "url" | "status">): string | null {
+	if (load.url !== new URL(url).href)
+		return `Chrome could not capture ${url}: it redirected to ${load.url}; sign the phone's Chrome in to the site first if the page needs it`;
+	if (load.status !== 200) return `Chrome could not capture ${url}: HTTP ${load.status}`;
+	return null;
+}
+
+/** What `navigate` needs of a DevTools connection. */
+export type Page = Pick<Rpc, "call" | "event">;
+
+/**
+ * Load `url` in `page` and time it, retrying once when Chrome aborts the navigation, as it can
+ * when an activity or configuration change replaces it. Only the attempt that loaded is timed.
+ */
+export async function navigate(
+	page: Page,
+	url: string,
+	timing: (page: Page) => Promise<Omit<Load, "wall">>,
+	retryAborted = true,
+): Promise<Load> {
+	const loaded = page.event("Page.loadEventFired");
+	// The navigation command can fail before the event is awaited.
+	void loaded.catch(() => undefined);
+	const start = performance.now();
+	const nav = (await page.call("Page.navigate", { url })) as { errorText?: string };
+	if (nav.errorText === "net::ERR_ABORTED" && retryAborted) {
+		await sleep(500);
+		return navigate(page, url, timing, false);
+	}
+	if (nav.errorText) throw new Error(`Chrome could not load ${url}: ${nav.errorText}`);
+	await loaded;
+	const wall = performance.now() - start;
+	return { ...(await timing(page)), wall };
+}
+
 /** Chrome on the attached phone, through a forwarded DevTools port. */
 export class Android implements Driver {
 	private page: Rpc | null = null;
@@ -148,14 +202,25 @@ export class Android implements Driver {
 			await page.call("Emulation.setEmulatedMedia", {
 				features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }],
 			});
-			await this.navigate(page, url);
+			const problem = notCaptured(url, await this.navigate(page, url));
+			if (problem) throw new Error(problem);
 			const shot = (await page.call("Page.captureScreenshot", { format: "png" })) as { data?: string };
 			if (!shot.data) throw new Error("Chrome returned no screenshot");
 			return Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
 		} finally {
-			await page.call("Emulation.setEmulatedMedia", { features: [] });
-			// "null" means the user never set one; put back Android's default.
-			await this.adb(["shell", "settings", "put", "system", "font_scale", before === "null" ? "1.0" : before]);
+			try {
+				await page.call("Emulation.setEmulatedMedia", { features: [] });
+			} finally {
+				// "null" means the user never set one; put back Android's default.
+				await this.adb([
+					"shell",
+					"settings",
+					"put",
+					"system",
+					"font_scale",
+					before === "null" ? "1.0" : before,
+				]);
+			}
 		}
 	}
 
@@ -168,9 +233,8 @@ export class Android implements Driver {
 		return this.sh("adb", ["-s", this.id, ...args]);
 	}
 
-	private async json(path: string, method = "GET"): Promise<unknown> {
+	private async json(path: string): Promise<unknown> {
 		const response = await fetch(`http://127.0.0.1:${this.port}${path}`, {
-			method,
 			signal: AbortSignal.timeout(this.timeout),
 		});
 		if (!response.ok) throw new Error(`Chrome's DevTools ${path} answered ${response.status}`);
@@ -179,26 +243,19 @@ export class Android implements Driver {
 
 	private async connect(): Promise<Rpc> {
 		if (this.page) return this.page;
-		const target = (await this.json("/json/new?about:blank", "PUT")) as { webSocketDebuggerUrl?: string };
-		if (!target.webSocketDebuggerUrl) throw new Error("Chrome opened a tab without a DevTools socket");
-		const page = await Rpc.connect(target.webSocketDebuggerUrl, this.timeout);
+		const socket = blankTab((await this.json("/json/list")) as DevToolsTarget[]);
+		const page = await Rpc.connect(socket, this.timeout);
 		await page.call("Page.enable");
 		await page.call("Network.enable");
 		this.page = page;
 		return page;
 	}
 
-	private async navigate(page: Rpc, url: string): Promise<Load> {
-		const loaded = page.event("Page.loadEventFired");
-		const start = performance.now();
-		const nav = (await page.call("Page.navigate", { url })) as { errorText?: string };
-		if (nav.errorText) throw new Error(`Chrome could not load ${url}: ${nav.errorText}`);
-		await loaded;
-		const wall = performance.now() - start;
-		return { ...(await this.timing(page)), wall };
+	private navigate(page: Rpc, url: string): Promise<Load> {
+		return navigate(page, url, (p) => this.timing(p));
 	}
 
-	private async timing(page: Rpc) {
+	private async timing(page: Page) {
 		// loadEventEnd is set just after the load event fires.
 		for (let i = 0; i < 50; i++) {
 			const value = await this.evaluate(page, `performance.getEntriesByType("navigation")[0]?.loadEventEnd > 0`);
@@ -208,7 +265,7 @@ export class Android implements Driver {
 		throw new Error("the page's load event never finished");
 	}
 
-	private async evaluate(page: Rpc, expression: string, awaitPromise = false): Promise<unknown> {
+	private async evaluate(page: Page, expression: string, awaitPromise = false): Promise<unknown> {
 		const out = (await page.call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise })) as {
 			result?: { value?: unknown };
 			exceptionDetails?: { text?: string };

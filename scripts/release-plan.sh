@@ -18,8 +18,7 @@ usage() {
 # What a release ships or is built and checked by: everything the binaries and
 # the flake package build from (`assets/` is bundled into the binary), every
 # file Release publishes, such as `scripts/installer.sh`, and the workflows that
-# build, check, and publish it. Release's pull request runs and its releases on
-# `main` both decide with this one predicate.
+# build, check, and publish it.
 ships() {
     grep -E '^(src/|assets/|nix/|scripts/|package\.json$|bun\.lock$|bunfig\.toml$|tsconfig\.json$|flake\.(nix|lock)$|\.github/workflows/(release|gate-macos|install-check)\.yml$)' >/dev/null
 }

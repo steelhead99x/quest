@@ -2,7 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 
-import { chmodSync, readdirSync } from "node:fs";
+import { chmodSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -167,25 +167,176 @@ describe("quest merge's landing check", () => {
 		expect(findings.map((finding) => finding.path)).toEqual(["quest/m0/epic/one.md"]);
 	});
 
-	test("skips a finding the base already has", async () => {
+	test.skipIf(process.platform === "win32")(
+		"reports a malformed quest.toml in the head's tree, and Nix tasks without its flake.nix",
+		async () => {
+			const tree = repo("fix/manifest");
+			tree.write("quest.toml", '[tasks.a]\ntier = "pr"\nrun = "x"\nbogus = 1\n');
+			commit(tree, "manifest");
+			expect((await inspect(tree, "fix/manifest")).map((finding) => [finding.path, finding.message])).toEqual([
+				["quest.toml", "[tasks.a]: unknown key `bogus`"],
+			]);
+			tree.write("quest.toml", '[tasks.a]\ntier = "pr"\nrun = "x"\n');
+			commit(tree, "valid manifest");
+			expect((await inspect(tree, "fix/manifest")).map((finding) => finding.message)).toEqual([
+				expect.stringContaining("a run in the Nix dev shell, but there is no flake.nix"),
+			]);
+			symlinkSync("missing.nix", join(tree.path, "flake.nix"));
+			commit(tree, "dangling flake");
+			expect((await inspect(tree, "fix/manifest")).map((finding) => finding.message)).toEqual([
+				expect.stringContaining("a run in the Nix dev shell, but flake.nix is a symlink, not a regular file"),
+			]);
+			rmSync(join(tree.path, "flake.nix"));
+			tree.write("flake.nix", "{}\n");
+			commit(tree, "flake");
+			expect(await inspect(tree, "fix/manifest")).toEqual([]);
+			// The commit holds a symlink as its target's path, which quest check refuses too.
+			tree.write("ci/tasks.toml", '[tasks.a]\ntier = "pr"\nrun = "x"\n');
+			rmSync(join(tree.path, "quest.toml"));
+			symlinkSync("ci/tasks.toml", join(tree.path, "quest.toml"));
+			commit(tree, "linked manifest");
+			expect((await inspect(tree, "fix/manifest")).map((finding) => finding.message)).toEqual([
+				"must be a regular file, not a symlink",
+			]);
+		},
+	);
+
+	/** A tree whose `main` had a dangling link when `branch` left it, checked out on `branch`. */
+	function brokenAtFork(branch: string): Tree {
 		const tree = Tree.committed();
 		tree.append("quest/m0/epic/one.md", "\n## Related\n\n- [Gone](/quest/m0/gone.md) - missing\n");
 		commit(tree, "dangling link on main");
-		git(tree, "switch", "--quiet", "-c", "fix/other");
+		git(tree, "switch", "--quiet", "-c", branch);
+		return tree;
+	}
+
+	/** Fix `main`'s dangling link after the branch left it, as a later landing would. */
+	function fixMain(tree: Tree, branch: string) {
+		git(tree, "switch", "--quiet", "main");
+		git(tree, "revert", "--no-edit", "HEAD");
+		git(tree, "switch", "--quiet", branch);
+	}
+
+	test("skips a finding the merge base had, though the base fixed it since", async () => {
+		const tree = brokenAtFork("fix/behind");
+		tree.write("src.ts", "work\n");
+		commit(tree, "work");
+		fixMain(tree, "fix/behind");
+		expect(await inspect(tree, "fix/behind")).toEqual([]);
+	});
+
+	test("reports a finding a behind head adds", async () => {
+		const tree = brokenAtFork("fix/other");
 		tree.append("quest/m0/epic/two.md", "\n## Related\n\n- [Lost](/quest/m0/lost.md) - missing\n");
 		commit(tree, "another dangling link");
+		// Up to date, the merge base is the base tip.
+		expect((await inspect(tree, "fix/other")).map((finding) => finding.path)).toEqual(["quest/m0/epic/two.md"]);
+		fixMain(tree, "fix/other");
 		const findings = await inspect(tree, "fix/other");
 		expect(findings.map((finding) => finding.path)).toEqual(["quest/m0/epic/two.md"]);
 	});
 
-	test("reports one more of a finding the base already has", async () => {
+	test("reports a new entry whose finding reads like one the base fixed", async () => {
 		const tree = Tree.committed();
+		tree.append("quest/m0/epic/two.md", "\n## Waiting\n\n- nobody named\n");
+		commit(tree, "unattributed wait on main");
+		git(tree, "switch", "--quiet", "-c", "fix/swap");
+		tree.write("quest/m0/epic/two.md", tree.read("quest/m0/epic/two.md").replace("nobody named", "someone else"));
+		commit(tree, "swap the wait");
+		fixMain(tree, "fix/swap");
+		expect((await inspect(tree, "fix/swap")).map((finding) => finding.path)).toEqual(["quest/m0/epic/two.md"]);
+	});
+
+	test("reports an entry the head changed below its opening line", async () => {
+		const tree = Tree.committed();
+		tree.append("quest/m0/epic/two.md", "\n## Waiting\n\n- nobody named\n  for one reason\n");
+		commit(tree, "unattributed wait on main");
+		git(tree, "switch", "--quiet", "-c", "fix/continued");
+		tree.write("quest/m0/epic/two.md", tree.read("quest/m0/epic/two.md").replace("one reason", "another"));
+		commit(tree, "reword the wait");
+		fixMain(tree, "fix/continued");
+		expect((await inspect(tree, "fix/continued")).map((finding) => finding.path)).toEqual(["quest/m0/epic/two.md"]);
+	});
+
+	test("reports a link below an entry's opening line once the head edits the entry", async () => {
+		const tree = Tree.committed();
+		tree.append("quest/m0/epic/two.md", "\n## Plan\n\n- first step\n  after [Gone](/quest/m0/gone.md)\n");
+		commit(tree, "dangling link on main");
+		git(tree, "switch", "--quiet", "-c", "fix/entry");
+		tree.write("quest/m0/epic/two.md", tree.read("quest/m0/epic/two.md").replace("first step", "next step"));
+		commit(tree, "reword the step");
+		// The base fixes the link by adding its target, which leaves the head's lines alone.
+		git(tree, "switch", "--quiet", "main");
+		tree.write("quest/m0/gone.md", "# [S] Gone\n\n## Goal\n\nBack.\n");
+		commit(tree, "add the target");
+		git(tree, "switch", "--quiet", "fix/entry");
+		expect((await inspect(tree, "fix/entry")).map((finding) => finding.message)).toEqual([
+			"link does not resolve: /quest/m0/gone.md",
+		]);
+	});
+
+	test("skips a finding whose entry changed only its line endings", async () => {
+		const tree = Tree.committed();
+		const path = "quest/m0/epic/two.md";
+		tree.write(
+			path,
+			`${tree.read(path)}\n## Plan\n\n- first step\n  after [Gone](/quest/m0/gone.md)\n`.replaceAll("\n", "\r\n"),
+		);
+		commit(tree, "dangling link on main, in CRLF");
+		git(tree, "switch", "--quiet", "-c", "fix/endings");
+		tree.write(path, tree.read(path).replaceAll("\r\n", "\n"));
+		commit(tree, "LF");
+		expect(await inspect(tree, "fix/endings")).toEqual([]);
+	});
+
+	test("skips a finding the base tip has that the head carries without merging it", async () => {
+		const tree = repo("fix/stacked");
+		git(tree, "switch", "--quiet", "main");
 		tree.append("quest/m0/epic/one.md", "\n## Related\n\n- [Gone](/quest/m0/gone.md) - missing\n");
 		commit(tree, "dangling link on main");
-		git(tree, "switch", "--quiet", "-c", "fix/again");
-		tree.append("quest/m0/epic/one.md", "- [Gone again](/quest/m0/gone.md) - missing\n");
+		git(tree, "switch", "--quiet", "fix/stacked");
+		tree.write("src.ts", "work\n");
+		commit(tree, "work");
+		git(tree, "cherry-pick", "main");
+		// The head carries main's change on its own commit, so the merge base is main's parent.
+		expect(git(tree, "merge-base", "main", "fix/stacked")).toBe(git(tree, "rev-parse", "main~"));
+		expect(await inspect(tree, "fix/stacked")).toEqual([]);
+	});
+
+	test("reports a head whose quest tree it cannot read, though its merge base had the same", async () => {
+		const tree = Tree.committed();
+		writeFileSync(join(tree.path, "quest/m0/epic/one.md"), Buffer.from([0xff, 0xfe, 0x0a]));
+		commit(tree, "unreadable quest on main");
+		git(tree, "switch", "--quiet", "-c", "fix/unreadable");
+		tree.write("src.ts", "work\n");
+		commit(tree, "work");
+		fixMain(tree, "fix/unreadable");
+		expect((await inspect(tree, "fix/unreadable")).map((finding) => finding.path)).toEqual(["quest"]);
+	});
+
+	test("reports one more of a finding the merge base had", async () => {
+		const tree = brokenAtFork("fix/again");
+		tree.append("quest/m0/epic/one.md", "- [Gone](/quest/m0/gone.md) - missing\n");
 		commit(tree, "the same dangling link");
+		fixMain(tree, "fix/again");
 		expect((await inspect(tree, "fix/again")).map((finding) => finding.path)).toEqual(["quest/m0/epic/one.md"]);
+	});
+
+	test("passes a head that branched before the base adopted quests", async () => {
+		const tree = new Tree(initRepository());
+		tree.write("README.md", "hi\n");
+		// A placeholder file or a symlink is no quest document.
+		tree.write("quest/.gitkeep", "");
+		symlinkSync("../README.md", join(tree.path, "quest/roadmap.md"));
+		commit(tree, "init");
+		git(tree, "switch", "--quiet", "-c", "fix/early");
+		tree.write("src.ts", "work\n");
+		commit(tree, "work");
+		git(tree, "switch", "--quiet", "main");
+		Tree.baseline().copy(tree.path);
+		commit(tree, "adopt quests");
+		git(tree, "switch", "--quiet", "fix/early");
+		expect(await inspect(tree, "fix/early")).toEqual([]);
 	});
 
 	test("fetches into a checkout's repository, writing none of its refs", async () => {

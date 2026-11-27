@@ -12,18 +12,13 @@ import { PREFIX, type SkillDir } from "../core";
 import guide from "../../assets/AGENTS.md";
 import context from "../../assets/CONTEXT.md";
 import afk from "../../assets/skills/afk.md";
-import complete from "../../assets/skills/complete.md";
-import del from "../../assets/skills/delete.md";
-import exportSkill from "../../assets/skills/export.md";
 import grill from "../../assets/skills/grill.md";
 import importSkill from "../../assets/skills/import.md";
 import iterate from "../../assets/skills/iterate.md";
 import merge from "../../assets/skills/merge.md";
 import plan from "../../assets/skills/plan.md";
-import recurring from "../../assets/skills/recurring.md";
 import review from "../../assets/skills/review.md";
 import run from "../../assets/skills/run.md";
-import spawn from "../../assets/skills/spawn.md";
 import start from "../../assets/skills/start.md";
 
 /** The quest contract: the format, workflow, and rules every skill builds on. */
@@ -33,7 +28,7 @@ export const GUIDE: string = guide;
 export const CONTEXT: string = context;
 
 /** Where an agent without the CLI learns to install it. */
-const SETUP = "https://github.com/moq-dev/quest/blob/main/SETUP.md";
+const SETUP = "https://github.com/kixel-ai/quest/blob/main/SETUP.md";
 
 /** The guide's `##` sections by heading, each with its heading; headings inside code fences belong to their section. */
 const SECTIONS: ReadonlyMap<string, string> = (() => {
@@ -156,41 +151,44 @@ export function compose(skills: readonly Skill[]): string {
 	const visit = (s: Skill) => {
 		if (order.includes(s)) return;
 		order.push(s);
-		for (const name of s.skills) visit(skill(name)!);
+		for (const name of s.skills) visit(part(name)!);
 	};
 	for (const s of skills) visit(s);
 	const parts = [order[0]!.body.trim()];
-	for (const s of order.slice(1)) parts.push(`# /${s.installed}\n\n${s.body.trim()}`);
+	for (const s of order.slice(1))
+		parts.push(`# ${INTERNAL.includes(s) ? `The ${s.name} skill` : `/${s.installed}`}\n\n${s.body.trim()}`);
 	const sections = [...new Set(order.flatMap((s) => s.guide).map(sectionHeading))];
 	if (sections.length > 0) parts.push(`# Quest guide\n\n${guideSections(sections)}`);
 	return `${parts.join("\n\n")}\n`;
 }
 
-/** Every skill, sorted by name. */
+/** Every skill a repository installs, sorted by name. */
 export const SKILLS: readonly Skill[] = Object.entries({
 	afk,
-	complete,
-	delete: del,
-	export: exportSkill,
-	grill,
 	import: importSkill,
 	iterate,
 	merge,
 	plan,
-	recurring,
 	review,
 	run,
-	spawn,
 	start,
 }).map(([name, text]) => new Skill(name, text));
 
-/** The skill called `name`, if this version ships one. */
+/** Skills other skills build on that no one invokes alone, so none is installed or listed. */
+const INTERNAL: readonly Skill[] = [new Skill("grill", grill)];
+
+/** The installed skill called `name`, if this version ships one. */
 export function skill(name: string): Skill | undefined {
 	return SKILLS.find((s) => s.name === name);
 }
 
+/** The skill called `name`, installed or internal, for composing. */
+function part(name: string): Skill | undefined {
+	return skill(name) ?? INTERNAL.find((s) => s.name === name);
+}
+
 // A misnamed section or skill would silently drop or keep part of a skill, so it fails every command.
-for (const s of SKILLS) {
+for (const s of [...SKILLS, ...INTERNAL]) {
 	for (const name of s.guide) sectionHeading(name);
-	for (const name of s.skills) if (!skill(name)) throw new Error(`skill ${s.name} builds on missing skill ${name}`);
+	for (const name of s.skills) if (!part(name)) throw new Error(`skill ${s.name} builds on missing skill ${name}`);
 }

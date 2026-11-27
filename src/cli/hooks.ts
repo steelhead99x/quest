@@ -10,11 +10,14 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { version } from "./version";
-import { type StopInput, broken, questRoot, runningGates, usesQuest } from "./rules";
+import { type StopInput, broken, questRoot, runningTasks, usesQuest } from "./rules";
 import { stubFindings } from "./setup";
 import { CONTEXT } from "./skills";
+import { claimSessionPacks, contextPacks, packsForToolCall, resetSessionPacks } from "./context";
 import { HOOK_EVENTS } from "./worktree-hook";
 import { queue } from "./send";
+import { type Sample, logCall, sessionSample, startLine } from "./calls";
+import { runs } from "./program";
 
 /** The command the rule hooks run. */
 export const HOOK_COMMAND = "quest hook";
@@ -44,26 +47,32 @@ const SESSION = "startup|resume|clear|compact";
  * The entries `quest setup` installs for Claude Code. SessionStart prints the
  * rules; SubagentStart gives each subagent the same rules, since it starts
  * without the session's. PreToolUse blocks the calls that break a rule a
- * program can check. Stop and SubagentStop refuse to end a turn while a gate
- * the agent started still runs in the background; once a session's turn ends,
- * Stop queues its record to send.
+ * program can check, its question dialogs included. PreToolUse and the
+ * PostToolUse events also sample each shell call's CPU (see calls.ts). Stop and
+ * SubagentStop refuse to end a turn while a gate, agent turn, or wait the agent
+ * started still runs in the background; once a session's turn ends, Stop
+ * queues its record to send.
  */
 export const CLAUDE_HOOKS: readonly HookEntry[] = [
 	{ event: "SessionStart", matcher: SESSION },
 	{ event: "SubagentStart" },
-	{ event: "PreToolUse", matcher: "Bash|Write|Edit|MultiEdit" },
+	{ event: "PreToolUse", matcher: "Bash|Write|Edit|MultiEdit|AskUserQuestion" },
+	{ event: "PostToolUse", matcher: "Bash" },
+	{ event: "PostToolUseFailure", matcher: "Bash" },
 	{ event: "Stop" },
 	{ event: "SubagentStop" },
 ];
 
 /**
- * The same for Codex, whose shell commands match as Bash and whose file edits
- * are `apply_patch`. Codex spills hook context beyond a token limit, about
+ * The same for Codex, whose shell commands match as Bash, whose file edits
+ * are `apply_patch`, and whose question tools are `request_user_input` and its
+ * asynchronous twin. Codex spills hook context beyond a token limit, about
  * 2,500 by default, to a file; the rules' character cap bounds their tokens.
  */
 export const CODEX_HOOKS: readonly HookEntry[] = [
 	{ event: "SessionStart", matcher: SESSION, settings: { additionalContextLimit: CONTEXT_LIMIT } },
-	{ event: "PreToolUse", matcher: "Bash|apply_patch" },
+	{ event: "PreToolUse", matcher: "Bash|apply_patch|request_user_input|request_user_input_async" },
+	{ event: "PostToolUse", matcher: "Bash" },
 	{ event: "Stop" },
 ];
 
@@ -279,18 +288,28 @@ interface HookInput {
 	session_id?: string;
 	/** Null for a session that keeps no transcript. */
 	transcript_path?: string | null;
-	/** Codex's Stop names its turn; Claude Code's does not. */
+	/** Codex names its turn in every event; Claude Code in none. */
 	turn_id?: string;
+	/** The tool call a PreToolUse or PostToolUse event is about. */
+	tool_use_id?: string;
+	/** Claude Code: the sub-agent whose call it is. */
+	agent_id?: string;
+	/** SessionStart source: startup, resume, clear, or compact. */
+	source?: string;
+	/** What the tool returned; Claude Code's Bash names the background task it moved the command to. */
+	tool_response?: unknown;
 }
 
 /** What `hook` reads beyond its input. */
 export interface HookDependencies {
 	env: NodeJS.ProcessEnv;
+	/** The session's cgroup and CPU counter now (see `sessionSample`). */
+	sample?: () => Sample;
 }
 
-/** What a Stop or SubagentStop refusal tells the agent, after the gates it names. */
-const BLOCK_ON_GATES =
-	"Block on each with the harness's wait until it ends, then end your turn. A subagent's background commands stop when it ends, and a session that ends its turn on one leaves its result unread.";
+/** What a Stop or SubagentStop refusal tells the agent, after the commands it names. */
+const BLOCK_ON_TASKS =
+	"Block on each with the harness's wait until it ends, or stop one whose result you no longer need, then end your turn. A subagent's background commands stop when it ends, and a session that ends its turn on one leaves its result unread.";
 
 /**
  * What `quest hook` prints for the Claude Code or Codex hook event in `input`,
@@ -298,8 +317,10 @@ const BLOCK_ON_GATES =
  * Quest's reference line. SessionStart and SubagentStart add `quest context`
  * to the session's context, so its agents never run the command themselves.
  * PreToolUse denies a tool call that breaks a rule `broken` checks, giving the
- * rule as the reason. Stop and SubagentStop refuse to end the turn while a gate
- * the agent started runs in the background (see `runningGates`).
+ * rule as the reason; it and the PostToolUse events log a shell call they let
+ * through (see calls.ts). Stop and SubagentStop refuse to end the turn while a
+ * gate, agent turn, or wait the agent started runs in the background (see
+ * `runningTasks`).
  */
 export function hook(input: unknown, deps: HookDependencies = { env: process.env }): string {
 	const value = input as Partial<HookInput> | null;
@@ -311,11 +332,23 @@ export function hook(input: unknown, deps: HookDependencies = { env: process.env
 		case "SubagentStart": {
 			const root = questRoot(value.cwd);
 			if (root === null) return "";
-			const stubs = stubFindings(root).length;
-			const context =
-				stubs === 0
-					? CONTEXT
-					: `${CONTEXT}\nQuest skill stubs here differ from what quest ${version} installs (\`quest check\` lists ${stubs}): in a PR, run \`quest init\` with the repository's pinned quest, bumping the pin first if it is older.\n`;
+			if (typeof value.session_id === "string" && (event === "SubagentStart" || value.source !== "resume"))
+				resetSessionPacks(
+					value.session_id,
+					typeof value.agent_id === "string" ? value.agent_id : null,
+					deps.env,
+				);
+			// The rules load even when the stub comparison cannot read the tree, such as a quest removed mid-walk.
+			let note = "";
+			try {
+				const stubs = stubFindings(root).length;
+				if (stubs > 0)
+					note = `\nQuest's skill and audit stubs here differ from what quest ${version} plants (\`quest check\` lists ${stubs}): in a PR, run \`quest init\` with the repository's pinned quest, bumping the pin first if it is older. An audit the maintainer declines goes under \`## Skipped audits\` in \`quest/README.md\` instead.\n`;
+			} catch {
+				// The error can quote checkout-controlled file names, which stay out of the rules.
+				note = `\nQuest could not compare the stubs here with quest ${version}'s; run \`quest check\` for why.\n`;
+			}
+			const context = `${CONTEXT}${note}`;
 			return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: context } });
 		}
 		case "PreToolUse": {
@@ -326,8 +359,33 @@ export function hook(input: unknown, deps: HookDependencies = { env: process.env
 			)
 				throw new Error("expected a PreToolUse hook's JSON input with tool_name and tool_input");
 			if (!usesQuest(value.cwd)) return "";
-			const rules = broken({ tool: value.tool_name, input: value.tool_input, cwd: value.cwd });
-			if (rules.length === 0) return "";
+			const rules = broken({ tool: value.tool_name, input: value.tool_input, cwd: value.cwd }, deps.env);
+			if (rules.length === 0) {
+				if (value.tool_name === "Bash" && typeof value.tool_input.command === "string")
+					logCall(
+						startLine(
+							caller(value),
+							callId(value),
+							value.tool_input.command,
+							runs(deps.env, value.cwd),
+							sample(deps, value),
+						),
+						deps.env,
+					);
+				const fresh = claimSessionPacks(
+					value.session_id,
+					typeof value.agent_id === "string" ? value.agent_id : null,
+					packsForToolCall(value.tool_name, value.tool_input),
+					deps.env,
+				);
+				if (fresh.length === 0) return "";
+				return JSON.stringify({
+					hookSpecificOutput: {
+						hookEventName: event,
+						additionalContext: contextPacks(fresh),
+					},
+				});
+			}
 			const reason = rules.join("\n");
 			return JSON.stringify({
 				hookSpecificOutput: {
@@ -337,9 +395,17 @@ export function hook(input: unknown, deps: HookDependencies = { env: process.env
 				},
 			});
 		}
+		case "PostToolUse":
+		case "PostToolUseFailure": {
+			if (value.tool_name !== "Bash" || !usesQuest(value.cwd)) return "";
+			const response = value.tool_response as { backgroundTaskId?: unknown } | null | undefined;
+			const task = typeof response?.backgroundTaskId === "string" ? response.backgroundTaskId : null;
+			logCall({ kind: "end", ...caller(value), call: callId(value), task, ...sample(deps, value) }, deps.env);
+			return "";
+		}
 		case "Stop":
 		case "SubagentStop": {
-			// Codex runs no background gates, so its Stop only queues the record.
+			// Codex's Stop input lists no background commands, so it only queues the record.
 			if (
 				event === "Stop" &&
 				typeof value.turn_id === "string" &&
@@ -348,17 +414,65 @@ export function hook(input: unknown, deps: HookDependencies = { env: process.env
 				return stopped(value, "codex", deps);
 			if (!Array.isArray((value as StopInput).background_tasks))
 				throw new Error(`expected a ${event} hook's JSON input with background_tasks; upgrade Claude Code`);
-			const gates = runningGates(value as StopInput);
-			if (gates.length === 0) return event === "Stop" ? stopped(value, "claude", deps) : "";
-			const named = gates.map((command) => `- ${command}`).join("\n");
+			// Closes the shell calls Claude Code moved to the background (see `shellGroups`).
+			if (typeof value.session_id === "string" && usesQuest(value.cwd))
+				logCall(
+					{
+						kind: "stop",
+						harness: "claude",
+						session: value.session_id,
+						running: (value as StopInput)
+							.background_tasks!.filter((task) => task.type === "shell")
+							.map((task) => task.id),
+						...sample(deps, value),
+					},
+					deps.env,
+				);
+			const tasks = runningTasks(value as StopInput);
+			if (tasks.length === 0) return event === "Stop" ? stopped(value, "claude", deps) : "";
+			const named = tasks.map((command) => `- ${command}`).join("\n");
 			return JSON.stringify({
 				decision: "block",
-				reason: `\`quest gate\` commands you started still run in the background:\n${named}\n${BLOCK_ON_GATES}`,
+				reason: `Quest commands you started still run in the background:\n${named}\n${BLOCK_ON_TASKS}`,
 			});
 		}
 		default:
 			throw new Error(`quest hook does not handle ${event}; run \`quest setup\` again to update your hooks`);
 	}
+}
+
+/** Whose tool call `value` is about: Codex names its turn in every event, and Claude Code a sub-agent's ID. */
+function caller(value: Partial<HookInput>): { harness: string; session: string; agent: string | null } {
+	if (typeof value.session_id !== "string")
+		throw new Error(`expected a ${value.hook_event_name} hook's JSON input with session_id`);
+	return {
+		harness: typeof value.turn_id === "string" ? "codex" : "claude",
+		session: value.session_id,
+		agent: typeof value.agent_id === "string" ? value.agent_id : null,
+	};
+}
+
+function callId(value: Partial<HookInput>): string {
+	if (typeof value.tool_use_id !== "string" || value.tool_use_id === "")
+		throw new Error(`expected a ${value.hook_event_name} hook's JSON input with tool_use_id; upgrade the agent`);
+	return value.tool_use_id;
+}
+
+/** The session's sample now; Claude Code names its own process, which an agent it starts inherits. */
+function sample(deps: HookDependencies, value: Partial<HookInput>): Sample {
+	if (deps.sample) return deps.sample();
+	const now = Date.now();
+	const pid = Number(deps.env.CLAUDE_PID);
+	// Without its process ID, Claude Code runs under no name a shell could not share, so nothing is counted.
+	const harness =
+		typeof value.turn_id === "string"
+			? { name: "codex" }
+			: Number.isSafeInteger(pid) && pid > 0
+				? { pid }
+				: undefined;
+	if (!harness) return { at: new Date(now).toISOString(), cgroup: null, usage: null };
+	const session = typeof value.session_id === "string" ? value.session_id : "";
+	return sessionSample(now, { proc: "/proc", cgroups: "/sys/fs/cgroup", self: process.pid, harness, session });
 }
 
 /**

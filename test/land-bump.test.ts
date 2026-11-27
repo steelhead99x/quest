@@ -326,9 +326,10 @@ test("bumpBody waits on a maintainer only for findings", () => {
 	};
 	expect(bumpBody(options)).toContain("to release v1.0.0 (`2222222`)");
 	expect(bumpBody(options)).not.toContain("## Waiting");
-	expect(bumpBody(options)).toContain("## Review\n\nSkipped: pin bump");
+	// It records no review, which a maintainer's fix would need.
+	expect(bumpBody(options)).not.toContain("## Review");
 	expect(bumpBody({ ...options, findings: "quest/a.md: <bad>" })).toContain(
-		"## Waiting\n\n- Maintainer: `quest check`",
+		"## Waiting\n\n- Maintainer (action): `quest check`",
 	);
 	expect(bumpBody({ ...options, findings: "quest/a.md: <bad>" })).toContain("&lt;bad>");
 });

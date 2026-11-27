@@ -93,12 +93,15 @@ export const TIMING_SCRIPT = `JSON.stringify((() => {
 /**
  * A promise, as script text, that resolves true once a service worker controls
  * the page: it waits for registration to finish and for the worker to claim
- * the page, giving up after three seconds, since a page registers it after load.
+ * the page, since a page registers it after load. The bench clears service workers
+ * before each cold load, so this waits for a whole install, which on a phone can take
+ * more than a few seconds; it gives up after ten, well inside the drivers' 30-second
+ * call timeout.
  */
 export const CONTROLLED_SCRIPT = `(navigator.serviceWorker ? Promise.race([
 	navigator.serviceWorker.ready.then(() => navigator.serviceWorker.controller !== null || new Promise((resolve) =>
 		navigator.serviceWorker.addEventListener("controllerchange", () => resolve(true), { once: true }))),
-	new Promise((resolve) => setTimeout(() => resolve(navigator.serviceWorker.controller !== null), 3000)),
+	new Promise((resolve) => setTimeout(() => resolve(navigator.serviceWorker.controller !== null), 10000)),
 ]) : Promise.resolve(false))`;
 
 /** Read what TIMING_SCRIPT returned, refusing anything that is not its shape. */

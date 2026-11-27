@@ -76,10 +76,20 @@ describe("bench rows", () => {
 
 	test("an unreadable review record marks the row rather than failing the page", () => {
 		const r = row(
-			merged(1, { body: "## Review\n\nRewritten by `quest review` after each round.\n\n- Risk: garbled\n" }),
+			merged(1, {
+				body: "## Review\n\nRewritten by `quest review` after each round.\n\n- Reviewer: Codex, gpt-6.1-sol, high effort\n- Rounds: garbled\n",
+			}),
 		);
-		expect(r.unreadable).toContain("names no reviewer");
+		expect(r.unreadable).toContain("Rounds line is malformed");
 		expect(r.score).toBeNull();
+	});
+
+	test("a low-risk head's record, which seats no reviewer, reads as unreviewed rather than unreadable", () => {
+		const r = row(
+			merged(1, { body: "## Review\n\nRewritten by `quest review` after each round.\n\n- Risk: low\n" }),
+		);
+		expect(r.unreadable).toBeNull();
+		expect(r).toMatchObject({ score: null, rounds: null });
 	});
 
 	test("a PR with no records or checks still has its timing", () => {

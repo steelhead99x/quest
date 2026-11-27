@@ -3,8 +3,8 @@
 // One command owns what a spawn would otherwise script again each time: it
 // strips the coordinating session's harness variables and credentials, so the
 // agent runs on its CLI's own login, and reads the agent's session, reply, and
-// outcome. Its own arguments name the harness, worktree, model, effort, and
-// permission mode, so a permission classifier reading the call sees the whole
+// outcome. Its own arguments name the harness, worktree, model, effort, any
+// advisor, and permission mode, so a permission classifier reading the call sees the whole
 // launch.
 import { type ChildProcess, type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -42,6 +42,8 @@ export interface Launch {
 	harness: HarnessName;
 	model: string;
 	effort: string;
+	/** The model Claude Code's advisor tool consults; only Claude runs one. */
+	advisor?: string;
 	/** Claude Code's `--permission-mode`, or Codex's sandbox mode. */
 	permissionMode: string;
 	worktree: string;
@@ -143,6 +145,17 @@ const claude: Harness = {
 	},
 };
 
+/**
+ * Refuse messages from the person's other Claude Code sessions, and deny the tools to list or send them, so no
+ * other session steers an agent and it cannot steer them. `--settings` outranks user settings; only managed
+ * settings, or a `refuse` in project or local settings, override it. Needs Claude Code 2.1.224 or later; checked
+ * against 2.1.330. A shell can still write to another session's inbox socket: that session closing it is its own setting.
+ */
+const CLOSED_SESSIONS = JSON.stringify({
+	crossSessionInbound: "refuse",
+	permissions: { deny: ["SendMessage", "ListAgents"] },
+});
+
 function claudeFlags(launch: Launch): string[] {
 	return [
 		"claude",
@@ -155,7 +168,19 @@ function claudeFlags(launch: Launch): string[] {
 		launch.effort,
 		"--permission-mode",
 		launch.permissionMode,
+		"--settings",
+		CLOSED_SESSIONS,
+		...(launch.advisor === undefined ? [] : ["--advisor", launch.advisor]),
 	];
+}
+
+/**
+ * What Claude Code needs to honor `--advisor`: without this variable it consults the advisor only where its
+ * server-side rollout flag enables it, and otherwise drops the tool silently, checked against 2.1.330. The variable
+ * is a `CLAUDE*` one `STRIPPED` removes, so it is set here.
+ */
+function advisorEnvironment(launch: Launch): NodeJS.ProcessEnv {
+	return launch.advisor === undefined ? {} : { CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL: "1" };
 }
 
 /** `codex exec --json` streams JSONL events: the thread id first, the reply in the last agent message. */
@@ -471,6 +496,8 @@ export async function runAgent(
 	session: string | undefined,
 	deps: AgentDependencies,
 ): Promise<number> {
+	if (launch.advisor !== undefined && launch.harness !== "claude")
+		throw new AgentInputError(`--advisor runs only on claude, not ${launch.harness}`);
 	let worktree: string;
 	try {
 		worktree = realpathSync(launch.worktree);
@@ -492,13 +519,16 @@ export async function runAgent(
 	const harness = HARNESS[launch.harness];
 	const id = session ?? randomUUID();
 	const [name, ...args] = session === undefined ? harness.start(launch, id) : harness.resume(launch, id);
-	// The CLI is found on PATH, never in the worktree.
-	const program = requireProgram(name, deps.env);
-	const command = checkouts ? undefined : programCommand(program, args, deps.env);
+	// The CLI is found on PATH, never in the worktree. A missing one fails here, before the wait.
+	requireProgram(name, deps.env);
 	const dir = spawnDirectory(deps.base, worktree);
 	// Waited out before the worktree is claimed, so a queued launch holds nothing.
 	const refused = await admitAgent(deps, process.pid);
 	if (refused !== undefined) return refused;
+	// Found again once admitted: `which` returns the file PATH named, which a launcher update during a long wait
+	// may have replaced.
+	const program = requireProgram(name, deps.env);
+	const command = checkouts ? undefined : programCommand(program, args, deps.env);
 
 	const reader = harness.reader();
 	// Claude Code takes the id this command assigns; Codex announces its own.
@@ -582,7 +612,10 @@ export async function runAgent(
 					);
 				};
 				// The agent works in its own checkout, so a location inherited from a Git hook would name the wrong one.
-				const env = discoveryEnv(programEnvironment(strippedEnvironment(deps.env)));
+				const env = {
+					...discoveryEnv(programEnvironment(strippedEnvironment(deps.env))),
+					...advisorEnvironment(launch),
+				};
 				if (command === undefined) {
 					supervised = checkouts!.run(checkout!, [program, ...args], { env, spawned: connect });
 					supervised.catch(reject);

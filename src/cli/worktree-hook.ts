@@ -3,17 +3,16 @@
 // upgrades with the binary.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { git } from "./git";
-import { type StopInput, runningGates } from "./rules";
+import { type StopInput, runningTasks } from "./rules";
 import {
-	Busy,
 	type Merged,
 	type WorktreeRecord,
 	Worktrees,
 	canonical,
 	derivedDefaults,
 	mainCheckout,
+	waiting,
 } from "./worktree";
 
 /** The Claude Code events `quest worktree hook` handles. */
@@ -59,18 +58,6 @@ function field(input: HookInput, key: "name" | "worktree_path" | "agent_id" | "s
 	const value = input[key];
 	if (typeof value !== "string" || value === "") throw new Error(`${input.hook_event_name} input lacks ${key}`);
 	return value;
-}
-
-/** Runs a registry operation, waiting out the short critical sections of concurrent hooks and commands. */
-async function waiting<T>(action: () => T | Promise<T>): Promise<T> {
-	for (;;) {
-		try {
-			return await action();
-		} catch (error) {
-			if (!(error instanceof Busy)) throw error;
-		}
-		await sleep(100);
-	}
 }
 
 /** The top of the checkout holding `cwd`, or undefined outside any. */
@@ -249,7 +236,7 @@ export async function claudeHook(
 		}
 		case "SubagentStop": {
 			// `quest hook` refuses this stop, and Claude continues the subagent without a SubagentStart.
-			if (runningGates(hook as StopInput).length > 0) return undefined;
+			if (runningTasks(hook as StopInput).length > 0) return undefined;
 			const record = await subagentCheckout(worktrees, hook);
 			if (record) await waiting(() => worktrees.release(record.id, [WORKSPACE]));
 			return undefined;

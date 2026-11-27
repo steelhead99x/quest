@@ -105,9 +105,7 @@ export function committedSources(
 ): { sources: CommittedSource[]; exists(path: string): boolean } {
 	const repo = { dir: root };
 	const tree = committed(repo, commit, note, "");
-	const quests = tree.entries.filter(
-		({ mode, type, path }) => type === "blob" && mode !== "120000" && path.startsWith("quest/") && isQuest(path),
-	);
+	const quests = tree.entries.filter(questDocument);
 	if (quests.length === 0) throw new Error(`no quest documents found under ${under(root, "quest")} at ${commit}`);
 
 	// One `cat-file --batch` reads every document: `<oid> blob <size>\n<content>\n` each, in input order.
@@ -121,6 +119,32 @@ export function committedSources(
 		return { path, mode, text };
 	});
 	return { sources: sources.sort((a, b) => comparePaths(a.path, b.path)), exists: tree.exists };
+}
+
+/** Whether `commit`, a commit or a tree, holds any quest document `committedSources` would read. */
+export function hasQuests(root: string, commit: string): boolean {
+	return listTree({ dir: root }, commit, ["--", "quest"]).some(questDocument);
+}
+
+/** A tree entry `committedSources` reads: a regular file under `quest/` that is a quest, not a symlink. */
+function questDocument({ mode, type, path }: Entry): boolean {
+	return type === "blob" && mode !== "120000" && path.startsWith("quest/") && isQuest(path);
+}
+
+/** The blobs and gitlinks under `commit`, recursively, limited to `paths` when it names any. */
+function listTree(repo: Repo, commit: string, paths: string[]): Entry[] {
+	// `<mode> <type> <oid>\t<path>`; run in a work tree, git lists only its subtree, relative to it.
+	const full = "gitdir" in repo ? ["--full-tree"] : [];
+	const entries: Entry[] = [];
+	for (const entry of git(repo, ["ls-tree", ...full, "-r", "-z", commit, ...paths])
+		.toString("utf8")
+		.split("\0")) {
+		if (entry === "") continue;
+		const tab = entry.indexOf("\t");
+		const [mode, type, oid] = entry.slice(0, tab).split(" ");
+		entries.push({ mode, type, oid, path: entry.slice(tab + 1) });
+	}
+	return entries;
 }
 
 /** A repository to read: a work tree, or a submodule's git directory without one. */
@@ -185,19 +209,10 @@ function gitlink(root: string, module: string): string | null {
 
 /** Committed paths, descending into a gitlink only when a link needs its contents. */
 function committed(repo: Repo, commit: string, note: Note | null, prefix: string): Tree {
-	const entries: Entry[] = [];
+	const entries = listTree(repo, commit, []);
 	const paths = new Set<string>();
 	const modules = new Map<string, string>();
-	// `<mode> <type> <oid>\t<path>`; run in a work tree, git lists only its subtree, relative to it.
-	const full = "gitdir" in repo ? ["--full-tree"] : [];
-	for (const entry of git(repo, ["ls-tree", ...full, "-r", "-z", commit])
-		.toString("utf8")
-		.split("\0")) {
-		if (entry === "") continue;
-		const tab = entry.indexOf("\t");
-		const [mode, type, oid] = entry.slice(0, tab).split(" ");
-		const path = entry.slice(tab + 1);
-		entries.push({ mode, type, oid, path });
+	for (const { type, oid, path } of entries) {
 		paths.add(path);
 		for (let dir = path; dir.includes("/");) {
 			dir = dir.slice(0, dir.lastIndexOf("/"));

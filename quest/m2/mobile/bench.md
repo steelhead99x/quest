@@ -27,8 +27,3 @@ settles that the site lives.
 
 - Maintainer: where the site lives, in [the epic](/quest/m2/mobile/README.md)'s
   Waiting.
-
-## Required
-
-- [Sync with upstream](/quest/m2/mobile/sync-upstream.md) - the CLI readers
-  and record shapes this page uses must be upstream's current ones

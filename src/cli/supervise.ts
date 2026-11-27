@@ -73,6 +73,8 @@ export interface RunOptions {
 	within?: string | null;
 	/** The slice the scope runs in; the user manager's default, `app.slice`, when omitted. */
 	slice?: string;
+	/** Reads the CPU microseconds a measured run's cgroup used; `cgroupUsage` when omitted. */
+	usage?(group: string): number | null;
 }
 
 export interface Scopes {
@@ -95,6 +97,12 @@ export interface Scopes {
 /** The command may have started and its scope may still hold processes, so its run stays recorded. */
 export class Retained extends Error {}
 
+/**
+ * How long a run waits for its scope to start. A healthy user manager, even one busy reloading,
+ * starts one in well under this; past it, the manager is stuck and would leave the run waiting silently.
+ */
+export const START_LIMIT = 60_000;
+
 export const UNSUPPORTED =
 	"quest worktree run needs Linux 5.14 or later with a systemd user manager (systemd 254 or later) and unified cgroup v2";
 
@@ -102,12 +110,20 @@ export const UNSUPPORTED =
  * The shell proves it runs in the scope's own v2 cgroup, then waits for the supervisor before it
  * executes the command. A supervisor that died never acknowledges, so the command never starts.
  */
-const handshake =
+const handshake = (hold: boolean) =>
 	"IFS=: read -r hierarchy controllers path </proc/self/cgroup || exit 125; " +
 	'[ "$hierarchy:$controllers" = 0: ] || exit 125; ' +
+	(hold ? HOLD : "") +
 	'printf "%s\\n" "$path" >&3; ' +
 	"read -r admitted <&4 || exit 125; " +
-	'exec 3>&- 4<&-; exec "$@"';
+	`exec 3>&- 4<&-${hold ? " 5<&-" : ""}; exec "$@"`;
+
+/**
+ * Keeps the scope's cgroup until the supervisor has read what it used: systemd removes an empty scope's cgroup as
+ * the command exits, sometimes before the supervisor sees the exit. A process that reads descriptor 5 until the
+ * supervisor closes it, or dies, stays in the cgroup; double-forked, it is no child the command could wait for.
+ */
+const HOLD = "( (read -r _ <&5) 3>&- 4<&- </dev/null >/dev/null 2>&1 & ); ";
 
 function populated(group: string): boolean {
 	try {
@@ -252,6 +268,12 @@ async function stopBound(unit: string): Promise<void> {
 	for (const bound of boundTo(unit)) await systemdScopes.stop(bound);
 }
 
+/** What a measured run ended with: its exit status, and the CPU microseconds its scope used, when they could be read. */
+export interface Measured {
+	status: number;
+	cpu: number | null;
+}
+
 export const systemdScopes: Scopes = {
 	check() {
 		if (process.platform !== "linux" || !killable()) throw new Error(UNSUPPORTED);
@@ -286,40 +308,74 @@ export const systemdScopes: Scopes = {
 	},
 
 	run(unit, cwd, command, options = {}) {
-		// Once the enclosing owner kills everything it holds, systemd kills this scope too.
-		const enclosing = options.within === undefined ? questScope()?.unit : options.within;
-		const bound = enclosing ? [`--property=BindsTo=${enclosing}`, "--property=KillSignal=SIGKILL"] : [];
-		return contain(
-			[
-				"systemd-run",
-				"--user",
-				"--scope",
-				"--quiet",
-				"--collect",
-				`--unit=${unit}`,
-				...bound,
-				...(options.slice ? [`--slice=${options.slice}`] : []),
-				"--expand-environment=no",
-				"--",
-				"/bin/sh",
-				"-c",
-				handshake,
-				"quest-worktree",
-			],
-			(path) => path.endsWith(`/${unit}`),
-			{
-				name: unit,
-				unsupported: UNSUPPORTED,
-				launcher: "systemd-run",
-				emptied: () => stopBound(unit),
-				bound: Boolean(enclosing),
-			},
-			cwd,
-			command,
-			options,
-		);
+		return scoped(unit, cwd, command, options, false).then(({ status }) => status);
 	},
 };
+
+/** Like `systemdScopes.run`, also reading the CPU its scope used once the command exits. */
+export function measuredRun(unit: string, cwd: string, command: string[], options: RunOptions = {}): Promise<Measured> {
+	return scoped(unit, cwd, command, options, true);
+}
+
+function scoped(unit: string, cwd: string, command: string[], options: RunOptions, measure: boolean) {
+	// Once the enclosing owner kills everything it holds, systemd kills this scope too.
+	const enclosing = options.within === undefined ? questScope()?.unit : options.within;
+	const bound = enclosing ? [`--property=BindsTo=${enclosing}`, "--property=KillSignal=SIGKILL"] : [];
+	return contain(
+		[
+			"systemd-run",
+			"--user",
+			"--scope",
+			"--quiet",
+			"--collect",
+			`--unit=${unit}`,
+			...bound,
+			...(options.slice ? [`--slice=${options.slice}`] : []),
+			"--expand-environment=no",
+			"--",
+			"/bin/sh",
+			"-c",
+			handshake(measure),
+			"quest-worktree",
+		],
+		(path) => path.endsWith(`/${unit}`),
+		{
+			name: unit,
+			unsupported: UNSUPPORTED,
+			launcher: "systemd-run",
+			emptied: () => stopBound(unit),
+			abandon() {
+				// Cancels a queued start job outright, so systemd-run exits on its own. Its failure, such
+				// as a manager too stuck to answer, leaves systemd-run waiting, which `contain` handles.
+				const cancel = spawn("systemctl", ["--user", "stop", "--no-block", unit], {
+					env: options.env,
+					stdio: "ignore",
+				});
+				cancel.on("error", () => {});
+				cancel.unref();
+			},
+			bound: Boolean(enclosing),
+			measure,
+		},
+		cwd,
+		command,
+		options,
+	);
+}
+
+/** The CPU microseconds the cgroup used, or null once it is gone. */
+export function cgroupUsage(group: string): number | null {
+	let stat: string;
+	try {
+		stat = readFileSync(join(group, "cpu.stat"), "utf8");
+	} catch (error) {
+		if (["ENOENT", "ENODEV"].includes((error as NodeJS.ErrnoException).code ?? "")) return null;
+		throw error;
+	}
+	const usage = /^usage_usec (\d+)$/m.exec(stat)?.[1];
+	if (usage === undefined) throw new Error(`cannot read the CPU use of ${group}`);
+	return Number(usage);
+}
 
 /** How `contain` names, signals, and shares its run's cgroup. */
 interface Containment {
@@ -331,11 +387,15 @@ interface Containment {
 	launcher: string;
 	/** Stop what the cgroup's end leaves to systemd, once the cgroup is empty. */
 	emptied(): Promise<void>;
+	/** Cancel, without waiting, a start of the cgroup that has not happened yet, so the launcher exits. */
+	abandon(): void;
 	/**
 	 * Whether an enclosing Quest owner kills this cgroup at its own second signal, so a repeated
 	 * signal this process receives, which may be a copy of that owner's, leaves the kill to it.
 	 */
 	bound: boolean;
+	/** Whether to read the CPU the cgroup used once the command exits, holding the cgroup until then (see `HOLD`). */
+	measure: boolean;
 }
 
 /**
@@ -350,7 +410,7 @@ function contain(
 	cwd: string,
 	command: string[],
 	options: RunOptions,
-): Promise<number> {
+): Promise<Measured> {
 	return new Promise((resolve, reject) => {
 		const own = options.cancel ? undefined : interrupts();
 		const cancel = options.cancel ?? own!;
@@ -358,11 +418,14 @@ function contain(
 		const child = spawn(launch[0], [...launch.slice(1), ...command], {
 			cwd,
 			env: options.env,
-			stdio: [pipe, pipe, pipe, "pipe", "pipe"],
+			stdio: [pipe, pipe, pipe, "pipe", "pipe", ...(describe.measure ? ["pipe" as const] : [])],
 		});
 		options.spawned?.(child as ChildProcessWithoutNullStreams);
 		const report = child.stdio[3] as Readable;
 		const admission = (child.stdio as unknown as (Writable | null)[])[4]!;
+		// Closing it releases the process holding the cgroup.
+		const hold = (child.stdio as unknown as (Readable | null)[])[5];
+		hold?.on("error", () => {});
 		let group: string | undefined;
 		let admitted = false;
 		let interrupted = 0;
@@ -373,8 +436,12 @@ function contain(
 		const stop = () => {
 			if (interrupted) return;
 			interrupted = cancelled(cancel.signal);
-			// The shell reads end-of-file and never starts the command.
-			if (!admitted) return admission.destroy();
+			if (!admitted) {
+				// The shell reads end-of-file and never starts the command.
+				admission.destroy();
+				if (group === undefined) describe.abandon();
+				return;
+			}
 			if (!forwards(cancel.signal)) return;
 			const name = requested(cancel.signal);
 			signalled = true;
@@ -397,7 +464,28 @@ function contain(
 			if (group) kill(group);
 		};
 		const unfollow = follow(cancel, stop, terminate);
+		let abandoned = false;
+		// Never killed, the launcher keeps its PID, which a start job queued with it may still adopt
+		// (systemd 254 passes the PID alone); if the cgroup ever starts, its shell finds the
+		// admission closed and exits. So the run settles without the launcher, unwatched.
+		const deadline = setTimeout(() => {
+			if (group !== undefined) return;
+			abandoned = true;
+			admission.destroy();
+			if (!interrupted) describe.abandon();
+			cleanup();
+			for (const stream of child.stdio) stream?.destroy();
+			child.unref();
+			if (interrupted) resolve({ status: interrupted, cpu: null });
+			else
+				reject(
+					new Error(
+						`the systemd user manager did not start ${describe.name} within ${START_LIMIT / 1000} seconds; see \`systemctl --user list-jobs\``,
+					),
+				);
+		}, START_LIMIT);
 		const cleanup = () => {
+			clearTimeout(deadline);
 			unfollow();
 			own?.close();
 		};
@@ -424,6 +512,8 @@ function contain(
 		});
 
 		child.once("error", (error) => {
+			if (abandoned) return;
+			hold?.destroy();
 			cleanup();
 			reject(
 				(error as NodeJS.ErrnoException).code === "ENOENT"
@@ -432,6 +522,16 @@ function contain(
 			);
 		});
 		child.once("exit", async (code, signal) => {
+			if (abandoned) return;
+			let cpu: number | null = null;
+			try {
+				// Read before anything else, while the holder keeps the cgroup; a run cancelled hard may have lost it.
+				if (describe.measure && group) cpu = (options.usage ?? cgroupUsage)(group);
+			} catch (error) {
+				// The reading only informs the record, so it never changes how the run ends.
+				process.stderr.write(`quest: cannot read the CPU ${describe.name} used: ${error}\n`);
+			}
+			hold?.destroy();
 			try {
 				// Descendants that outlive the command are orphans of this run: stop them.
 				if (group) {
@@ -453,7 +553,7 @@ function contain(
 					throw new Error(
 						`${describe.unsupported}: ${describe.launcher} exited with ${code ?? signal} before the command started`,
 					);
-				resolve(interrupted || (code ?? 128 + constants.signals[signal!]));
+				resolve({ status: interrupted || (code ?? 128 + constants.signals[signal!]), cpu });
 			} catch (error) {
 				reject(error);
 			} finally {

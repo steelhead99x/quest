@@ -10,15 +10,15 @@ import {
 	type GitHubDependencies,
 	object,
 	type ObjectValue,
-	type Repository,
 	requirements,
 	string,
 	workflowRuns,
 } from "../github/client";
+import type { Repository } from "../core";
 import { land } from "./hold";
 import { commandEnvironment, contexts, git, type RemoteRead } from "./land";
 import { push, remoteHead } from "./land-head";
-import { Refusal } from "./start";
+import { Refusal } from "../core";
 import { excerpt, save } from "./land-daemon";
 
 /** The one branch each target's bump PR uses. */
@@ -249,7 +249,7 @@ export function contained(checkout: string): void {
 	}
 }
 
-/** The bump PR's body, with a `## Waiting` item for findings, and the recorded review skip. */
+/** The bump PR's body, with a `## Waiting` item for findings. */
 export function bumpBody(options: {
 	source: Repository;
 	input: string;
@@ -280,15 +280,13 @@ export function bumpBody(options: {
 			"",
 			"## Waiting",
 			"",
-			"- Maintainer: `quest check` with the new quest reports findings `--fix` cannot resolve. Fix them on this branch and land it; the next bump replaces this branch's tree.",
+			"- Maintainer (action): `quest check` with the new quest reports findings `--fix` cannot resolve. Fix them on this branch and land it; the next bump replaces this branch's tree.",
 			"",
 			`<pre>${excerpt(options.findings.trimEnd())}</pre>`,
 		);
 	lines.push(
 		"",
-		"## Review",
-		"",
-		"Skipped: pin bump, no repository code changed; CI's quest check is the gate.",
+		"The watcher lands it with no review once CI's quest check passes, since no repository code changed; a maintainer's fix on this branch needs a `quest review` round.",
 		"",
 		"Opened by `quest land watch`, which replaces this branch with each newer bump.",
 	);

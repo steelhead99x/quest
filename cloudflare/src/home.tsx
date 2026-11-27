@@ -187,6 +187,12 @@ export function Offline() {
 			<section class="wrap section">
 				<h1>You're offline</h1>
 				<p>Pages for signed-in repositories aren't kept on this device. Reconnect to see them.</p>
+				{/* The service worker serves this notice in place of the page asked for, so an empty href reloads that page. */}
+				<p>
+					<a class="button primary" href="">
+						Try again
+					</a>
+				</p>
 			</section>
 		</Layout>
 	);

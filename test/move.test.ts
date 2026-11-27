@@ -109,6 +109,11 @@ describe("remove", () => {
 		expect(remove([{ path: "quest/a.md", text: last }], gone).get("quest/a.md")).toBe("# [S] A\n\n## Goal\n\nG.\n");
 	});
 
+	test("keeps a Parked item that opens with a link, so a removal never unparks work", () => {
+		const text = "# M1\n\n## Goal\n\nG.\n\n## Parked\n\n- [B](/quest/b.md) - resume once it lands\n";
+		expect(remove([{ path: "quest/m1/README.md", text }], gone).has("quest/m1/README.md")).toBe(false);
+	});
+
 	test("leaves prose, sections with other content, and other sections alone", () => {
 		const text =
 			"# [S] A\n\n## Goal\n\nAfter [B](/quest/b.md).\n\n- [B](/quest/b.md) in a goal list\n\n" +
@@ -301,7 +306,9 @@ describe("quest mv", () => {
 		const out = await quest(tree, "mv", "quest/m0/epic", "quest/m0/feature");
 		expect(out.code).toBe(1);
 		expect(out.stdout).toBe("");
-		expect(out.stderr).toContain("quest: origin is not on GitHub, so only its branches were checked for claims\n");
+		expect(out.stderr).toContain(
+			"quest: origin is not on GitHub or Kixel Quest, so only its branches were checked for claims\n",
+		);
 		expect(out.stderr).toContain("quest: refusing to move claimed quests: quest/m0/epic/two;");
 		expect(existsSync(join(tree.path, "quest/m0/epic/two.md"))).toBe(true);
 		expect(staged(tree)).toEqual([]);
@@ -377,6 +384,34 @@ describe("quest rm", () => {
 		expect(out.stderr).toContain("quest/m0/solo/design.txt is not a quest document, so rm kept it");
 		expect(existsSync(join(tree.path, "quest/m0/solo/design.txt"))).toBe(true);
 		expect(staged(tree)).toEqual(["D  quest/m0/solo/README.md"]);
+	});
+
+	test("keeps and names an epic's untracked drafts, removing only the quests git tracks", async () => {
+		const tree = committed(
+			Tree.baseline()
+				.write("quest/m0/solo/README.md", "# [S] Solo\n\n## Goal\n\nAlone.\n")
+				.write("quest/m0/solo/done.md", "# [S] Done\n\n## Goal\n\nCommitted.\n"),
+		);
+		const draft =
+			"# [S] Draft\n\n## Goal\n\nNot added yet.\n\n## Required\n\n- [Done](/quest/m0/solo/done.md) - used by the draft.\n";
+		tree.write("quest/m0/solo/draft.md", draft);
+		const out = await quest(tree, "rm", "-r", "quest/m0/solo");
+		// The kept draft now sits in a directory without a README, a finding the user resolves.
+		expect(out.code).toBe(1);
+		expect(out.stdout).toBe("D quest/m0/solo/README.md\nD quest/m0/solo/done.md\n");
+		expect(out.stderr).toContain("quest/m0/solo/draft.md: sits in quest/m0/solo, which has no README.md");
+		expect(out.stderr).toContain("quest/m0/solo/draft.md is an untracked draft, so rm kept it");
+		expect(tree.read("quest/m0/solo/draft.md")).toBe(draft);
+		expect(staged(tree)).toEqual(["?? quest/m0/solo/", "D  quest/m0/solo/README.md", "D  quest/m0/solo/done.md"]);
+	});
+
+	test("refuses to remove a single untracked quest, leaving it in place", async () => {
+		const tree = Tree.committed();
+		tree.write("quest/m0/draft.md", "# [S] Draft\n\n## Goal\n\nNot added yet.\n");
+		const out = await quest(tree, "rm", "quest/m0/draft.md");
+		expect(out.code).toBe(1);
+		expect(out.stderr).toBe("quest: quest/m0/draft.md is an untracked draft; delete it by hand if it should go\n");
+		expect(existsSync(join(tree.path, "quest/m0/draft.md"))).toBe(true);
 	});
 
 	test("treats a quest's file name literally, never as a pattern matching its siblings", async () => {
@@ -597,6 +632,7 @@ test("open pull requests come from every page, by head branch", async () => {
 			const pull = (ref: string, n: number, body: string | null) => ({
 				number: n,
 				head: { ref, repo: n === 1 ? { full_name: "someone/project" } : null },
+				base: { ref: "main" },
 				draft: n === 1,
 				body,
 				created_at: "2026-10-21T12:00:00Z",
@@ -618,6 +654,7 @@ test("open pull requests come from every page, by head branch", async () => {
 			number: 1,
 			url: "https://github.com/example/project/pull/1",
 			branch: "quest/m0/a",
+			base: "main",
 			head: "someone/project",
 			draft: true,
 			...times,
@@ -628,6 +665,7 @@ test("open pull requests come from every page, by head branch", async () => {
 			number: 2,
 			url: "https://github.com/example/project/pull/2",
 			branch: "feature",
+			base: "main",
 			head: null,
 			draft: false,
 			...times,

@@ -1,8 +1,16 @@
 // What a PR body says about breakage: the culprits its `## Caused by` names, and, for a culprit, how it was made and
 // checked, as its own body records it.
-import { type Culprit, FINDERS, type Finder, SIZES, type Seat, type Size, recordedRisk } from "../core";
-import type { Repository } from "../github/client";
-import { recorded } from "./models-record";
+import {
+	type Culprit,
+	type Finder,
+	FINDERS,
+	recordedRisk,
+	type Repository,
+	type Seat,
+	type Size,
+	SIZES,
+} from "../core";
+import { canonicalModel, recorded } from "./models-record";
 import { parseReview } from "./review-record";
 import type { Pull } from "./usage";
 
@@ -59,13 +67,9 @@ export function culprits(body: string, repository: Repository): Cause[] {
  */
 export function culpritOf(pull: Pull): Culprit {
 	const own = recorded(pull.body);
-	let tier: Culprit["tier"] = null;
+	const risk = recordedRisk(pull.body);
+	const tier = risk === null || "malformed" in risk ? null : risk.tier;
 	let reviewers: Seat[] = [];
-	try {
-		tier = recordedRisk(pull.body)?.tier ?? null;
-	} catch {
-		// Malformed: no tier.
-	}
 	try {
 		reviewers = parseReview(pull.body);
 	} catch {
@@ -81,10 +85,12 @@ export function culpritOf(pull: Pull): Culprit {
 	};
 }
 
-/** Each seat once, in first-named order, as several Implementer lines or a shadow may repeat one. */
+/** Each seat once, in first-named order, as several Implementer lines, a shadow, or another spelling may repeat one. */
 function distinct(seats: Seat[]): Seat[] {
 	const seen = new Map<string, Seat>();
-	for (const { harness, model, effort } of seats) {
+	for (const seat of seats) {
+		const { harness, effort } = seat;
+		const model = canonicalModel(seat.model);
 		const id = JSON.stringify([harness, model, effort]);
 		if (!seen.has(id)) seen.set(id, { harness, model, effort });
 	}

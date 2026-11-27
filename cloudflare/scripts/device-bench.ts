@@ -65,14 +65,21 @@ for (const kind of devices) {
 }
 
 const failed = [];
+const uncompared: string[] = [];
+const recorded: string[] = [];
 for (const report of reports) {
 	const file = join(BASELINES, baselineName(report.device));
 	if (values.record) {
 		mkdirSync(BASELINES, { recursive: true });
 		writeFileSync(file, JSON.stringify(baseline(report, new Date().toISOString()), null, "\t") + "\n");
 		console.error(`Recorded ${file}`);
-	} else if (existsSync(file)) failed.push(...compare(JSON.parse(readFileSync(file, "utf8")) as Baseline, report));
-	else console.error(`No baseline for ${report.device.model} at ${file}; run with --record to make one.`);
+		recorded.push(report.device.model);
+	} else if (existsSync(file)) {
+		failed.push(...compare(JSON.parse(readFileSync(file, "utf8")) as Baseline, report));
+	} else {
+		console.error(`No baseline for ${report.device.model} at ${file}; run with --record to make one.`);
+		uncompared.push(report.device.model);
+	}
 }
-process.stdout.write(markdown(reports, failed));
+process.stdout.write(markdown(reports, failed, uncompared, recorded));
 if (failed.length) process.exit(1);

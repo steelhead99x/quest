@@ -1,13 +1,16 @@
 // The quest tree, whose contract is the guide (`quest guide`): parsing its
 // documents, validating them, whether a given quest can be started, and its
-// dependencies.
+// dependencies; and the repository's `quest.toml`, its CI and release tasks.
 //
 // The core is pure: no filesystem, process, or Node APIs, so it runs wherever
 // JavaScript does. Callers load the documents and say which paths exist.
 
 export {
 	type Doc,
+	type Bullet,
 	type Entry,
+	type NestedList,
+	type Part,
 	type Heading,
 	type Link,
 	type Position,
@@ -15,7 +18,9 @@ export {
 	children,
 	entries,
 	has,
+	codeSpan,
 	holds,
+	HOST,
 	type Host,
 	hosts,
 	isQuest,
@@ -34,7 +39,7 @@ export {
 	size,
 } from "./doc";
 export { AUDIT, AUDITS, type Audit, SKIPPED, auditOf, covered, skippedOf } from "./audit";
-export { type ClosedPull, handBackWaits, handedBack, landed, withoutHandBack } from "./claim";
+export { type ClosedPull, handBackProblems, handBackWaits, handedBack, landed, withoutHandBack } from "./claim";
 export {
 	type Counts,
 	type Findings,
@@ -46,24 +51,44 @@ export {
 } from "./review";
 export {
 	ALWAYS_HIGH,
-	DEFAULT,
+	type Class,
+	classesFor,
+	DEFAULT_CLASSES,
 	type HighPath,
 	PATHS,
 	RISK_FILE,
+	type MalformedRisk,
 	type RecordedRisk,
 	type RiskFile,
 	TIERS,
 	type Tier,
+	heldHigh,
+	highHits,
 	matches,
+	offeredClasses,
+	PLANS,
 	parseRiskFile,
 	patternError,
 	recordedRisk,
 	riskier,
+	riskFileId,
 } from "./risk";
+export {
+	MANIFEST_FILE,
+	type Manifest,
+	type ManifestRepo,
+	type ManifestTask,
+	type ParsedManifest,
+	TASK_TIERS,
+	type TaskPick,
+	type TaskTier,
+	parseQuestManifest,
+	pickTasks,
+} from "./manifest";
 export { type Missed, type Moved, type Source, move, promote, relocate, remove } from "./edit";
 export { comparePaths, normalize } from "./path";
-export { type Blocker, blockers, label, lookup, ready, renderBlocker } from "./ready";
-export { type Finding, ROOT, check, formatFinding } from "./rules";
+export { type Blocker, blockers, label, lookup, parked, ready, renderBlocker } from "./ready";
+export { type CheckOptions, type Finding, ROOT, check, formatFinding } from "./rules";
 export {
 	type Draft,
 	type RankedQuest,
@@ -73,7 +98,21 @@ export {
 	unblocked,
 	waiting,
 } from "./unblocked";
-export { MAINTAINER, WAITING, type Wait, onMaintainer, parseWait, waits } from "./waiting";
+export {
+	type Action,
+	type Choice,
+	type Decision,
+	MAINTAINER,
+	type Prose,
+	type ReadWait,
+	WAITING,
+	type Wait,
+	type WaitProblem,
+	onMaintainer,
+	readWait,
+	waitLine,
+	waits,
+} from "./waiting";
 export {
 	ATTRIBUTES_LINE,
 	type Checkout,
@@ -113,13 +152,17 @@ export {
 	breakageKey,
 	parseBreakage,
 } from "./breakage";
+export { COMMAND_LIMIT, type Runs, argvName, commandName, isCommandName } from "./command";
 export {
+	type GatedRun,
 	type ModelSpend,
 	type RecordUpload,
 	ROLES,
 	type Role,
 	type SessionRecord,
 	type SessionWait,
+	type ShellCall,
+	type ShellGroup,
 	SPLIT_CATEGORIES,
 	type SplitCategory,
 	type SplitUsage,
@@ -130,3 +173,65 @@ export {
 	parseRecord,
 	parseUpload,
 } from "./record";
+export {
+	type FindingOutcome,
+	type PostedFinding,
+	type PostedRisk,
+	type PostedRound,
+	RUN_OUTCOMES,
+	type ReviewRun,
+	type ReviewUpload,
+	type RunOutcome,
+	SEATS,
+	SETTLED,
+	type SeatRole,
+	type Settled,
+	parseReviews,
+} from "./reviews";
+export {
+	type Answer,
+	type Check,
+	type Claim,
+	type ClaimSource,
+	type Comment,
+	type ClaimSources,
+	type Duplicate,
+	FORGE_CALLS,
+	type Forge,
+	type ForgeCall,
+	type ForgeCalls,
+	type ForgeInfo,
+	type HoldFact,
+	type Holdings,
+	InputError,
+	Refusal,
+	type ForgeWrites,
+	type Hold,
+	type Method,
+	type Opening,
+	type Pick,
+	FORGE_READS,
+	FORGE_WRITES,
+	type OpenPull,
+	type PostedReview,
+	type PullFiles,
+	type PullRequest,
+	type PullView,
+	type Reaction,
+	type Repository,
+	type Review,
+	type ReviewRecord,
+	type ReviewThread,
+	type Signal,
+	type StarterHold,
+	type Status,
+	type Thread,
+	type WaitEvent,
+	type Watch,
+	type WatchOptions,
+	type WatchPoll,
+	forgeJson,
+	parseForgeAnswer,
+	parseForgeInfo,
+	parseForgeRequest,
+} from "./forge";

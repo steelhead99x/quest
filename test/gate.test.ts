@@ -20,6 +20,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
 	admit,
 	alive,
+	busyCpus,
+	CPU_SAMPLE_MS,
 	COMMAND_MEMORY,
 	claimDirectory,
 	direct,
@@ -33,9 +35,11 @@ import {
 	LEDGER_VERSION,
 	linuxMemory,
 	measure,
+	memoryPeaks,
 	type Owner,
 	owner,
 	processStart,
+	memoryRoom,
 	RECENT_MS,
 	SETTLE_MS,
 	job,
@@ -43,7 +47,8 @@ import {
 } from "../src/cli/gate";
 import { forwards, foregroundStat, statProcess } from "../src/cli/interrupt";
 import { gateBoundary, main } from "../src/cli/main";
-import { alive as ownerAlive, questScope } from "../src/cli/supervise";
+import { measuredRun, alive as ownerAlive, questScope, START_LIMIT } from "../src/cli/supervise";
+import { readWaits } from "../src/cli/waits";
 import { created, onTerminal, run, signalled, tempDir } from "./fixture";
 
 // Linux reports a /proc read that races a process's exit as ESRCH rather than ENOENT, so fail
@@ -90,6 +95,7 @@ function testHost(
 		...fileHost(directory, () => state.now),
 		load: () => state.load,
 		memory: () => state.memory,
+		memoryGroup: () => undefined,
 		sleep: async (ms) => {
 			events.push(`sleep ${ms}`);
 			state.now += ms;
@@ -237,6 +243,104 @@ test("a running command that kept every CPU busy holds the host through a lull i
 	]);
 });
 
+/** A fake `/proc/stat` of `cpus` CPUs, whose aggregate line `advance` adds ticks to. */
+function procStat(cpus: number) {
+	const proc = tempDir();
+	const ticks = { user: 0, nice: 0, system: 0, idle: 0, iowait: 0, irq: 0, softirq: 0, steal: 0, guest: 0 };
+	const write = () => {
+		const line = (name: string) => `${name} ${Object.values(ticks).map(Math.round).join(" ")} 0\n`;
+		const each = Array.from({ length: cpus }, (_, cpu) => line(`cpu${cpu}`)).join("");
+		writeFileSync(join(proc, "stat"), `${line("cpu")}${each}intr 1 0\nprocs_running 90\n`);
+	};
+	write();
+	return {
+		proc,
+		/** Run the CPUs for `ms` at 100 ticks a second, busy `user` of the time and waiting on disk `iowait` of it. */
+		advance(ms: number, user: number, iowait = 0) {
+			const all = (ms / 1000) * 100 * cpus;
+			ticks.user += all * user;
+			// Guest time is counted in user time too.
+			ticks.guest += all * user;
+			ticks.iowait += all * iowait;
+			ticks.idle += all * (1 - user - iowait);
+			write();
+		},
+	};
+}
+
+test("busy CPUs leave out I/O wait, and are measured from samples every gate on the host shares", () => {
+	const { proc, advance } = procStat(4);
+	const file = join(tempDir(), "ledger", "cpu");
+	// The first caller only samples.
+	expect(busyCpus(proc, file, 0)).toBeUndefined();
+	// Three of four CPUs wait on disk, which a load average counts as load, and half of one is busy.
+	advance(CPU_SAMPLE_MS, 0.125, 0.75);
+	expect(busyCpus(proc, file, CPU_SAMPLE_MS)).toBeCloseTo(0.5);
+	// A sample less than CPU_SAMPLE_MS newer is not recorded, so another caller measures from the first.
+	advance(CPU_SAMPLE_MS / 2, 0.125, 0.75);
+	expect(busyCpus(proc, file, 1.5 * CPU_SAMPLE_MS)).toBeCloseTo(0.5);
+	expect(JSON.parse(readFileSync(file, "utf8")).map(({ at }: { at: number }) => at)).toEqual([0, CPU_SAMPLE_MS]);
+	// Measured over the last SETTLE_MS once samples reach that far back: 1.5 s at half a CPU, then two CPUs.
+	advance(SETTLE_MS - 1.5 * CPU_SAMPLE_MS, 0.5);
+	expect(busyCpus(proc, file, SETTLE_MS)).toBeCloseTo(1.55);
+	advance(SETTLE_MS, 0.7);
+	expect(busyCpus(proc, file, 2 * SETTLE_MS)).toBeCloseTo(2.8);
+	// Less than one idle CPU may hide any amount of runnable work.
+	advance(SETTLE_MS, 0.76);
+	expect(busyCpus(proc, file, 3 * SETTLE_MS)).toBe(Infinity);
+	// Samples older than twice that, or dated in the future by a clock stepped backward, are dropped.
+	advance(3 * SETTLE_MS, 0.5);
+	expect(busyCpus(proc, file, 6 * SETTLE_MS)).toBeUndefined();
+	expect(busyCpus(proc, file, SETTLE_MS)).toBeUndefined();
+	// A file cut short reads as no samples.
+	writeFileSync(file, "[");
+	expect(busyCpus(proc, file, SETTLE_MS + CPU_SAMPLE_MS)).toBeUndefined();
+});
+
+test("busy CPUs are measured from the sample nearest SETTLE_MS old", () => {
+	const { proc, advance } = procStat(4);
+	const file = join(tempDir(), "cpu");
+	expect(busyCpus(proc, file, 0)).toBeUndefined();
+	advance(SETTLE_MS, 0);
+	expect(busyCpus(proc, file, SETTLE_MS)).toBe(0);
+	// Of samples 9.9 and 4.9 seconds old, the younger spans only the burst since.
+	advance(SETTLE_MS - 100, 0.9);
+	expect(busyCpus(proc, file, 2 * SETTLE_MS - 100)).toBe(Infinity);
+});
+
+test("a host whose CPUs wait on disk admits, and one whose CPUs are all busy waits", async () => {
+	const { proc, advance } = procStat(4);
+	const file = join(tempDir(), "cpu");
+	const limits = { load: 4, memory: GiB };
+	const state = { now: 0, load: 0, memory: Infinity };
+	// Half a CPU busy and three waiting on disk, which a load average counts as load.
+	const events: string[] = [];
+	const host = testHost(tempDir(), state, events);
+	host.load = () => busyCpus(proc, file, state.now);
+	host.sleep = async (ms) => {
+		events.push(`sleep ${ms}`);
+		state.now += ms;
+		advance(ms, 0.125, 0.75);
+	};
+	// A build admitted long ago still runs, so the load is the gate's to wait out.
+	const build = { id: "build", at: -10 * RECENT_MS, ...me };
+	expect(host.publish(host.ledger(), [build])).toBe(true);
+	// With no sample yet, the first caller waits one sample for it, then starts at once.
+	await admit(limits, host, signal, (reason) => events.push(reason));
+	expect(events).toEqual([`sleep ${CPU_SAMPLE_MS}`]);
+	// A compile burst keeps every CPU busy, so the next waits until a CPU frees.
+	state.now += SETTLE_MS;
+	advance(SETTLE_MS, 0.99);
+	events.length = 0;
+	await admit(limits, host, signal, (reason) => events.push(reason));
+	expect(events).toEqual(["load", `sleep ${SETTLE_MS}`]);
+	expect(host.ledger().admissions).toEqual([
+		build,
+		{ id: expect.any(String), at: CPU_SAMPLE_MS, ...me },
+		{ id: expect.any(String), at: CPU_SAMPLE_MS + 2 * SETTLE_MS, ...me },
+	]);
+});
+
 /** Run `measure` over `busy`, the CPUs its command keeps busy over each SETTLE_MS, undefined before its scope exists; returns what it publishes. */
 async function measured(busy: (number | undefined)[]) {
 	const state = { now: 0, load: 0, memory: Infinity };
@@ -245,6 +349,11 @@ async function measured(busy: (number | undefined)[]) {
 	let usage: number | undefined;
 	let total = 0;
 	host.usage = () => usage;
+	let samples = 0;
+	host.load = () => {
+		samples++;
+		return 0;
+	};
 	const published: string[] = [];
 	const publish = host.publish;
 	host.publish = (base, admissions) => {
@@ -264,7 +373,7 @@ async function measured(busy: (number | undefined)[]) {
 		usage = total;
 	};
 	await measure(host, { id: "build", unit: "quest-gate-build.scope" }, stop.signal);
-	return { published, admissions: host.ledger().admissions };
+	return { published, admissions: host.ledger().admissions, samples };
 }
 
 test("a gate records the most CPUs its command kept busy in the last minute", async () => {
@@ -277,8 +386,10 @@ test("a gate records the most CPUs its command kept busy in the last minute", as
 });
 
 test("a gate records its command's burst before the first sample", async () => {
-	const { published } = await measured([4, ...Array(RECENT_MS / SETTLE_MS).fill(0)]);
+	const { published, samples } = await measured([4, ...Array(RECENT_MS / SETTLE_MS).fill(0)]);
 	expect(published).toEqual([`4 at ${SETTLE_MS}`, `0 at ${SETTLE_MS + RECENT_MS}`]);
+	// Each sample also samples the host's CPUs, for gates arriving meanwhile.
+	expect(samples).toBe(1 + RECENT_MS / SETTLE_MS);
 });
 
 test("a gate records its admission again once another gate drops it, even while its cores hold", async () => {
@@ -304,6 +415,106 @@ test("a gate records its admission again once another gate drops it, even while 
 		{ id: "other", at: 2 * SETTLE_MS, ...me },
 		{ id: "build", at: 0, ...me, cores: 0 },
 	]);
+});
+
+/** The cgroup of a gated build's scope. */
+const buildGroup = "/sys/fs/cgroup/background.slice/quest-gate-build.scope";
+
+/** A gated build admitted at `at`, whose gate recorded its scope's cgroup. */
+const measuredBuild = (at: number) => ({ id: "build", at, ...me, group: buildGroup });
+
+test("a running command's peak beyond what it holds now queues a check that available memory would admit", async () => {
+	const events: string[] = [];
+	// The build peaked at 10 GiB and lulls at 2, so 9 GiB are available but only 1 is free of it.
+	const state = { now: 0, load: 0, memory: 9 * GiB };
+	const host = testHost(tempDir(), state, events);
+	expect(host.publish(host.ledger(), [measuredBuild(-10 * RECENT_MS)])).toBe(true);
+	let build: { current: number; peak: number } | undefined = { current: 2 * GiB, peak: 10 * GiB };
+	host.footprint = (group) => (group === buildGroup ? build : undefined);
+	const sleep = host.sleep;
+	host.sleep = async (ms, signal) => {
+		await sleep(ms, signal);
+		// It ends, and its scope with it.
+		build = undefined;
+	};
+	await admit({ load: 4, memory: 4 * GiB }, host, signal, (reason) => events.push(reason));
+	expect(events).toEqual(["memory", `sleep ${SETTLE_MS}`]);
+});
+
+test("a measured command reserves only what its peak adds beyond what available memory shows", () => {
+	const limits = { load: 8, memory: 4 * GiB };
+	const state = { now: 0, load: 0, memory: 5 * GiB };
+	const directory = tempDir();
+	const host = testHost(directory, state);
+	let footprint = { current: 10 * GiB, peak: 10 * GiB };
+	host.footprint = () => footprint;
+	// At its peak, a build admitted long ago adds nothing to what available memory shows.
+	host.publish(host.ledger(), [measuredBuild(-10 * RECENT_MS)]);
+	expect(memoryRoom(limits, host, 0)).toBe(true);
+	footprint = { current: 8 * GiB, peak: 10 * GiB };
+	expect(memoryRoom(limits, host, 0)).toBe(false);
+	// A recent one, not yet reflected, reserves one command's memory, less what it holds beyond that.
+	footprint = { current: 3 * GiB, peak: 3 * GiB };
+	host.publish(host.ledger(), [measuredBuild(0)]);
+	expect(memoryRoom(limits, host, 0)).toBe(true);
+	// One its gate has not measured yet reserves a whole command's memory, as a kernel without peaks leaves it.
+	host.publish(host.ledger(), [{ id: "build", at: 0, ...me }]);
+	expect(memoryRoom(limits, host, 0)).toBe(false);
+	// So does one whose scope is gone.
+	host.publish(host.ledger(), [measuredBuild(0)]);
+	host.footprint = () => undefined;
+	expect(memoryRoom(limits, host, 0)).toBe(false);
+	// A cgroup other than a gate scope's reads as a version cut short.
+	const outside = `${buildGroup}/../../../../etc/quest-gate-x.scope`;
+	writeFileSync(join(directory, "100"), JSON.stringify([{ id: "build", at: 0, ...me, group: outside }]));
+	expect(host.ledger()).toEqual({ version: 100, admissions: [] });
+});
+
+test("a gate publishes its scope's cgroup once the kernel reports the scope's memory", async () => {
+	const state = { now: 0, load: 0, memory: Infinity };
+	const host = testHost(tempDir(), state);
+	host.publish(host.ledger(), [{ id: "build", at: 0, ...me }]);
+	host.usage = () => 0;
+	// Before the scope exists, then for good.
+	const groups = [undefined, buildGroup, buildGroup, buildGroup];
+	let group: string | undefined;
+	host.memoryGroup = () => group;
+	const published: string[] = [];
+	const publish = host.publish;
+	host.publish = (base, admissions) => {
+		published.push(`${admissions[0].group} at ${state.now}`);
+		return publish(base, admissions);
+	};
+	const stop = new AbortController();
+	host.sleep = async () => {
+		if (groups.length === 0) {
+			stop.abort();
+			throw stop.signal.reason;
+		}
+		state.now += SETTLE_MS;
+		group = groups.shift();
+	};
+	await measure(host, { id: "build", unit: "quest-gate-build.scope" }, stop.signal);
+	expect(published).toEqual([`${buildGroup} at ${2 * SETTLE_MS}`]);
+	expect(host.ledger().admissions).toEqual([{ ...measuredBuild(0), cores: 0 }]);
+});
+
+test("a scope's memory and the kernel's peak are read from cgroup files", () => {
+	const proc = tempDir();
+	const cgroups = tempDir();
+	mkdirSync(join(proc, "self"));
+	writeFileSync(join(proc, "self/cgroup"), "0::/user.slice/gate.scope\n");
+	const scope = join(cgroups, "user.slice/gate.scope");
+	mkdirSync(scope, { recursive: true });
+	expect(memoryPeaks(proc, cgroups)).toBe(false);
+	writeFileSync(join(scope, "memory.peak"), `${10 * GiB}\n`);
+	expect(memoryPeaks(proc, cgroups)).toBe(process.platform === "linux");
+	// Inactive file cache, which available memory counts as free, is not held.
+	writeFileSync(join(scope, "memory.current"), `${10 * GiB}\n`);
+	writeFileSync(join(scope, "memory.stat"), `anon ${2 * GiB}\ninactive_file ${8 * GiB}\n`);
+	const host = fileHost(tempDir());
+	expect(host.footprint(scope)).toEqual({ current: 2 * GiB, peak: 10 * GiB });
+	expect(host.footprint(join(cgroups, "gone.scope"))).toBeUndefined();
 });
 
 test("a priority caller waits for memory, never for load, even while a gated command runs", async () => {
@@ -647,6 +858,39 @@ test.each(["v1", "v2"])("Linux memory counts reclaimable cache and bounds %s con
 	writeFileSync(join(container, "memory.stat"), `${cache} 0\n`);
 	writeFileSync(join(container, usage), String(9 * GiB));
 	expect(linuxMemory(proc, cgroups).available).toBe(0);
+});
+
+test("Linux memory counts the background slice's headroom wherever the caller runs", () => {
+	const proc = tempDir();
+	const cgroups = tempDir();
+	mkdirSync(join(proc, "self"));
+	writeFileSync(join(proc, "meminfo"), `MemTotal: ${(64 * GiB) / 1024} kB\nMemAvailable: ${(24 * GiB) / 1024} kB\n`);
+	// A login session, outside the user manager and so outside the slice.
+	writeFileSync(join(proc, "self/cgroup"), "0::/user.slice/user-1000.slice/session-3.scope\n");
+	writeFileSync(join(cgroups, "cgroup.controllers"), "memory\n");
+	const slice = join(cgroups, "user.slice/user-1000.slice/user@1000.service/background.slice");
+	mkdirSync(slice, { recursive: true });
+	writeFileSync(join(slice, "memory.max"), "max");
+	writeFileSync(join(slice, "memory.high"), "max");
+	writeFileSync(join(slice, "memory.current"), String(30 * GiB));
+	// An uncapped slice leaves the host's answer.
+	expect(linuxMemory(proc, cgroups, 1000)).toEqual({ total: 64 * GiB, available: 24 * GiB });
+	// One at its cap queues the next command while the host has room, and bounds its budget.
+	writeFileSync(join(slice, "memory.high"), String(32 * GiB));
+	expect(linuxMemory(proc, cgroups, 1000)).toEqual({ total: 32 * GiB, available: 2 * GiB });
+	// A command that runs outside the slice, as on the process-group fallback, is not held by it.
+	expect(linuxMemory(proc, cgroups)).toEqual({ total: 64 * GiB, available: 24 * GiB });
+	// Its inactive file cache is reclaimable, so it counts as free.
+	writeFileSync(join(slice, "memory.stat"), `inactive_file ${10 * GiB}\n`);
+	expect(linuxMemory(proc, cgroups, 1000).available).toBe(12 * GiB);
+	writeFileSync(join(slice, "memory.stat"), "inactive_file 0\n");
+	writeFileSync(join(slice, "memory.max"), String(30 * GiB));
+	expect(linuxMemory(proc, cgroups, 1000).available).toBe(0);
+	// Another user's slice, or none yet, is not this caller's.
+	expect(linuxMemory(proc, cgroups, 1001)).toEqual({ total: 64 * GiB, available: 24 * GiB });
+	// The slice's own memory.high bounds a gate that runs inside the user manager too.
+	writeFileSync(join(proc, "self/cgroup"), "0::/user.slice/user-1000.slice/user@1000.service/background.slice\n");
+	expect(linuxMemory(proc, cgroups, 1000).available).toBe(0);
 });
 
 test("Linux memory reads the container cgroup mounted as the root", () => {
@@ -1081,17 +1325,147 @@ describe.runIf(process.platform === "linux")("a systemd scope", () => {
 		await until(() => stopped(pid()));
 	});
 
-	test("reports its CPU use to the gate until it ends", async () => {
+	test("reports its CPU use to the gate until it ends, and in all once it ends", async () => {
 		const host = fileHost(tempDir());
 		const unit = `quest-gate-${randomUUID()}.scope`;
 		const done = join(tempDir(), "done");
 		expect(host.usage(unit)).toBeUndefined();
 		const spin = ["/bin/sh", "-c", `while [ ! -e ${quote(done)} ]; do :; done`];
-		const result = scope(unit)(spin, process.env, cancellation().cancel);
-		await until(() => (host.usage(unit) ?? 0) > 0);
+		const owned = scope(unit);
+		const result = owned(spin, process.env, cancellation().cancel);
+		let seen = 0;
+		await until(() => (seen = host.usage(unit) ?? 0) > 0);
+		// The shell holds memory, which its scope's peak covers.
+		const group = host.memoryGroup(unit);
+		expect(group === undefined).toBe(!memoryPeaks());
+		const held = group === undefined ? undefined : host.footprint(group);
+		if (group !== undefined) expect(held?.peak).toBeGreaterThanOrEqual(held?.current ?? Infinity);
 		writeFileSync(done, "");
 		expect(await result).toBe(0);
+		expect(owned.cpu()).toBeGreaterThanOrEqual(Math.floor(seen / 1000));
 		await until(() => host.usage(unit) === undefined);
+		if (group !== undefined) expect(host.footprint(group)).toBeUndefined();
+	});
+
+	test("keeps a successful command's exit status when its CPU cannot be read", async () => {
+		const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		try {
+			const result = await measuredRun(
+				`quest-gate-${randomUUID()}.scope`,
+				process.cwd(),
+				["/bin/sh", "-c", "exit 0"],
+				{
+					cancel: cancellation().cancel,
+					within: null,
+					usage: () => {
+						throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+					},
+				},
+			);
+			expect(result).toEqual({ status: 0, cpu: null });
+			expect(warn.mock.calls.map(([text]) => String(text)).join("")).toMatch(
+				/cannot read the CPU .* used: .*EACCES/,
+			);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	/**
+	 * Run through a `systemd-run` that never starts the scope, as a stuck user manager leaves it,
+	 * and a `systemctl` that records its arguments and, when `cancels`, ends that `systemd-run` as
+	 * cancelling its start job does; otherwise it hangs, as against a manager too stuck to answer.
+	 */
+	async function neverStarted(cancels: boolean, interrupt: boolean) {
+		const dir = tempDir();
+		const bin = join(dir, "bin");
+		const pid = join(dir, "pid");
+		const args = join(dir, "args");
+		mkdirSync(bin);
+		// The test polls for these files, so each appears only once written whole.
+		const write = (file: string, words: string) =>
+			`echo ${words} > ${quote(`${file}.tmp`)} && mv ${quote(`${file}.tmp`)} ${quote(file)}`;
+		writeFileSync(join(bin, "systemd-run"), `#!/bin/sh\n${write(pid, "$$")}\nexec sleep 1000\n`);
+		writeFileSync(
+			join(bin, "systemctl"),
+			`#!/bin/sh\n${write(join(dir, "cancel"), "$$")}\n${write(args, '"$@"')}\n${cancels ? `kill "$(cat ${quote(pid)})"` : "exec sleep 1000"}\n`,
+		);
+		chmodSync(join(bin, "systemd-run"), 0o755);
+		chmodSync(join(bin, "systemctl"), 0o755);
+		const unit = `quest-gate-${randomUUID()}.scope`;
+		const { stop, cancel } = cancellation();
+		const tick = () => new Promise((resolve) => setImmediate(resolve));
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			let settled = false;
+			const result = measuredRun(unit, process.cwd(), ["/bin/sh", "-c", "exit 0"], {
+				cancel,
+				within: null,
+				env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+			}).then(
+				(measured) => measured,
+				(error: Error) => error,
+			);
+			void result.then(() => (settled = true));
+			while (!existsSync(pid)) await tick();
+			if (interrupt) stop.abort("SIGINT");
+			if (!(interrupt && cancels)) {
+				vi.advanceTimersByTime(START_LIMIT - 1);
+				for (let i = 0; i < 100; i++) await tick();
+				expect(settled).toBe(false);
+				vi.advanceTimersByTime(1);
+			}
+			const outcome = await result;
+			while (!existsSync(args)) await tick();
+			const launcher = Number(readFileSync(pid, "utf8"));
+			return {
+				unit,
+				outcome,
+				args: readFileSync(args, "utf8").trim(),
+				launcherAlive: ownerAlive({ host: hostname(), pid: launcher }),
+			};
+		} finally {
+			vi.useRealTimers();
+			for (const left of [pid, join(dir, "cancel")])
+				try {
+					process.kill(Number(readFileSync(left, "utf8")), "SIGKILL");
+				} catch {
+					// Never started, or already gone.
+				}
+		}
+	}
+
+	test("fails a run whose scope never starts, cancelling its start job without waiting on it", async () => {
+		const { unit, outcome, args, launcherAlive } = await neverStarted(false, false);
+		expect(outcome).toEqual(
+			new Error(
+				`the systemd user manager did not start ${unit} within 60 seconds; see \`systemctl --user list-jobs\``,
+			),
+		);
+		expect(args).toBe(`--user stop --no-block ${unit}`);
+		// Killing it would free its PID for the queued start job to adopt.
+		expect(launcherAlive).toBe(true);
+	});
+
+	test("an interrupt before the scope starts cancels its start job", async () => {
+		const { unit, outcome, args } = await neverStarted(true, true);
+		expect(args).toBe(`--user stop --no-block ${unit}`);
+		expect(outcome).toEqual({ status: 130, cpu: null });
+	});
+
+	test("an interrupted run whose start job cannot be cancelled ends at the start limit", async () => {
+		const { outcome, launcherAlive } = await neverStarted(false, true);
+		expect(outcome).toEqual({ status: 130, cpu: null });
+		expect(launcherAlive).toBe(true);
+	});
+
+	test("reads a short command's CPU however soon systemd removes its scope", async () => {
+		// systemd removes an empty scope's cgroup as its command exits, sometimes before the gate sees the exit.
+		for (let i = 0; i < 20; i++) {
+			const owned = scope(`quest-gate-${randomUUID()}.scope`);
+			expect(await owned(["/bin/sh", "-c", "exit 4"], process.env, cancellation().cancel)).toBe(4);
+			expect(owned.cpu()).not.toBeNull();
+		}
 	});
 });
 
@@ -1507,13 +1881,17 @@ describe.skipIf(process.platform === "win32")("the run record", () => {
 		(process.listeners(name).at(-1) as () => void)();
 	}
 
-	test("an outermost run appends one line with its wait, scope, and exit", async () => {
+	test("an outermost run appends one line with its wait, end, CPU, scope, and exit", async () => {
 		const dir = tempDir();
 		const file = join(dir, "record.jsonl");
 		const cgroup = join(dir, "cgroup");
 		outermost(file);
 		const scoped = owner(process.env).unit !== undefined;
-		const command = ["/bin/sh", "-c", `cat /proc/self/cgroup > ${quote(cgroup)} 2>/dev/null; exit 3`];
+		const command = [
+			"/bin/sh",
+			"-c",
+			`cat /proc/self/cgroup > ${quote(cgroup)} 2>/dev/null; i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done; exit 3`,
+		];
 		const before = Date.now();
 		expect(await gate(command, { host: ledger() })).toBe(3);
 		const after = Date.now();
@@ -1521,12 +1899,42 @@ describe.skipIf(process.platform === "win32")("the run record", () => {
 		expect(rest).toEqual([]);
 		expect(statSync(file).mode & 0o777).toBe(0o600);
 		expect(line).toMatchObject({ command, directory: process.cwd(), exit: 3, cancelled: false, error: null });
-		const times = [before, Date.parse(line.started), Date.parse(line.admitted), after];
+		const times = [before, Date.parse(line.started), Date.parse(line.admitted), Date.parse(line.ended), after];
 		expect(times).toEqual([...times].sort((a, b) => a - b));
 		// The unit names the scope the command actually ran in, so a reader can find its journal lines.
-		if (scoped)
+		if (scoped) {
 			expect(readFileSync(cgroup, "utf8").trim()).toMatch(new RegExp(`/${line.unit.replaceAll(".", "\\.")}$`));
-		else expect(line.unit).toBeNull();
+			expect(line.cpu).toBeGreaterThan(0);
+		} else {
+			expect(line.unit).toBeNull();
+			expect(line.cpu).toBeNull();
+		}
+	});
+
+	test("in an agent session, an outermost run logs its command, wait, run, and CPU for the session's record", async () => {
+		const state = tempDir();
+		outermost("");
+		vi.stubEnv("CLAUDE_CODE_SESSION_ID", "s1");
+		vi.stubEnv("XDG_STATE_HOME", state);
+		const scoped = owner(process.env).unit !== undefined;
+		const spin = ["/bin/sh", "-c", "i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done"];
+		const before = Date.now();
+		expect(await gate(spin, { host: ledger() })).toBe(0);
+		const [line, ...rest] = readWaits(before, { XDG_STATE_HOME: state });
+		expect(rest).toEqual([]);
+		expect(line).toMatchObject({
+			kind: "gate",
+			// Its shell script runs no program but the shell's own builtins.
+			command: "?",
+			sessions: [{ harness: "claude", session: "s1" }],
+			directory: process.cwd(),
+		});
+		if (line?.kind !== "gate") throw new Error("expected a gate line");
+		const times = [before, Date.parse(line.start), Date.parse(line.admitted!), Date.parse(line.end)];
+		expect(times).toEqual([...times].sort((a, b) => a - b));
+		// Only a systemd scope counts its command's CPU.
+		if (scoped) expect(line.cpu).toBeGreaterThan(0);
+		else expect(line.cpu).toBeNull();
 	});
 
 	test("a nested gate records nothing, and an empty variable is unset", async () => {
@@ -1541,7 +1949,7 @@ describe.skipIf(process.platform === "win32")("the run record", () => {
 		expect(readdirSync(dir)).toEqual([]);
 	});
 
-	test("a run cancelled while queued is recorded with no admission or scope", async () => {
+	test("a run cancelled while queued is recorded with no admission, CPU, or scope", async () => {
 		const dir = tempDir();
 		const file = join(dir, "record.jsonl");
 		const ran = join(dir, "ran");
@@ -1555,6 +1963,8 @@ describe.skipIf(process.platform === "win32")("the run record", () => {
 		expect(lines(file)).toEqual([
 			expect.objectContaining({
 				admitted: null,
+				ended: expect.any(String),
+				cpu: null,
 				unit: null,
 				exit: 128 + constants.signals.SIGHUP,
 				cancelled: true,

@@ -1,5 +1,6 @@
 // The rules `quest hook` checks on a tool call, and the shell parsing they rest on.
 
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -38,12 +39,12 @@ test("parse splits commands and attaches redirections and here-documents", () =>
 		{ argv: ["gh", "x"], redirects: [] },
 	]);
 	expect(parse("echo $(git push) # git rebase")).toEqual([
-		{ argv: ["echo", "$(git push)"], redirects: [], expanded: ["$(git push)"], runs: true },
+		{ argv: ["echo", "$(git push)"], redirects: [], expanded: [1], runs: true },
 	]);
 	expect(parse("cat 3<<EOF 4<<<x\n`date`\nEOF")).toEqual([{ argv: ["cat"], redirects: [], runs: true }]);
 	expect(parse("cat 3< in")).toEqual([{ argv: ["cat"], redirects: [{ op: "<", target: "in", fd: 3 }] }]);
 	expect(parse("cat <<EOF\n$x\nEOF")).toEqual([{ argv: ["cat"], redirects: [], stdin: "$x\n", stdinExpanded: true }]);
-	expect(parse("echo '$x' \"a $y\"")).toEqual([{ argv: ["echo", "$x", "a $y"], redirects: [], expanded: ["a $y"] }]);
+	expect(parse("echo '$x' \"a $y\"")).toEqual([{ argv: ["echo", "$x", "a $y"], redirects: [], expanded: [2] }]);
 	expect(parse("cat <<-END\n\tbody\n\tEND")).toEqual([{ argv: ["cat"], redirects: [], stdin: "body\n" }]);
 });
 
@@ -197,6 +198,18 @@ test("a new GitHub post needs the footer and no em dashes; edits and bodies off 
 	expect(bash("gh api -XPATCH repos/o/r/pulls/5 -fbody=Done")).toEqual([]);
 	expect(bash("gh pr comment 5 --edit-last --create-if-none --body Done")).toEqual([]);
 	expect(bash("gh pr review 5 --approve")).toEqual([]);
+	// quest pr posts the same way, on GitHub or Kixel Quest.
+	expect(bash('quest pr comment 5 --body "Done."')).toEqual([RULES.footer]);
+	expect(bash('bun run --silent quest --root . pr comment 5 --body "Done."')).toEqual([RULES.footer]);
+	expect(bash("quest gate --help && quest --root . gate git push")).toEqual([RULES.refspec]);
+	expect(bash("if git push; then echo ok; fi")).toEqual([RULES.refspec]);
+	expect(bash("/bin/bash -lc 'git push'")).toEqual([RULES.refspec]);
+	expect(bash('quest --root .worktrees/a pr comment 5 --body "Done."')).toEqual([RULES.footer]);
+	expect(bash('quest --root=. pr comment 5 --body "Done."')).toEqual([RULES.footer]);
+	expect(bash(`quest pr comment 5 --thread T -b "Done ${DASH} mostly.\n\n${FOOTER}"`)).toEqual([RULES.emDash]);
+	expect(bash(`quest pr create -t "a ${DASH} b" -b "Body\n\n${FOOTER}"`)).toEqual([RULES.emDash]);
+	expect(bash("quest pr edit 5 --body Done")).toEqual([]);
+	expect(bash("quest pr resolve 5 T")).toEqual([]);
 	expect(bash("cat .tmp/body.md | gh pr comment 5 --body-file -")).toEqual([]);
 	expect(bash('gh pr comment 5 --body "$body"')).toEqual([]);
 	expect(bash("gh pr comment 5 --body-file - <<EOF\n$(cat .tmp/body.md)\nEOF")).toEqual([]);
@@ -276,8 +289,199 @@ test("a body file is read only for a command alone on its line", () => {
 	expect(bash(`git -C sub commit -F - <<'EOF'\nfix: a ${DASH} b\nEOF`)).toEqual([RULES.emDash]);
 });
 
+test("a question dialog recommends an option in each question offering two or more", () => {
+	const ask = (tool: string, ...questions: unknown[]) => broken({ tool, input: { questions }, cwd });
+	const labeled = (...labels: string[]) => ({ question: "Which?", options: labels.map((label) => ({ label })) });
+	// Claude Code's options are objects; every question with two or more options needs one recommended.
+	expect(ask("AskUserQuestion", labeled("A (Recommended)", "B"), labeled("Yes"))).toEqual([]);
+	expect(ask("AskUserQuestion", labeled("A (Recommended)", "B"), labeled("C", "D"))).toEqual([RULES.recommend]);
+	expect(ask("AskUserQuestion", labeled("A", "b (recommended)  "))).toEqual([]);
+	// The marker ends the label: one naming it elsewhere recommends nothing.
+	expect(ask("AskUserQuestion", labeled("(Recommended) A", "B"))).toEqual([RULES.recommend]);
+	// Codex's options may be absent, null, or empty for a free-form question, or plain strings.
+	for (const tool of ["request_user_input", "request_user_input_async"]) {
+		expect(ask(tool, { question: "Why?" }, { question: "How?", options: null }, { options: [] })).toEqual([]);
+		expect(ask(tool, { options: ["A (Recommended)", "B"] })).toEqual([]);
+		expect(ask(tool, { options: ["A", "B"] })).toEqual([RULES.recommend]);
+	}
+	// Input the tool would refuse anyway passes, as does another tool's.
+	expect(broken({ tool: "AskUserQuestion", input: {}, cwd })).toEqual([]);
+	expect(ask("AskUserQuestion", null, { options: [null, 1] })).toEqual([RULES.recommend]);
+	expect(ask("Agent", labeled("A", "B"))).toEqual([]);
+});
+
+test("pkill and killall are blocked, while --help and pid-based kill pass", () => {
+	expect(bash("pkill -f vite")).toEqual([RULES.pkill]);
+	expect(bash("killall node")).toEqual([RULES.pkill]);
+	expect(bash("/usr/bin/pkill -9 foo")).toEqual([RULES.pkill]);
+	expect(bash("bash -c 'pkill foo'")).toEqual([RULES.pkill]);
+	expect(bash("printf '%s\\n' vite | xargs pkill -f")).toEqual([RULES.pkill]);
+	expect(bash("printf '%s\\n' vite | xargs --replace pkill -f {}")).toEqual([RULES.pkill]);
+	expect(bash("printf '%s\\n' node | xargs -n 1 -I {} killall {}")).toEqual([RULES.pkill]);
+	expect(bash("pkill --help")).toEqual([]);
+	expect(bash("kill -TERM 12345")).toEqual([]);
+});
+
+test("plain cargo test is denied where the workspace's nextest kills hung tests", () => {
+	const DENIED = `${RULES.nextest} If the user asked for this in their own words, prefix the command with \`${USER_ASKED}\`.`;
+	const KILLS = '[profile.default]\nslow-timeout = { period = "30s", terminate-after = 2 }\n';
+	const workspace = (dir: string, nextest?: string) => {
+		mkdirSync(join(dir, ".config"), { recursive: true });
+		writeFileSync(join(dir, "Cargo.toml"), '[workspace]\nmembers = ["crates/*"]\n');
+		if (nextest !== undefined) writeFileSync(join(dir, ".config", "nextest.toml"), nextest);
+	};
+	mkdirSync(join(cwd, ".git"));
+	expect(bash("cargo test -p moq-net -- lost_group")).toEqual([]);
+	// A config that never kills a hung test, even with the setting commented out, loses nothing to plain cargo test.
+	workspace(cwd, '[profile.default]\n# slow-timeout = { period = "30s", terminate-after = 2 }\nretries = 0\n');
+	expect(bash("cargo test")).toEqual([]);
+	workspace(cwd, KILLS);
+	for (const command of [
+		"cargo test -p moq-net -- lost_group",
+		"cargo +nightly --locked test --workspace",
+		"cargo --config build.jobs=4 t",
+		"mbx test -p clients --bin load subscribe::tests > .tmp/load.log 2>&1",
+		"quest gate nix develop -c cargo test -p clients",
+		"bash -c 'cargo test'",
+		"cargo test --manifest-path Cargo.toml",
+	])
+		expect(bash(command), command).toEqual([DENIED]);
+	for (const command of [
+		"cargo nextest run -p moq-net lost_group",
+		"cargo test --doc -p moq-net",
+		"cargo test --no-run",
+		"cargo test --help",
+		"cargo -C ../other test",
+		"cd ../other && cargo test",
+		"cargo test --manifest-path $DIR/Cargo.toml",
+		"cargo build --tests",
+		"just test",
+		`${USER_ASKED} cargo test -p moq-net --lib`,
+	])
+		expect(bash(command), command).toEqual([]);
+	// A member crate below the workspace root takes the root's configuration.
+	mkdirSync(join(cwd, "crates", "a"), { recursive: true });
+	writeFileSync(join(cwd, "crates", "a", "Cargo.toml"), '[package]\nname = "a"\n');
+	const at = (dir: string, command: string) => broken({ tool: "Bash", input: { command }, cwd: dir });
+	expect(at(join(cwd, "crates", "a"), "cargo test")).toEqual([DENIED]);
+	// A workspace of its own inside the checkout takes its own, and a manifest selects the workspace it names.
+	workspace(join(cwd, "standalone"));
+	expect(at(join(cwd, "standalone"), "cargo test")).toEqual([]);
+	expect(at(join(cwd, "standalone"), "cargo test --manifest-path ../Cargo.toml")).toEqual([DENIED]);
+	expect(bash("cargo test --manifest-path=standalone/Cargo.toml")).toEqual([]);
+});
+
 test("docs/context.md is the rules `quest context` prints, for agents without the CLI", () => {
 	expect(readFileSync(join(import.meta.dirname, "../docs/context.md"), "utf8")).toBe(
 		`${CONTEXT}\n${CHECKED_CONTEXT}`,
 	);
+});
+
+test("gh calls reaching for a repository Kixel Quest hosts are denied, naming the quest command", () => {
+	const env = { QUEST_KIXEL_URL: "http://localhost:8787" };
+	const clone = (origin: string) => {
+		execFileSync("git", ["init", "-q", cwd]);
+		execFileSync("git", ["-C", cwd, "remote", "add", "origin", origin]);
+	};
+	const run = (command: string) => broken({ tool: "Bash", input: { command }, cwd }, env);
+	const instead = (command: string) => `${RULES.kixel} Run \`${command}\` instead.`;
+
+	clone("http://localhost:8787/example/project.git");
+	expect(run("gh pr view 3 --comments")).toEqual([instead("quest pr view")]);
+	expect(run("gh pr checks 3 | tail -5")).toEqual([instead("quest status")]);
+	expect(run("gh pr view http://localhost:8787/example/project/pull/3")).toEqual([instead("quest pr view")]);
+	expect(run("gh pr view 3 -R Example/Project")).toEqual([instead("quest pr view")]);
+	expect(run("GH_REPO=example/project gh pr diff 3")).toEqual([RULES.kixel]);
+	expect(run("gh api 'repos/{owner}/{repo}/pulls/3/comments'")).toEqual([RULES.kixel]);
+	expect(run("gh api --paginate /repos/example/project/pulls/3/files")).toEqual([RULES.kixel]);
+	expect(run("bash -c 'gh pr list'")).toEqual([instead("quest pr list")]);
+	expect(run("gh pr list --limit 1000 --json number,url,files")).toEqual([instead("quest pr list")]);
+	// A call naming another repository, or one gh could not tell, reaches GitHub as asked.
+	expect(run("gh pr view 3 -R localhost:8787/example/project")).toEqual([instead("quest pr view")]);
+	expect(run("gh pr view 3 -R moq-dev/quest")).toEqual([]);
+	// `-R` is persistent on `gh pr`, so it may come before the subcommand.
+	expect(run("gh pr -R moq-dev/quest view 3")).toEqual([]);
+	expect(run("gh pr --repo=moq-dev/quest view 3")).toEqual([]);
+	expect(run("gh pr -R example/project view 3")).toEqual([instead("quest pr view")]);
+	// The first denied call's pointer survives a later one with none.
+	expect(run("gh pr view 3 --json body && gh pr diff 3")).toEqual([instead("quest pr view")]);
+	expect(run("gh pr diff 3 && gh pr view 3")).toEqual([instead("quest pr view")]);
+	// The same name on another forge is another repository.
+	expect(run("gh pr view https://github.com/example/project/pull/3")).toEqual([]);
+	expect(run("gh pr view 3 -R github.com/example/project")).toEqual([]);
+	expect(run("gh api https://api.github.com/repos/example/project/pulls")).toEqual([]);
+	// A boolean short flag does not take the URL after it for its value.
+	expect(run("gh pr review -a https://github.com/moq-dev/quest/pull/12")).toEqual([]);
+	expect(run("gh pr merge -s -r https://github.com/moq-dev/quest/pull/12")).toEqual([]);
+	expect(run("gh pr review -a http://localhost:8787/example/project/pull/1")).toEqual([instead("quest pr comment")]);
+	// A URL in an option's value, such as a body, is not the PR.
+	expect(
+		run(`gh pr comment 3 -R moq-dev/quest --body "See http://localhost:8787/example/project/pull/1.\n\n${FOOTER}"`),
+	).toEqual([]);
+	expect(run("gh pr view https://github.com/moq-dev/quest/pull/3")).toEqual([]);
+	expect(run("GH_REPO=moq-dev/quest gh api 'repos/{owner}/{repo}/pulls'")).toEqual([]);
+	// gh fills each placeholder from `GH_REPO`, so the endpoint can still name another repository.
+	expect(run("GH_REPO=example/project gh api 'repos/{owner}/other/pulls'")).toEqual([]);
+	expect(run("GH_REPO=example/other gh api 'repos/{owner}/project/pulls'")).toEqual([RULES.kixel]);
+	expect(run("GH_REPO=example/project gh api 'repos/:owner/:repo/pulls'")).toEqual([RULES.kixel]);
+	expect(run("GH_REPO=example/project gh api graphql -F owner='{owner}' -f query=q")).toEqual([RULES.kixel]);
+	// Filled placeholders keep `GH_REPO`'s host, or `--hostname` over it.
+	expect(run("GH_REPO=github.com/example/project gh api 'repos/{owner}/{repo}/pulls'")).toEqual([]);
+	expect(run("GH_REPO=https://github.com/example/project gh api 'repos/{owner}/{repo}/pulls'")).toEqual([]);
+	expect(run("GH_REPO=localhost:8787/example/project gh api 'repos/{owner}/{repo}/pulls'")).toEqual([RULES.kixel]);
+	expect(run("GH_REPO=http://localhost:8787/example/project gh api 'repos/{owner}/{repo}/pulls'")).toEqual([
+		RULES.kixel,
+	]);
+	expect(run("GH_REPO=github.com/example/project gh api graphql -F owner='{owner}' -f query=q")).toEqual([]);
+	expect(run("GH_REPO=example/project gh api --hostname github.com graphql -F owner='{owner}' -f query=q")).toEqual(
+		[],
+	);
+	expect(
+		run("GH_REPO=github.com/example/project gh api --hostname localhost:8787 'repos/{owner}/{repo}/pulls'"),
+	).toEqual([RULES.kixel]);
+	expect(run("gh api repos/moq-dev/quest/pulls/3")).toEqual([]);
+	expect(run("gh api graphql -f query='{ viewer { login } }'")).toEqual([]);
+	expect(run("gh api user")).toEqual([]);
+	expect(run("gh pr view --help")).toEqual([]);
+	expect(run("gh issue list")).toEqual([]);
+	// After a cd, gh may run in another checkout; before it, gh runs in this one.
+	expect(run("cd ../other && gh pr view 3")).toEqual([]);
+	expect(run("if cd ../other; then gh pr view 3; fi")).toEqual([]);
+	expect(run("if true; then gh pr view 3; fi")).toEqual([instead("quest pr view")]);
+	expect(run("gh pr view 3; cd ..")).toEqual([instead("quest pr view")]);
+	// An expanded selector, repository, or host could name any repository.
+	expect(run('gh pr view "$PR_URL"')).toEqual([]);
+	expect(run('gh pr view 3 -R "$REPO"')).toEqual([]);
+	expect(run('GH_REPO="$REPO" gh pr view 3')).toEqual([]);
+	expect(run('gh api "repos/$REPO/pulls"')).toEqual([]);
+	expect(run('gh pr view 3 --repo="$REPO"')).toEqual([]);
+	expect(run('sh -c "gh pr view \\"\\$PR_URL\\""')).toEqual([]);
+	// Only the expanded word is unknown, even when its text ends with a literal one's.
+	expect(run('gh pr comment 3 --body "$(cat notes.md)"')).toEqual([instead("quest pr comment")]);
+	expect(run('gh pr comment 3 --body "see $X 3"')).toEqual([instead("quest pr comment")]);
+	expect(run('gh pr view 3 -R example/project --json "$F,example/project"')).toEqual([instead("quest pr view")]);
+	expect(run('sh -c "echo $X; gh pr view 3"')).toEqual([instead("quest pr view")]);
+	// `--hostname` names the host the endpoint's repository is on.
+	expect(run("gh api --hostname github.com repos/example/project/pulls")).toEqual([]);
+	expect(run("gh api --hostname localhost:8787 repos/example/project/pulls")).toEqual([RULES.kixel]);
+	// gh fills placeholders in the endpoint and `-F` fields, never in `-f` ones.
+	expect(run("gh api repos/moq-dev/quest/pulls -f title='{owner}'")).toEqual([]);
+	expect(run("gh api graphql -F owner='{owner}' -f query=q")).toEqual([RULES.kixel]);
+	expect(
+		broken({ tool: "Bash", input: { command: "gh pr view 3" }, cwd }, { ...env, GH_REPO: "moq-dev/quest" }),
+	).toEqual([]);
+	// The post checks still run beside it.
+	expect(run('gh pr comment 3 --body "Done."')).toEqual([RULES.footer, instead("quest pr comment")]);
+	expect(run('gh pr -R moq-dev/quest comment 3 --body "Done."')).toEqual([RULES.footer]);
+});
+
+test("gh calls in a checkout whose origin is on GitHub, or that has none, pass", () => {
+	const env = { QUEST_KIXEL_URL: "http://localhost:8787" };
+	const run = (command: string) => broken({ tool: "Bash", input: { command }, cwd }, env);
+	expect(run("gh pr view 3")).toEqual([]);
+	execFileSync("git", ["init", "-q", cwd]);
+	expect(run("gh pr view 3")).toEqual([]);
+	execFileSync("git", ["-C", cwd, "remote", "add", "origin", "https://github.com/example/project.git"]);
+	expect(run("gh pr view 3")).toEqual([]);
+	expect(run("gh api 'repos/{owner}/{repo}/pulls'")).toEqual([]);
 });
