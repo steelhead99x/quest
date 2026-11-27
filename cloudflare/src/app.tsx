@@ -13,7 +13,7 @@ import { BenchPage } from "./bench/page.tsx";
 import { cached } from "./cache.ts";
 import { Offline } from "./home.tsx";
 import { CiElsewhere, Dispatch, PullCi, RunList } from "./ci.tsx";
-import { checks, dispatch, Refused, rerunFailed, runs } from "./github/ci.ts";
+import { checks, dispatch, Refused, rerunFailed, type Runs, runs } from "./github/ci.ts";
 import { Home, Message } from "./home.tsx";
 import type { User } from "./layout.tsx";
 import { local, open, pending, SESSION, type Session, STATE, seal, session } from "./session.ts";
@@ -144,13 +144,27 @@ export function app(deps: Deps): App {
 		const path = new URL(c.req.url).pathname;
 		const repository = b.tree.repository;
 		const github = c.get("github").withToken(c.get("session")!.token);
-		const recent = await runs(github, repository, { branch: b.tree.branch }, deps.now(), 5);
+		// The board is the quest tree; CI is one panel of it. GitHub refusing the runs, such as an App
+		// without Actions access, says so there rather than taking the board down. An expired token still
+		// throws, so the person signs in again.
+		let recent: Runs = { runs: [], more: false };
+		let ciError: string | undefined;
+		try {
+			recent = await runs(github, repository, { branch: b.tree.branch }, deps.now(), 5);
+		} catch (error) {
+			if (!(error instanceof GitHubError) || error.status === 401) throw error;
+			ciError =
+				error.status === 403 || error.status === 404
+					? `GitHub refused this repository's workflow runs (${error.status}).`
+					: `GitHub couldn't list this repository's workflow runs (${error.status}).`;
+		}
 		return c.html(
 			<BoardPage b={b} user={user(c.get("session"))!} path={path}>
 				<RunList
 					title={`CI on ${b.tree.branch}`}
 					runs={recent.runs}
 					more={recent.more}
+					error={ciError}
 					repository={repository}
 					next={path}
 					link={`${b.tree.url}/actions?query=branch%3A${encodeURIComponent(b.tree.branch)}`}

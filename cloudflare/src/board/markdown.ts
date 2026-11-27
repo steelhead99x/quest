@@ -13,8 +13,39 @@ export interface Links {
 	blob(path: string, fragment: string): string;
 }
 
-/** One `## ` section of a quest, rendered. */
-export type Section = { heading: string; html: string };
+/** One `## ` section of a quest, rendered, with the id its heading's anchor links use. */
+export type Section = { heading: string; id: string; html: string };
+
+/**
+ * Heading ids as GitHub makes them, so a quest's `#details` links jump on the board as on GitHub: the heading's
+ * text in lower case, without punctuation but for hyphens and underscores, spaces as hyphens, and a repeat
+ * numbered -1, -2, and so on through the document.
+ */
+export class Slugger {
+	#seen = new Map<string, number>();
+
+	slug(text: string): string {
+		const base = text
+			.toLowerCase()
+			.trim()
+			.replace(/[^\p{L}\p{M}\p{N}\p{Pc}\- ]/gu, "")
+			.replace(/ /g, "-");
+		const n = this.#seen.get(base);
+		this.#seen.set(base, (n ?? -1) + 1);
+		return n === undefined ? base : `${base}-${n + 1}`;
+	}
+}
+
+/** The text a reader sees in rendered inline HTML: tags dropped, entities decoded. */
+function visible(html: string): string {
+	return html
+		.replace(/<[^>]*>/g, "")
+		.replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+		.replace(/&amp;/g, "&")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, '"');
+}
 
 function escape(text: string): string {
 	return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -38,6 +69,7 @@ export function rewrite(links: Links, from: string, href: string): string | null
 
 /** The document's `## ` sections in order, each rendered to HTML. The `# ` title is left to the page. */
 export function render(links: Links, path: string, content: string): Section[] {
+	const slugger = new Slugger();
 	const marked = new Marked({
 		gfm: true,
 		renderer: {
@@ -55,7 +87,8 @@ export function render(links: Links, path: string, content: string): Section[] {
 			// Section headings belong to the page; deeper ones step down below them.
 			heading({ tokens, depth }) {
 				const level = Math.min(depth + 1, 6);
-				return `<h${level}>${this.parser.parseInline(tokens)}</h${level}>\n`;
+				const inner = this.parser.parseInline(tokens);
+				return `<h${level} id="${escape(slugger.slug(visible(inner)))}">${inner}</h${level}>\n`;
 			},
 		},
 	});
@@ -70,5 +103,10 @@ export function render(links: Links, path: string, content: string): Section[] {
 			sections.push({ heading: "", tokens: [token] });
 		}
 	}
-	return sections.map(({ heading, tokens }) => ({ heading, html: marked.parser(tokens) }));
+	// In document order, so a repeated heading's number matches GitHub's.
+	return sections.map(({ heading, tokens }) => ({
+		heading,
+		id: heading ? slugger.slug(visible(marked.parseInline(heading, { async: false }))) : "",
+		html: marked.parser(tokens),
+	}));
 }

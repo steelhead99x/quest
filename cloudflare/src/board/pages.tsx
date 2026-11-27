@@ -351,7 +351,7 @@ export function QuestPage(props: { b: Board; path: string; doc: string; user: Us
 				<div class="quest-page">
 					{sections.map((s) => (
 						<section>
-							{s.heading && <h2>{s.heading}</h2>}
+							{s.heading && <h2 id={s.id}>{s.heading}</h2>}
 							{raw(s.html)}
 						</section>
 					))}

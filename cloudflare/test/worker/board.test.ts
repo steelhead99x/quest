@@ -328,6 +328,30 @@ describe("CI", () => {
 		expect(html).toContain("Needs inputs");
 	});
 
+	test("an Actions refusal keeps the board up, saying so in its CI panel", async () => {
+		const h = harness({
+			...routes(),
+			[RUNS]: () => json({ message: "Resource not accessible by integration" }, 403),
+		});
+		const response = await h.request("/repos/moq-dev/quest", { cookies: [await signedIn()] });
+		expect(response.status).toBe(200);
+		const html = await response.text();
+		// The quests still show.
+		expect(html).toContain("Ready to start");
+		expect(html).toContain("Alpha");
+		const ci = html.slice(html.indexOf('<section class="block ci">'));
+		expect(ci).toContain("GitHub refused this repository&#39;s workflow runs (403).");
+		expect(ci.slice(0, ci.indexOf("</section>"))).not.toContain('<ul class="log">');
+		expect(ci).toContain('href="https://github.com/moq-dev/quest/actions?query=branch%3Amain"');
+		expect(ci).not.toContain("No runs yet.");
+	});
+
+	test("an expired token on the board's CI still asks the person to sign in again", async () => {
+		const h = harness({ ...routes(), [RUNS]: () => json({ message: "Bad credentials" }, 401) });
+		const response = await h.request("/repos/moq-dev/quest", { cookies: [await signedIn()] });
+		expect(response.status).not.toBe(200);
+	});
+
 	test("reads workflow names and triggers from the YAML, not from its text", () => {
 		expect(workflows(WORKFLOWS.entries)).toEqual([
 			{ file: "broken.yml", name: "broken.yml", dispatch: false, inputs: false },
