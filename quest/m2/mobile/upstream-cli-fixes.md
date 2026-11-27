@@ -20,13 +20,18 @@ with its test. All four bugs are still on upstream's `main` as of 9029c02:
 
 ## Plan
 
-- Branch `quest/m2/mobile/upstream-cli-fixes` holds the fixes, rebuilt on
-  upstream's 9029c02 with a test each: the four above, plus two to the new
+- Branch `quest/m2/mobile/upstream-cli-fixes` holds the fixes, rebased on
+  upstream's b930f58 with a test each: the four above, plus two to the new
   `quest rm` from the fork's reviews, so an epic's untracked drafts stay on
   disk, unedited and unstaged. The installer scripts were redone against
   upstream's current ones (it renamed moq-dev/quest to kixel-ai/quest in
   a57434c).
-- Rebase it on upstream's `main` again if that moved before the PR opens.
+- Branch `quest/m2/mobile/upstream-run-fixes`, on b930f58, fixes two bugs in
+  upstream's new `quest run` (#939), each with a test, as its own draft PR: a
+  run executes only this host's tasks (`--os` names another only with
+  `--query`), and two runs in one checkout can't take over each other's
+  report files.
+- Rebase both on upstream's `main` again if that moved before the PRs open.
 - Follow upstream's current `quest context` for the PR body: its telemetry
   epic is moving `Implementer:` and `## Review` lines out of PR bodies.
 - Draft only: the contributor may open drafts on kixel-ai/quest and nothing
@@ -37,6 +42,6 @@ without its fix.
 
 ## Waiting
 
-- Contributor: open the draft PR on kixel-ai/quest from that branch, with
-  `gh pr create --draft -R kixel-ai/quest --head steelhead99x:quest/m2/mobile/upstream-cli-fixes`.
+- Contributor: open the two draft PRs on kixel-ai/quest from those branches,
+  with `gh pr create --draft -R kixel-ai/quest --head steelhead99x:<branch>`.
   An agent session here cannot: it has no GitHub API access to kixel-ai/quest.
