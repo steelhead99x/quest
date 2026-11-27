@@ -183,7 +183,7 @@ export function Message(props: {
 /** What the service worker shows offline in place of a page it may not keep. */
 export function Offline() {
 	return (
-		<Layout title="Offline" description="You're offline." path="/offline" user={null}>
+		<Layout title="Offline" description="You're offline." path="/offline" user={null} offlineNotice>
 			<section class="wrap section">
 				<h1>You're offline</h1>
 				<p>Pages for signed-in repositories aren't kept on this device. Reconnect to see them.</p>

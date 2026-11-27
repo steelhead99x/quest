@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { CONTROLLED_SCRIPT } from "../device/driver.ts";
+import { CONTROLLED_SCRIPT, OFFLINE_NOTICE_SCRIPT } from "../device/driver.ts";
 import { Offline } from "../device/offline.ts";
 import { Rpc } from "../device/rpc.ts";
 import { sleep } from "../device/shell.ts";
@@ -155,6 +155,9 @@ try {
 		try {
 			await go(`${base}/repos/steelhead99x/quest`);
 			await expectText("You're offline");
+			// The device bench tells the notice from the page asked for by this mark.
+			if ((await value<boolean>(OFFLINE_NOTICE_SCRIPT)) !== true)
+				throw new Error("the offline notice doesn't mark itself for the device bench");
 			const body = await value<string>("document.body.innerText");
 			if (body.includes("Ready to start")) throw new Error("the board's private content was served offline");
 			const kept = await value<string[]>(KEPT, true);

@@ -5,7 +5,9 @@ import {
 	type Driver,
 	type Installable,
 	type Load,
+	type OfflineView,
 	CONTROLLED_SCRIPT,
+	OFFLINE_NOTICE_SCRIPT,
 	pageTiming,
 	TIMING_SCRIPT,
 } from "./driver.ts";
@@ -113,13 +115,15 @@ export class Android implements Driver {
 			downloadThroughput: -1,
 			uploadThroughput: -1,
 		});
-		let offline = false;
+		let offline: OfflineView = "none";
 		try {
 			await page.call("Network.emulateNetworkConditions", conditions(true));
 			await workers.set(true);
-			if (workers.workers > 0) offline = (await this.navigate(page, url)).status === 200;
+			// The offline notice also answers 200, so a 200 alone doesn't say the page itself opened.
+			if (workers.workers > 0 && (await this.navigate(page, url)).status === 200)
+				offline = (await this.evaluate(page, OFFLINE_NOTICE_SCRIPT, false)) === true ? "notice" : "page";
 		} catch {
-			offline = false;
+			offline = "none";
 		} finally {
 			await workers.set(false);
 			workers.close();

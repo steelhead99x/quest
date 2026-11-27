@@ -263,14 +263,19 @@ export class Ipad implements Driver {
 				manifest = errors.length === 0;
 			}
 			const sw = await ${CONTROLLED_SCRIPT};
-			const cached = Boolean(await caches.match(location.href));
-			return JSON.stringify({ manifest, serviceWorker: sw, offline: cached, errors });
+			// What the service worker would serve offline: this page if it keeps it, else its notice.
+			const offline = (await caches.match(location.href))
+				? "page"
+				: sw && (await caches.match("/offline"))
+					? "notice"
+					: "none";
+			return JSON.stringify({ manifest, serviceWorker: sw, offline, errors });
 		})()`);
 		const v = JSON.parse(String(result)) as Installable;
 		return {
 			manifest: v.manifest === true,
 			serviceWorker: v.serviceWorker === true,
-			offline: v.offline === true,
+			offline: v.offline === "page" || v.offline === "notice" ? v.offline : "none",
 			errors: Array.isArray(v.errors) ? v.errors.map(String) : [],
 		};
 	}

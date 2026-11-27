@@ -1,3 +1,3 @@
-# Scripts and tests run on Bun even when a tool declares a Node shebang, as in the root bunfig.toml.
-[run]
-bun = true
+# No `run.bun` here, unlike the root bunfig.toml: Wrangler, and the workerd test pool it
+# drives, support Node and fail on Bun (`wrangler types` dies resolving dummy.invalid), so
+# `bun run` keeps each tool's Node shebang. Scripts that need Bun say `bun` themselves.

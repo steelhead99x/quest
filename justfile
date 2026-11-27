@@ -65,10 +65,15 @@ compile:
 run *args:
     bun run --silent quest {{args}}
 
+# `quest gate` runs recipes under the root `bun run`, whose `run.bun` puts a Bun `node`
+# shim first on PATH for everything it starts. Wrangler needs Node, so the Worker
+# recipes drop that shim; cloudflare/scripts/require-node.mjs fails if one gets through.
+worker_path := 'PATH="$(tr : "\n" <<<"$PATH" | grep -v /bun-node- | paste -sd: -)"'
+
 # Check the Worker in cloudflare/: types and formatting.
 worker-check:
-    cd cloudflare && bun run check
+    cd cloudflare && {{worker_path}} bun run check
 
 # Test the Worker in cloudflare/.
 worker-test:
-    cd cloudflare && bun run test
+    cd cloudflare && {{worker_path}} bun run test
