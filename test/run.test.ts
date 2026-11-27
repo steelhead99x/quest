@@ -2,6 +2,7 @@
 // and collecting their reports.
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { hostname } from "node:os";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -420,9 +421,12 @@ test.runIf(posix)("a second run in the same checkout cannot take over a running 
 	const first = join(tempDir(), "first");
 	const a = runIn(dir, { all: true, report: first }, { RUN: "a" });
 	await new Promise((done) => setTimeout(done, 300));
-	await expect(runIn(dir, { all: true }, { RUN: "b" })).rejects.toThrow(
+	const refused = join(tempDir(), "refused");
+	await expect(runIn(dir, { all: true, report: refused }, { RUN: "b" })).rejects.toThrow(
 		"another quest run in this checkout is writing unit.xml",
 	);
+	// A refused run creates no --report directory, so the same one can be named again.
+	expect(existsSync(refused)).toBe(false);
 	expect((await a).code).toBe(0);
 	expect(readFileSync(join(first, "unit", "junit.xml"), "utf8")).toBe("a\n");
 	// Once the first run ends, the next one may write the report.
@@ -436,9 +440,13 @@ test.runIf(posix)("a claim left by a run that died is taken over", async () => {
 	const dead = spawnSync("true").pid!;
 	const claims = join(dir, ".git", "quest-run-reports");
 	mkdirSync(claims, { recursive: true });
-	writeFileSync(join(claims, createHash("sha256").update("unit.xml").digest("hex").slice(0, 32)), String(dead));
+	const claim = join(claims, createHash("sha256").update("unit.xml").digest("hex").slice(0, 32));
+	writeFileSync(claim, `${hostname()} ${dead}`);
 	const out = await runIn(dir, { all: true });
 	expect(out.code, out.stderr).toBe(0);
 	// The run releases its claims when it ends.
-	expect(execFileSync("ls", [claims], { encoding: "utf8" })).toBe("");
+	expect(execFileSync("ls", ["-A", claims], { encoding: "utf8" })).toBe("");
+	// A claim from another host sharing the checkout can't be checked, so it counts as live.
+	writeFileSync(claim, `elsewhere.example ${dead}`);
+	await expect(runIn(dir, { all: true })).rejects.toThrow(`(process ${dead} on elsewhere.example)`);
 });
