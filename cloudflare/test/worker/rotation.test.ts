@@ -147,20 +147,18 @@ const ns = (env as unknown as { ROTATIONS: DurableObjectNamespace }).ROTATIONS;
 describe("the real Durable Object", () => {
 	test("serves a kept rotation of this session, and its alarm sweeps it once past", async () => {
 		const stub = ns.get(ns.idFromName(old.sid)) as Stub;
-		const state: State = {
-			ended: null,
-			rotations: {
-				[await rotationName(old.refresh)]: {
-					sealed: await seal(env.AUTH_SECRET, "rotation", next),
-					until: Date.now() + 300,
-				},
-			},
-		};
+		// The object reads the real clock and keeps its state in memory, so the test waits for real time.
+		// The deadline is set once the crypto is done, with room for a loaded machine to serve the
+		// rotation before it, and the test then sleeps until that exact deadline has passed.
+		const name = await rotationName(old.refresh);
+		const sealed = await seal(env.AUTH_SECRET, "rotation", next);
+		const until = Date.now() + 1500;
+		const state: State = { ended: null, rotations: { [name]: { sealed, until } } };
 		await runInDurableObject(stub, async (_, ctx) => {
 			await ctx.storage.put("state", state);
 		});
 		expect(await stub.rotate(old)).toEqual({ kind: "fresh", session: next, changed: true });
-		await new Promise((r) => setTimeout(r, 400));
+		await new Promise((r) => setTimeout(r, Math.max(0, until - Date.now()) + 50));
 		await runInDurableObject(stub, async (_, ctx) => {
 			await ctx.storage.setAlarm(Date.now());
 		});
