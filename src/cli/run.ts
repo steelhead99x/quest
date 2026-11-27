@@ -3,6 +3,7 @@
 // running at once.
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { hostname } from "node:os";
 import {
 	copyFileSync,
 	existsSync,
@@ -10,8 +11,10 @@ import {
 	mkdirSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	writeFileSync,
+	linkSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
@@ -218,11 +221,19 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 	// A directory this run creates, so no other run's or earlier run's report passes for this one's, and nothing
 	// else is touched; creating it is atomic, so two runs cannot share it.
 	const report = options.report === undefined ? null : resolve(options.report);
+	// Another run in this checkout would delete or overwrite the same report files mid-task, so its reports would
+	// pass for this run's; this run holds the report paths of the tasks it picked until they end. It claims them
+	// before creating --report's directory, so a refused run leaves nothing behind.
+	const release = holdReports(
+		top,
+		tasks.flatMap((task) => declared(task).map((output) => output.path)),
+	);
 	if (report !== null) {
-		mkdirSync(dirname(report), { recursive: true });
 		try {
+			mkdirSync(dirname(report), { recursive: true });
 			mkdirSync(report);
 		} catch (error) {
+			release();
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 			throw new Error(`--report ${options.report} already exists; name a new directory`);
 		}
@@ -279,12 +290,6 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 		() => {
 			if (detached) signalAll(nested ? "SIGKILL" : requested(cancel.signal));
 		},
-	);
-	// Another run in this checkout would delete or overwrite the same report files mid-task, so its reports would
-	// pass for this run's; this run holds the report paths of the tasks it picked until they end.
-	const release = holdReports(
-		top,
-		tasks.flatMap((task) => declared(task).map((output) => output.path)),
 	);
 	try {
 		await new Promise<void>((done) => {
@@ -440,43 +445,77 @@ function prefixed(prefix: string, stream: NodeJS.ReadableStream, write: (text: s
 
 /**
  * Claim `paths`, each a report path from the repository root, for this process until the returned function releases
- * them. A claim is a file under the checkout's git directory naming its process; one whose process has exited is
- * stale and taken over. Paths compare without case, as macOS and Windows checkouts name files.
+ * them. A claim is a file under the checkout's git directory naming its host and process, linked into place whole so
+ * no run reads it half-written; a claim from this host whose process has exited is stale and taken over, and one
+ * from another host sharing the checkout counts as live. Paths compare without case, as macOS and Windows checkouts
+ * name files.
  */
 function holdReports(top: string, paths: string[]): () => void {
 	const dir = resolve(top, git(top, ["rev-parse", "--git-path", "quest-run-reports"]));
 	mkdirSync(dir, { recursive: true });
+	const me = `${hostname()} ${process.pid}`;
 	const held: string[] = [];
 	const release = () => {
 		for (const file of held.splice(0))
 			try {
-				if (readFileSync(file, "utf8") === String(process.pid)) rmSync(file, { force: true });
+				if (readFileSync(file, "utf8") === me) rmSync(file, { force: true });
 			} catch {
 				// Already gone.
 			}
 	};
+	const mine = join(dir, `.${process.pid}-${Date.now()}`);
+	writeFileSync(mine, me);
 	try {
 		for (const path of [...new Set(paths.map((path) => path.toLowerCase()))].sort()) {
 			const file = join(dir, createHash("sha256").update(path).digest("hex").slice(0, 32));
+			const busy = (owner: string) =>
+				new Error(
+					`another quest run in this checkout is writing ${paths.find((each) => each.toLowerCase() === path)} ` +
+						`(process ${owner.split(" ").reverse().join(" on ")}); wait for it to finish, or delete ${file} if it is gone`,
+				);
 			for (let attempt = 0; ; attempt++) {
 				try {
-					writeFileSync(file, String(process.pid), { flag: "wx" });
+					linkSync(mine, file);
 					held.push(file);
 					break;
 				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 0) throw error;
+					if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 2) throw error;
 				}
-				const owner = Number(readFileSync(file, "utf8"));
-				if (alive(owner))
-					throw new Error(
-						`another quest run in this checkout is writing ${paths.find((each) => each.toLowerCase() === path)} (process ${owner}); wait for it to finish`,
-					);
-				rmSync(file, { force: true });
+				let seen: string;
+				try {
+					seen = readFileSync(file, "utf8");
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+					throw error;
+				}
+				const [host, pid] = seen.split(" ");
+				if (host !== hostname() || alive(Number(pid))) throw busy(seen);
+				// Take the stale claim over by moving it aside, which only one run can do, and keep that only if what
+				// moved is the dead claim read above: another run may have taken it over and claimed it since.
+				const aside = `${file}.${process.pid}`;
+				try {
+					renameSync(file, aside);
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+					throw error;
+				}
+				const moved = readFileSync(aside, "utf8");
+				if (moved !== seen) {
+					try {
+						linkSync(aside, file);
+					} finally {
+						rmSync(aside, { force: true });
+					}
+					throw busy(moved);
+				}
+				rmSync(aside, { force: true });
 			}
 		}
 	} catch (error) {
 		release();
 		throw error;
+	} finally {
+		rmSync(mine, { force: true });
 	}
 	return release;
 }

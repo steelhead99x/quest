@@ -1612,9 +1612,9 @@ before it, so the gate repeats the PR's checks and a nightly on macOS runs the
 Linux gate's tests there; a `release` run runs only `release` tasks, which
 publish.
 
-A run executes only this host's tasks: `--os` naming another operating
-system fails unless with `--query`, which runs nothing and lists any
-system's tasks for a runner's matrix. Two runs in one checkout cannot share
+A run executes only this host's tasks: `--os` may name another operating
+system only with `--query`, which runs nothing and lists that system's tasks
+for a runner's matrix. Two runs in one checkout cannot share
 report paths: a second run that picks a task whose `junit` or `metrics` file
 the first is writing fails until the first ends.
 
