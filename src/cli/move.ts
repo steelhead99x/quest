@@ -122,10 +122,27 @@ export function removeQuest(root: string, arg: string, recursive: boolean): Repo
 		throw new Error(`${arg} is an epic holding ${doomed.length} quest documents; pass -r to remove them all`);
 	}
 
-	const gone = new Set(doomed.map((doc) => doc.path));
+	// A quest document git does not track is a draft: rm keeps it on disk and names it,
+	// since git cannot restore what it never held.
+	const tracked = new Set(
+		git(root, ["ls-files", "-z", "--", ...doomed.map((doc) => literal(doc.path))])
+			.split("\0")
+			.filter(Boolean),
+	);
+	const removed = doomed.filter((doc) => tracked.has(doc.path));
+	const drafts = doomed.filter((doc) => !tracked.has(doc.path));
+	if (removed.length === 0) {
+		throw new Error(
+			whole
+				? `${arg} holds only untracked drafts; delete them by hand if they should go`
+				: `${arg} is an untracked draft; delete it by hand if it should go`,
+		);
+	}
+
+	const gone = new Set(removed.map((doc) => doc.path));
 	const edited = remove(docs, (path) => gone.has(path));
 	// Only the quest documents go: notes, designs, and other files beside them stay.
-	git(root, ["rm", "-q", "--", ...doomed.map((doc) => literal(doc.path))]);
+	git(root, ["rm", "-q", "--", ...removed.map((doc) => literal(doc.path))]);
 	write(root, edited);
 	const kept = whole
 		? git(root, ["ls-files", "-z", "--", literal(epic!)])
@@ -136,9 +153,12 @@ export function removeQuest(root: string, arg: string, recursive: boolean): Repo
 						`${path} is not a quest document, so rm kept it; delete it with git rm if it should go too`,
 				)
 		: [];
+	const keptDrafts = drafts.map(
+		(doc) => `${doc.path} is an untracked draft, so rm kept it; delete it by hand if it should go too`,
+	);
 	return {
-		changes: [...doomed.map((doc) => `D ${doc.path}`), ...modified(edited)],
-		warnings: [...kept, ...mentions(root, whole ? epic! : target)],
+		changes: [...removed.map((doc) => `D ${doc.path}`), ...modified(edited)],
+		warnings: [...keptDrafts, ...kept, ...mentions(root, whole ? epic! : target)],
 		findings: findings(root),
 	};
 }

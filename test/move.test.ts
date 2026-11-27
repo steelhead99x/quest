@@ -386,6 +386,32 @@ describe("quest rm", () => {
 		expect(staged(tree)).toEqual(["D  quest/m0/solo/README.md"]);
 	});
 
+	test("keeps and names an epic's untracked drafts, removing only the quests git tracks", async () => {
+		const tree = committed(
+			Tree.baseline()
+				.write("quest/m0/solo/README.md", "# [S] Solo\n\n## Goal\n\nAlone.\n")
+				.write("quest/m0/solo/done.md", "# [S] Done\n\n## Goal\n\nCommitted.\n"),
+		);
+		tree.write("quest/m0/solo/draft.md", "# [S] Draft\n\n## Goal\n\nNot added yet.\n");
+		const out = await quest(tree, "rm", "-r", "quest/m0/solo");
+		// The kept draft now sits in a directory without a README, a finding the user resolves.
+		expect(out.code).toBe(1);
+		expect(out.stdout).toBe("D quest/m0/solo/README.md\nD quest/m0/solo/done.md\n");
+		expect(out.stderr).toContain("quest/m0/solo/draft.md: sits in quest/m0/solo, which has no README.md");
+		expect(out.stderr).toContain("quest/m0/solo/draft.md is an untracked draft, so rm kept it");
+		expect(existsSync(join(tree.path, "quest/m0/solo/draft.md"))).toBe(true);
+		expect(staged(tree)).toEqual(["?? quest/m0/solo/", "D  quest/m0/solo/README.md", "D  quest/m0/solo/done.md"]);
+	});
+
+	test("refuses to remove a single untracked quest, leaving it in place", async () => {
+		const tree = Tree.committed();
+		tree.write("quest/m0/draft.md", "# [S] Draft\n\n## Goal\n\nNot added yet.\n");
+		const out = await quest(tree, "rm", "quest/m0/draft.md");
+		expect(out.code).toBe(1);
+		expect(out.stderr).toBe("quest: quest/m0/draft.md is an untracked draft; delete it by hand if it should go\n");
+		expect(existsSync(join(tree.path, "quest/m0/draft.md"))).toBe(true);
+	});
+
 	test("treats a quest's file name literally, never as a pattern matching its siblings", async () => {
 		const tree = committed(
 			Tree.baseline()
