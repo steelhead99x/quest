@@ -271,6 +271,11 @@ describe("bench", () => {
 		const partly = markdown([report, other], [], ["iPad Air"]);
 		expect(partly).toContain("Not compared, with no stored baseline: iPad Air.");
 		expect(partly).toContain("No regressions in the baselines compared.");
+		// --record compares nothing, and says the baseline now exists.
+		const recorded = markdown([report], [], [], [report.device.model]);
+		expect(recorded).toContain(`Recorded a baseline for ${report.device.model}`);
+		expect(recorded).not.toContain("no stored baseline");
+		expect(recorded).toContain("No baseline comparison was run.");
 		// A page that opens offline only as the site's notice doesn't count as opening offline.
 		const pages = report.pages.map((p) => ({
 			...p,

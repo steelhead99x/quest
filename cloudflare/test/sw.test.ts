@@ -36,11 +36,18 @@ function worker(control = "public, max-age=60") {
 	const origin = "https://quest.example";
 	const handlers = new Map<string, (event: FetchEvent) => void>();
 	const pages = new FakeCache();
+	const precached: string[] = [];
 	const self = {
 		location: { origin },
 		addEventListener: (type: string, handler: (event: FetchEvent) => void) => handlers.set(type, handler),
+		skipWaiting: async () => undefined,
 	};
-	const caches = { open: async () => pages, match: async () => undefined, keys: async () => [] };
+	const shell = { addAll: async (paths: string[]) => void precached.push(...paths) };
+	const caches = {
+		open: async (name: string) => (name.startsWith("shell-") ? shell : pages),
+		match: async () => undefined,
+		keys: async () => [],
+	};
 	const fetch = async () => new Response("<html>", { headers: { "cache-control": control } });
 	const source = readFileSync(join(import.meta.dirname, "..", "src", "sw.js"), "utf8");
 	new Function("self", "caches", "fetch", source)(self, caches, fetch);
@@ -57,7 +64,16 @@ function worker(control = "public, max-age=60") {
 		await Promise.all(pending);
 	};
 	const kept = () => pages.entries.map((e) => new URL(e.url).pathname);
-	return { visit, kept };
+	/** Run the install handler and return what it precached. */
+	const install = async () => {
+		let done: Promise<unknown> = Promise.resolve();
+		(handlers.get("install") as unknown as (e: { waitUntil(p: Promise<unknown>): void }) => void)({
+			waitUntil: (p) => (done = p),
+		});
+		await done;
+		return precached;
+	};
+	return { visit, kept, install };
 }
 
 test("a refreshed page counts as newest, so trimming to the limit drops the oldest", async () => {
@@ -80,4 +96,13 @@ test("never keeps a page rendered for a signed-in person, or a sign-in step", as
 	await pub.visit("/sign-in");
 	await pub.visit("/auth/callback");
 	expect(pub.kept()).toEqual([]);
+});
+
+test("install precaches the shell and the offline notice, never the link-preview image", async () => {
+	const paths = await worker().install();
+	expect(paths).toContain("/offline");
+	expect(paths).toContain("/site.css");
+	expect(paths).not.toContain("/og.png");
+	// Every precached path is a file the build serves.
+	for (const path of paths) expect(path).toMatch(/^\/[\w./-]+$/);
 });

@@ -66,13 +66,14 @@ for (const kind of devices) {
 
 const failed = [];
 const uncompared: string[] = [];
+const recorded: string[] = [];
 for (const report of reports) {
 	const file = join(BASELINES, baselineName(report.device));
 	if (values.record) {
 		mkdirSync(BASELINES, { recursive: true });
 		writeFileSync(file, JSON.stringify(baseline(report, new Date().toISOString()), null, "\t") + "\n");
 		console.error(`Recorded ${file}`);
-		uncompared.push(report.device.model);
+		recorded.push(report.device.model);
 	} else if (existsSync(file)) {
 		failed.push(...compare(JSON.parse(readFileSync(file, "utf8")) as Baseline, report));
 	} else {
@@ -80,5 +81,5 @@ for (const report of reports) {
 		uncompared.push(report.device.model);
 	}
 }
-process.stdout.write(markdown(reports, failed, uncompared));
+process.stdout.write(markdown(reports, failed, uncompared, recorded));
 if (failed.length) process.exit(1);
