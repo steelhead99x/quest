@@ -1,13 +1,21 @@
 name: Check
 
-# Runs after each push to main, outside pull requests. The merge queue already
-# runs `just check`, `just test`, and the flake check on the host's runner; this
+# Runs after each push to main. In kixel-ai/quest the merge queue already runs
+# `just check`, `just test`, and the flake check on the host's runner; this
 # repeats them on a hosted one and adds the installed lifecycle on Linux and
 # macOS. A newer push cancels an older run, even one in progress, so runs
 # coalesce.
+#
+# A fork has no merge queue and no host runner, so queue.yml never builds its
+# pull requests. There `check` also runs on each pull request to main, as the
+# fork's pre-merge build; kixel-ai/quest's pull requests keep only the skipped
+# `Queue` context queue-pr.yml reports.
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -19,6 +27,7 @@ concurrency:
 
 jobs:
   check:
+    if: github.event_name != 'pull_request' || github.repository != 'kixel-ai/quest'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -45,6 +54,8 @@ jobs:
 
   lifecycle:
     name: lifecycle (${{ matrix.runner }})
+    # After each push only: the macOS runner is often slow to start.
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
