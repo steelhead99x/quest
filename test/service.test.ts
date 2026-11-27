@@ -15,6 +15,10 @@ function user(): NodeJS.ProcessEnv {
 	return { HOME: tempDir(), XDG_CONFIG_HOME: tempDir(), XDG_STATE_HOME: tempDir(), PATH: `relative:${bin}:/usr/bin` };
 }
 
+// The sender runs only under systemd or launchd, and these tests install it with a Unix PATH
+// that a Windows host's delimiter and drive letters can't split, so they run on Unix hosts.
+const unix = test.skipIf(process.platform === "win32");
+
 /** Dependencies on a mock clock, where the launchd job stays listed until `listedMs` pass after the bootout. */
 function deps(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, listedMs = 0) {
 	const ran: string[] = [];
@@ -38,7 +42,7 @@ function deps(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, listedMs = 0) {
 	};
 }
 
-test("on Linux, the sender is a systemd user service running quest from PATH, escaped", () => {
+unix("on Linux, the sender is a systemd user service running quest from PATH, escaped", () => {
 	const env: NodeJS.ProcessEnv = { ...user(), QUEST_KIXEL_URL: "http://localhost:8787" };
 	const { deps: linux, ran } = deps("linux", env);
 	const path = installSender(linux);
@@ -65,7 +69,7 @@ test("on Linux, the sender is a systemd user service running quest from PATH, es
 	expect(uninstallSender(linux)).toBeNull();
 });
 
-test("on macOS, the sender is a launchd agent, replaced on reinstall", () => {
+unix("on macOS, the sender is a launchd agent, replaced on reinstall", () => {
 	const env: NodeJS.ProcessEnv = { ...user(), PATH: `${user().PATH}:/a&b` };
 	const { deps: mac, ran } = deps("darwin", env);
 	const path = installSender(mac);
@@ -82,7 +86,7 @@ test("on macOS, the sender is a launchd agent, replaced on reinstall", () => {
 	]);
 });
 
-test("on macOS, a reinstall waits for launchd to drop the stopping job before bootstrapping", () => {
+unix("on macOS, a reinstall waits for launchd to drop the stopping job before bootstrapping", () => {
 	const print = "try launchctl print gui/501/dev.moq.quest.records";
 	const bootout = "try launchctl bootout gui/501/dev.moq.quest.records";
 	// Listed for two polls, then gone.

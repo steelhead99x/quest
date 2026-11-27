@@ -23,9 +23,10 @@ const ASSETS = [
 	"/fonts/atkinson-hyperlegible-next-latin-wght-normal.woff2",
 	"/fonts/atkinson-hyperlegible-next-latin-wght-italic.woff2",
 	"/fonts/atkinson-hyperlegible-mono-latin-wght-normal.woff2",
-	"/og.png",
 	OFFLINE,
 ];
+// Not /og.png: only link previews fetch it, never a page, and at 120 KB it was
+// nearly half of what install downloaded before the worker could take control.
 
 self.addEventListener("install", (event) =>
 	event.waitUntil(
