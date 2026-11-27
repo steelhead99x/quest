@@ -265,7 +265,12 @@ describe("bench", () => {
 		);
 		expect(md).toContain("- Not measured: text size: by hand");
 		expect(md).toContain("No regressions");
-		expect(markdown([report], null)).toContain("No baseline comparison was run.");
+		expect(markdown([report], [], [report.device.model])).toContain("No baseline comparison was run.");
+		// With two devices and one baseline, the report names the one that wasn't compared.
+		const other = { ...report, device: { ...report.device, model: "iPad Air" } };
+		const partly = markdown([report, other], [], ["iPad Air"]);
+		expect(partly).toContain("Not compared, with no stored baseline: iPad Air.");
+		expect(partly).toContain("No regressions in the baselines compared.");
 		// A page that opens offline only as the site's notice doesn't count as opening offline.
 		const pages = report.pages.map((p) => ({
 			...p,

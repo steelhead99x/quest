@@ -167,7 +167,9 @@ export function compare(
 /** The report as Markdown for a PR's `## Validation`. */
 export function markdown(
 	reports: DeviceReport[],
-	failed: { path: string; phase: string; regression: Regression }[] | null,
+	failed: { path: string; phase: string; regression: Regression }[],
+	/** The models with no stored baseline, which nothing was compared with. */
+	uncompared: string[] = [],
 ) {
 	const lines: string[] = [];
 	const ms = (s: Summary | undefined) => (s ? `${Math.round(s.median)} / ${Math.round(s.p95)} ms` : "n/a");
@@ -187,8 +189,16 @@ export function markdown(
 		for (const limit of device.limits) lines.push("", `- Not measured: ${limit}`);
 		lines.push("");
 	}
-	if (failed === null) lines.push("No baseline comparison was run.");
-	else if (failed.length) {
+	if (uncompared.length === reports.length) {
+		lines.push("No baseline comparison was run.");
+		return lines.join("\n") + "\n";
+	}
+	if (uncompared.length)
+		lines.push(
+			`Not compared, with no stored baseline: ${uncompared.join(", ")}. Run with --record to make one.`,
+			"",
+		);
+	if (failed.length) {
 		lines.push("Regressions against the stored baseline:", "");
 		for (const { path, phase, regression: r } of failed)
 			lines.push(

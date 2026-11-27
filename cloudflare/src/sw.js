@@ -82,6 +82,9 @@ async function page(event) {
 
 async function keep(request, response) {
 	const cache = await caches.open(PAGES);
+	// keys() lists entries in insertion order, and a put over an existing entry may keep its
+	// place. Deleting first makes a refreshed page the newest, so the trim drops the oldest.
+	await cache.delete(request);
 	await cache.put(request, response);
 	const keys = await cache.keys();
 	for (const old of keys.slice(0, Math.max(0, keys.length - MAX_PAGES))) await cache.delete(old);
