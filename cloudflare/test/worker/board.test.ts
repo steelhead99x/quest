@@ -459,6 +459,9 @@ describe("private data", () => {
 		expect(response.headers.get("cache-control")).toBe("no-cache");
 		expect(html).toContain("You&#39;re offline");
 		expect(html).not.toContain("octo");
+		// Signing in or out can't work offline; trying again reloads the page asked for.
+		expect(html).not.toMatch(/Sign (in|out)/);
+		expect(html).toMatch(/<a class="button primary" href="">\s*Try again\s*<\/a>/);
 	});
 
 	test("a cached private board is rechecked with GitHub, and revoked access ends at once", async () => {

@@ -161,6 +161,13 @@ try {
 				throw new Error("the offline notice doesn't mark itself for the device bench");
 			const body = await value<string>("document.body.innerText");
 			if (body.includes("Ready to start")) throw new Error("the board's private content was served offline");
+			// Signing in or out can't work offline; trying again reloads the page that was asked for.
+			if (/Sign (in|out)/.test(body)) throw new Error("the offline notice offers signing in or out");
+			const retry = await value<string>(
+				`(() => { const a = [...document.querySelectorAll("a")].find((a) => a.textContent.trim() === "Try again"); return a ? a.href : ""; })()`,
+			);
+			if (retry !== `${base}/repos/steelhead99x/quest`)
+				throw new Error(`Try again goes to ${retry || "nowhere"}`);
 			const kept = await value<string[]>(KEPT, true);
 			const leaked = kept.filter((path) => path.startsWith("/repos/"));
 			if (leaked.length) throw new Error(`signed-in pages are cached: ${leaked.join(", ")}`);
@@ -176,47 +183,37 @@ try {
 		}
 	});
 
-	await step(
-		"Every page passes axe's WCAG 2.2 AA rules and text contrast, in light and dark",
-		"10-accessible",
-		async () => {
-			await go(`${base}/repos/steelhead99x/quest`);
-			const review = await value<string>(
-				`[...document.querySelectorAll(".entry")].find((e) => e.textContent.includes("In review")).querySelector("a.entry-title").getAttribute("href")`,
-			);
-			const problems: string[] = [];
-			let checked = 0;
-			for (const path of [
-				"/",
-				"/repos/steelhead99x/quest",
-				review,
-				"/repos/steelhead99x/quest/bench",
-				"/offline",
-			])
-				for (const scheme of ["light", "dark"]) {
-					await page!.call("Emulation.setEmulatedMedia", {
-						features: [{ name: "prefers-color-scheme", value: scheme }],
-					});
-					await go(base + path);
-					await value(AXE_SOURCE);
-					for (const v of JSON.parse(await value<string>(AXE_SCRIPT, true)) as {
-						id: string;
-						nodes: string[];
-					}[])
-						problems.push(`${path} (${scheme}): ${v.id} at ${v.nodes.join(", ")}`);
-					const contrast = JSON.parse(await value<string>(CONTRAST_SCRIPT)) as {
-						checked: number;
-						low: { text: string; ratio: number; need: number }[];
-					};
-					checked += contrast.checked;
-					for (const l of contrast.low)
-						problems.push(`${path} (${scheme}): "${l.text}" has contrast ${l.ratio}:1, under ${l.need}:1`);
-				}
-			await page!.call("Emulation.setEmulatedMedia", { features: [] });
-			if (checked === 0) throw new Error("no text was checked for contrast");
-			if (problems.length) throw new Error(problems.slice(0, 5).join("; "));
-		},
-	);
+	await step("Every page passes axe's WCAG 2.2 AA rules and text contrast", "10-accessible", async () => {
+		await go(`${base}/repos/steelhead99x/quest`);
+		const review = await value<string>(
+			`[...document.querySelectorAll(".entry")].find((e) => e.textContent.includes("In review")).querySelector("a.entry-title").getAttribute("href")`,
+		);
+		const problems: string[] = [];
+		let checked = 0;
+		for (const path of ["/", "/repos/steelhead99x/quest", review, "/repos/steelhead99x/quest/bench", "/offline"])
+			for (const scheme of ["light", "dark"]) {
+				await page!.call("Emulation.setEmulatedMedia", {
+					features: [{ name: "prefers-color-scheme", value: scheme }],
+				});
+				await go(base + path);
+				await value(AXE_SOURCE);
+				for (const v of JSON.parse(await value<string>(AXE_SCRIPT, true)) as {
+					id: string;
+					nodes: string[];
+				}[])
+					problems.push(`${path} (${scheme}): ${v.id} at ${v.nodes.join(", ")}`);
+				const contrast = JSON.parse(await value<string>(CONTRAST_SCRIPT)) as {
+					checked: number;
+					low: { text: string; ratio: number; need: number }[];
+				};
+				checked += contrast.checked;
+				for (const l of contrast.low)
+					problems.push(`${path} (${scheme}): "${l.text}" has contrast ${l.ratio}:1, under ${l.need}:1`);
+			}
+		await page!.call("Emulation.setEmulatedMedia", { features: [] });
+		if (checked === 0) throw new Error("no text was checked for contrast");
+		if (problems.length) throw new Error(problems.slice(0, 5).join("; "));
+	});
 
 	await step("Signing out drops the session and the cached pages", "11-signed-out", async () => {
 		await go(`${base}/`);

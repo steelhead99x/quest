@@ -77,20 +77,23 @@ export function Layout(props: Page & { children: Child }) {
 							<img src="/theme/logo.svg" alt="" width="30" height="30" />
 							<span class="wordmark">Quest</span>
 						</a>
-						<span class="account">
-							{props.user ? (
-								<>
-									<span class="muted">{props.user.login}</span>
-									<form method="post" action="/sign-out">
-										<button class="button quiet">Sign out</button>
-									</form>
-								</>
-							) : (
-								<a class="button quiet" href={`/sign-in?next=${encodeURIComponent(props.path)}`}>
-									Sign in
-								</a>
-							)}
-						</span>
+						{/* Offline, signing in or out can't work, so the notice offers neither. */}
+						{!props.offlineNotice && (
+							<span class="account">
+								{props.user ? (
+									<>
+										<span class="muted">{props.user.login}</span>
+										<form method="post" action="/sign-out">
+											<button class="button quiet">Sign out</button>
+										</form>
+									</>
+								) : (
+									<a class="button quiet" href={`/sign-in?next=${encodeURIComponent(props.path)}`}>
+										Sign in
+									</a>
+								)}
+							</span>
+						)}
 					</nav>
 				</header>
 				{props.crumbs && <Crumbs crumbs={props.crumbs} />}

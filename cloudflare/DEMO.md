@@ -20,7 +20,7 @@ board, a claimed quest's CI, re-running failed jobs, dispatching a workflow,
 the bench, installing to the home screen, opening offline, accessibility, and
 signing out. The accessibility step runs axe-core's WCAG 2.2 AA and
 best-practice rules on the home page, board, a quest, the bench, and the
-offline notice, in light and dark, and measures every text element's contrast
+offline notice, with the phone asking for light and for dark (the site is dark in both), and measures every text element's contrast
 itself (`demo/a11y.ts`), since the pages' decorative layers leave axe's own
 contrast rule undecided.
 It asserts each step, saves a screenshot of each to `.tmp/demo/`, prints a
