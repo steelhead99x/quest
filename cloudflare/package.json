@@ -5,8 +5,8 @@
 	"scripts": {
 		"build": "bun scripts/build.ts",
 		"types": "wrangler types",
-		"check": "bun run build && bun demo/snapshot.ts && wrangler types && tsc --noEmit && tsc --noEmit -p tsconfig.tools.json && prettier --check . && wrangler deploy --dry-run --outdir .wrangler/dry-run && wrangler deploy -c demo/wrangler.jsonc --dry-run --outdir .wrangler/demo-dry-run",
-		"test": "bun run build && bun demo/snapshot.ts && wrangler types && vitest run --project worker && bun --bun x vitest run --project tools",
+		"check": "node scripts/require-node.mjs && bun run build && bun demo/snapshot.ts && wrangler types && tsc --noEmit && tsc --noEmit -p tsconfig.tools.json && prettier --check . && wrangler deploy --dry-run --outdir .wrangler/dry-run && wrangler deploy -c demo/wrangler.jsonc --dry-run --outdir .wrangler/demo-dry-run",
+		"test": "node scripts/require-node.mjs && bun run build && bun demo/snapshot.ts && wrangler types && vitest run --project worker && bun --bun x vitest run --project tools",
 		"fix": "prettier --write .",
 		"dev": "wrangler dev",
 		"deploy": "wrangler deploy",
