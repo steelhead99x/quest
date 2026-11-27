@@ -1583,6 +1583,7 @@ caches = ["mbx"]                  # shared build caches a runner provisions
 os = ["linux", "macos"]           # default: linux and macos, or all three with nix = false
 capabilities = ["kvm"]            # what a dispatcher routes the task's host on
 environment = { RUST_BACKTRACE = "1" }
+inherit = ["CARGO_PROFILE"]       # caller variables it reads; their values join the cache key
 cargo = true                      # run once per workspace crate, with QUEST_CRATE set
 cache = true                      # reuse a pass for the same inputs; see below for the default
 junit = "target/nextest/ci/junit.xml"
@@ -1689,6 +1690,9 @@ The digest a pass is recorded under covers:
 
 - the derivation of the shell `nix develop` enters, from `nix eval`, which pins every tool
 - the task's `run`, `environment`, and report paths, and the host's OS and CPU
+- the caller's value of each variable in its `inherit`, with an unset one distinct
+  from an empty one; nothing else from the caller's environment counts, so a
+  task that reads another variable must list it
 - the digests of the tasks it runs after, since it may read what they wrote
 - the Git ids of the files it reads: its `paths` and `inputs`, or every file
   when it declares no `paths`, less `exclude`, plus `invalidate_all`

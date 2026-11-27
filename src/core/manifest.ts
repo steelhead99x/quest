@@ -73,6 +73,11 @@ export interface ManifestTask {
 	cache: boolean;
 	/** Variables set for the task. */
 	environment: Record<string, string>;
+	/**
+	 * Variables the task reads from the caller's environment, whose values its cache digest covers, as `inputs`
+	 * names the files it reads outside `paths`: a pass for one value is never reused for another.
+	 */
+	inherit: string[];
 	/** The JUnit XML report the task writes, from the repository root, or null. */
 	junit: string | null;
 	/** The `metrics.json` the task writes, from the repository root, or null. */
@@ -103,6 +108,7 @@ const TASK_KEYS = [
 	"cargo",
 	"cache",
 	"environment",
+	"inherit",
 	"junit",
 	"metrics",
 ];
@@ -295,6 +301,17 @@ function readTask(read: Reader, name: string, table: unknown): ManifestTask | nu
 				? nix && tier !== "nightly" && tier !== "release" && table.metrics === undefined
 				: (read.boolean(field("cache"), table.cache) ?? false),
 		environment,
+		inherit: list("inherit", (where, value) =>
+			read.list(where, value, (item) =>
+				!VARIABLE.test(item)
+					? "not a variable name"
+					: RESERVED.includes(item)
+						? "quest run sets it itself"
+						: item in environment
+							? "set by `environment`, so not inherited"
+							: null,
+			),
+		),
 		junit: table.junit === undefined ? null : read.file(field("junit"), table.junit),
 		metrics: table.metrics === undefined ? null : read.file(field("metrics"), table.metrics),
 	};

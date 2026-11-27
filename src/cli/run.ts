@@ -457,11 +457,13 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 				return { uncached: `it runs after ${uncachedBefore.name}, whose inputs no digest names` };
 			const key = digest({
 				// Raised whenever the digest's material changes meaning, so no earlier pass matches.
-				version: 2,
+				version: 3,
 				system: `${process.arch}-${process.platform}`,
 				shell: task.nix ? shell : null,
 				run: task.run,
 				environment: Object.entries(task.environment).sort(),
+				// The caller's values for what the task declares it inherits; an unset one is distinct from an empty one.
+				inherited: [...task.inherit].sort().map((name) => [name, io.env[name] ?? null]),
 				junit: task.junit,
 				metrics: task.metrics,
 				crate:

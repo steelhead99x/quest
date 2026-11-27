@@ -40,6 +40,7 @@ os = ["linux"]
 capabilities = ["kvm"]
 cache = false
 environment = { RUST_BACKTRACE = "1" }
+inherit = ["CARGO_TARGET_DIR"]
 junit = "target/junit.xml"
 metrics = "target/metrics.json"
 
@@ -72,6 +73,7 @@ nix = false
 		// test runs after it, and a reused pass would restore none of its files.
 		cache: false,
 		environment: {},
+		inherit: [],
 		junit: null,
 		metrics: null,
 	});
@@ -86,6 +88,7 @@ nix = false
 		capabilities: ["kvm"],
 		cache: false,
 		environment: { RUST_BACKTRACE: "1" },
+		inherit: ["CARGO_TARGET_DIR"],
 		junit: "target/junit.xml",
 		metrics: "target/metrics.json",
 	});
@@ -145,6 +148,16 @@ metrics = "out/bench.json"
 	).toEqual([
 		"quest.toml: [tasks.a] environment: quest run sets `QUEST_CRATE` itself",
 		"quest.toml: [tasks.a] cache: nothing pins the toolchain of a task without Nix, so its result cannot be reused",
+	]);
+	expect(
+		problems(
+			'[tasks.a]\ntier = "pr"\nrun = "x"\nenvironment = { MODE = "a" }\ninherit = ["MODE", "QUEST_TIER", "1BAD", "HOME", "HOME"]\n',
+		),
+	).toEqual([
+		"quest.toml: [tasks.a] inherit: `MODE`: set by `environment`, so not inherited",
+		"quest.toml: [tasks.a] inherit: `QUEST_TIER`: quest run sets it itself",
+		"quest.toml: [tasks.a] inherit: `1BAD`: not a variable name",
+		"quest.toml: [tasks.a] inherit: `HOME` is listed twice",
 	]);
 });
 

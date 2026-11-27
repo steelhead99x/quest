@@ -607,6 +607,31 @@ test.runIf(posix)("a Cargo task runs once per crate, and reruns only the crates 
 	expect(ran(await go({ STUB_SHELL: "/nix/store/other-shell.drv" }))).toHaveLength(3);
 });
 
+test.runIf(posix)("a pass is reused only for the same values of the variables a task inherits", async () => {
+	const dir = repository({
+		"flake.nix": "{}",
+		"quest.toml": [
+			'[tasks.mode]\ntier = "pr"\nrun = \'echo "mode $MODE"\'\ninherit = ["MODE"]\n',
+			// Reading a variable it doesn't declare, as reading an undeclared file, is the task's to declare.
+			'[tasks.undeclared]\ntier = "pr"\nrun = \'echo "undeclared $MODE"\'\n',
+		].join(""),
+	});
+	const cacheHome = tempDir();
+	const go = (mode?: string) =>
+		runIn(
+			dir,
+			{ all: true, cache: true },
+			{ XDG_CACHE_HOME: cacheHome, ...(mode === undefined ? {} : { MODE: mode }) },
+		);
+	expect(ran(await go("a"))).toEqual(["mode       | mode a", "undeclared | undeclared a"]);
+	expect(ran(await go("a"))).toEqual([]);
+	// Another value of a declared variable misses; the undeclared reader's pass is reused.
+	expect(ran(await go("b"))).toEqual(["mode       | mode b"]);
+	// Unset is a value of its own, not the empty string's.
+	expect(ran(await go())).toEqual(["mode       | mode "]);
+	expect(ran(await go(""))).toEqual(["mode       | mode "]);
+});
+
 test.runIf(posix)(
 	"a pass is reused for the same inputs, except under cache = false, --no-cache, or a change to what it runs after",
 	async () => {
