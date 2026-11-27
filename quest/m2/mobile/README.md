@@ -104,8 +104,9 @@ remaining choices, marked "agent's choice" below):
 
 ## Related
 
-- [Development as a benchmark](/quest/m0/benchmark/README.md) - its
-  records endpoint is the long-term source for the bench page
+- [Development as a benchmark](/quest/m0/benchmark/README.md) - its report
+  is kixel.quest's factory page, built from Kixel Quest's records, which
+  [the merged-quests page](/quest/m2/mobile/bench.md) is to read too
 - kixel-ai/quest's `quest/m0/telemetry/login.md` - `quest login` signs a
   machine in to Kixel Quest; the sign-in this site would use if it moves
   there
