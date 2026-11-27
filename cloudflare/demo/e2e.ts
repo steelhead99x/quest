@@ -191,7 +191,11 @@ try {
 		// The contrast check must catch its planted controls first, or its passes mean nothing.
 		await go(`${base}/offline`);
 		const caught = JSON.parse(await value<string>(CONTRAST_CONTROL)) as string[];
-		if (caught.length !== 2) throw new Error(`the contrast check caught ${caught.length} of its 2 controls`);
+		const want = ["control: faint text", "control: faded card"];
+		if (caught.length !== 2 || !want.every((t) => caught.includes(t)))
+			throw new Error(
+				`the contrast check flagged ${JSON.stringify(caught)} of its controls, not ${JSON.stringify(want)}`,
+			);
 		const problems: string[] = [];
 		let checked = 0;
 		for (const path of ["/", "/repos/steelhead99x/quest", review, "/repos/steelhead99x/quest/bench", "/offline"])

@@ -18,13 +18,12 @@ export const AXE_SCRIPT = `axe.run(document, {
 
 /**
  * Script text returning, as JSON, every visible text element whose contrast with the solid background behind it
- * is under WCAG AA: 4.5:1, or 3:1 for large text (24px, or 18.66px bold). Each background layer and the text
- * are blended with the opacity they inherit from every ancestor; the page's background colour is the last layer.
+ * is under WCAG AA: 4.5:1, or 3:1 for large text (24px, or 18.66px bold). The text's and the background's pixels
+ * are each composited through every ancestor, each one's opacity fading its whole group once, over the page.
  */
 export const CONTRAST_SCRIPT = `(() => {
 	const parse = (c) => { const m = c.match(/rgba?\\(([^)]+)\\)/); if (!m) return null; const p = m[1].split(/[ ,/]+/).filter(Boolean).map(Number); return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 }; };
 	const lum = ({ r, g, b }) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
-	const over = (fg, bg) => ({ r: fg.r * fg.a + bg.r * (1 - fg.a), g: fg.g * fg.a + bg.g * (1 - fg.a), b: fg.b * fg.a + bg.b * (1 - fg.a), a: 1 });
 	const page = parse(getComputedStyle(document.documentElement).backgroundColor) || { r: 255, g: 255, b: 255, a: 1 };
 	const low = [];
 	let checked = 0;
@@ -36,20 +35,29 @@ export const CONTRAST_SCRIPT = `(() => {
 		seen.add(el);
 		const s = getComputedStyle(el);
 		if (s.visibility === "hidden" || !el.getClientRects().length || el.closest("[aria-hidden=true]")) continue;
-		// Every ancestor's opacity fades all it holds, an opaque background included, so walk the whole
-		// chain: each background layer and the text take the opacity they inherit from the root down.
-		const chain = [];
-		for (let n = el; n; n = n.parentElement) chain.unshift(n);
-		let inherited = 1;
-		let bg = page;
-		for (const n of chain) {
+		// An element's opacity fades its whole group, its background and everything inside it composited
+		// together, once. So build each pixel inside out, in premultiplied colour: the text, or nothing, over
+		// each element's background up the chain, each group faded by its own opacity, then over the page.
+		const layers = [];
+		for (let n = el; n; n = n.parentElement) {
 			const ns = getComputedStyle(n);
-			inherited *= Number(ns.opacity);
-			const c = parse(ns.backgroundColor);
-			if (c && c.a > 0) bg = over({ ...c, a: c.a * inherited }, bg);
+			layers.push({ bg: parse(ns.backgroundColor), opacity: Number(ns.opacity) });
 		}
 		const color = parse(s.color);
-		const fg = over({ ...color, a: color.a * inherited }, bg);
+		const pixel = (text) => {
+			let out = text ? { r: color.r * color.a, g: color.g * color.a, b: color.b * color.a, a: color.a } : { r: 0, g: 0, b: 0, a: 0 };
+			for (const { bg: c, opacity } of layers) {
+				if (c && c.a > 0) {
+					const k = 1 - out.a;
+					out = { r: out.r + c.r * c.a * k, g: out.g + c.g * c.a * k, b: out.b + c.b * c.a * k, a: out.a + c.a * k };
+				}
+				out = { r: out.r * opacity, g: out.g * opacity, b: out.b * opacity, a: out.a * opacity };
+			}
+			const k = 1 - out.a;
+			return { r: out.r + page.r * k, g: out.g + page.g * k, b: out.b + page.b * k, a: 1 };
+		};
+		const fg = pixel(true);
+		const bg = pixel(false);
 		const [hi, lo] = [lum(fg), lum(bg)].sort((a, b) => b - a);
 		const ratio = (hi + 0.05) / (lo + 0.05);
 		const size = parseFloat(s.fontSize);
@@ -61,8 +69,8 @@ export const CONTRAST_SCRIPT = `(() => {
 })()`;
 
 /**
- * Script text planting two texts the contrast check must flag, one faint and one in an opaque card inside a
- * faded wrapper, then removing them: returns, as JSON, the planted texts it flagged.
+ * Script text planting texts the contrast check must flag, one faint and one in an opaque card inside a faded
+ * wrapper, and one it must pass, then removing them: returns, as JSON, the planted texts it flagged.
  */
 export const CONTRAST_CONTROL = `(() => {
 	const faint = document.createElement("p");
@@ -78,12 +86,24 @@ export const CONTRAST_CONTROL = `(() => {
 	faded.style.color = "#eef2f8";
 	card.append(faded);
 	wrapper.append(card);
+	// And one that must pass: black on a white card in a 60% wrapper is about 7.5:1 once the group is faded
+	// once, but about 4:1 if the fade is counted again for the text over the already faded card.
+	const light = document.createElement("div");
+	light.style.opacity = "0.6";
+	const sheet = document.createElement("div");
+	sheet.style.background = "#ffffff";
+	const dark = document.createElement("p");
+	dark.textContent = "control: readable in a faded card";
+	dark.style.color = "#000000";
+	sheet.append(dark);
+	light.append(sheet);
 	const host = document.querySelector("main") || document.body;
-	host.prepend(faint, wrapper);
+	host.prepend(faint, wrapper, light);
 	try {
 		return JSON.stringify(JSON.parse(${CONTRAST_SCRIPT}).low.map((l) => l.text).filter((t) => t.startsWith("control: ")));
 	} finally {
 		faint.remove();
 		wrapper.remove();
+		light.remove();
 	}
 })()`;
