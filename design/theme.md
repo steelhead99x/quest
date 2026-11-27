@@ -99,6 +99,14 @@ in sentence case: no capitals or tracking for labels. Both faces are
 open-licensed and served by the site. Quest's markers, size colours, and mark stay as above: the amber `!`
 and `?`, the rarity ladder with its labels, and the amber square.
 
+## MoQ branding
+
+The site footer and share card use the
+[official moq.dev wordmark](https://github.com/moq-dev/moq.dev/blob/77d39e45682b8896476e325e94b024974d28efd8/public/home/logo.svg).
+The [MIT notice](theme/moq-dev-license.txt) ships with the asset.
+Quest's own mark continues to identify the app in the header and on home
+screens.
+
 ## Social image
 
 The landing page uses [an original route map](theme/route.svg). The amber line

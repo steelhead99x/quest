@@ -99,6 +99,9 @@ export function Layout(props: Page & { children: Child }) {
 				{props.crumbs && <Crumbs crumbs={props.crumbs} />}
 				<main>{props.children}</main>
 				<footer class="wrap site-footer">
+					<a class="moq-brand" href="https://moq.dev/" aria-label="moq.dev">
+						<img src="/theme/moq-dev-wordmark.svg" alt="" width="128" height="28" />
+					</a>
 					<p>
 						Quest is open source, under MIT or Apache-2.0. <a href={repo}>Read the source on GitHub</a>.
 					</p>
