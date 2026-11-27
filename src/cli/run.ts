@@ -2,7 +2,17 @@
 // `quest gate` and, for a Nix task, in the repository's dev shell, with every task whose `after` tasks passed
 // running at once.
 import { type ChildProcess, spawn } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	copyFileSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import {
@@ -178,6 +188,14 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 		io.stdout(`${JSON.stringify({ include })}\n`);
 		return 0;
 	}
+	// A task runs on this host, so another operating system's tasks would run with the wrong toolchain and pass for
+	// that system's; only --query, which runs nothing, lists them.
+	const host = nativeOs();
+	const foreign = options.os.filter((os) => os !== host);
+	if (foreign.length > 0)
+		throw new Error(
+			`quest run executes only this host's (${host}) tasks, not ${foreign.map((os) => `${os}'s`).join(" or ")}; --query lists any operating system's`,
+		);
 	if (tasks.length === 0) {
 		io.stderr("quest: no task to run\n");
 		return 0;
@@ -262,6 +280,12 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 			if (detached) signalAll(nested ? "SIGKILL" : requested(cancel.signal));
 		},
 	);
+	// Another run in this checkout would delete or overwrite the same report files mid-task, so its reports would
+	// pass for this run's; this run holds the report paths of the tasks it picked until they end.
+	const release = holdReports(
+		top,
+		tasks.flatMap((task) => declared(task).map((output) => output.path)),
+	);
 	try {
 		await new Promise<void>((done) => {
 			const schedule = () => {
@@ -335,6 +359,7 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 			schedule();
 		});
 	} finally {
+		release();
 		unfollow();
 		cancel.close();
 	}
@@ -411,4 +436,58 @@ function prefixed(prefix: string, stream: NodeJS.ReadableStream, write: (text: s
 		if (rest !== "") write(`${prefix}${rest}\n`);
 		rest = "";
 	};
+}
+
+/**
+ * Claim `paths`, each a report path from the repository root, for this process until the returned function releases
+ * them. A claim is a file under the checkout's git directory naming its process; one whose process has exited is
+ * stale and taken over. Paths compare without case, as macOS and Windows checkouts name files.
+ */
+function holdReports(top: string, paths: string[]): () => void {
+	const dir = resolve(top, git(top, ["rev-parse", "--git-path", "quest-run-reports"]));
+	mkdirSync(dir, { recursive: true });
+	const held: string[] = [];
+	const release = () => {
+		for (const file of held.splice(0))
+			try {
+				if (readFileSync(file, "utf8") === String(process.pid)) rmSync(file, { force: true });
+			} catch {
+				// Already gone.
+			}
+	};
+	try {
+		for (const path of [...new Set(paths.map((path) => path.toLowerCase()))].sort()) {
+			const file = join(dir, createHash("sha256").update(path).digest("hex").slice(0, 32));
+			for (let attempt = 0; ; attempt++) {
+				try {
+					writeFileSync(file, String(process.pid), { flag: "wx" });
+					held.push(file);
+					break;
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 0) throw error;
+				}
+				const owner = Number(readFileSync(file, "utf8"));
+				if (alive(owner))
+					throw new Error(
+						`another quest run in this checkout is writing ${paths.find((each) => each.toLowerCase() === path)} (process ${owner}); wait for it to finish`,
+					);
+				rmSync(file, { force: true });
+			}
+		}
+	} catch (error) {
+		release();
+		throw error;
+	}
+	return release;
+}
+
+/** Whether process `pid` still runs; EPERM means it runs as another user. */
+function alive(pid: number): boolean {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
 }

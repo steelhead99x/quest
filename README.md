@@ -1596,7 +1596,7 @@ os = ["windows"]
 ```sh
 quest run                                 # this host's pr tasks the branch affects
 quest run --tier gate --fail-fast         # the merge gate
-quest run --tier nightly --os macos --all # every nightly task for macOS
+quest run --tier nightly --all           # every nightly task for this host
 quest run --only test                     # one task, whatever its tier
 quest run --tier gate --query --os linux --os macos   # a runner's matrix
 ```
@@ -1611,6 +1611,12 @@ diff. A run of `pr`, `gate`, `nightly`, or `release-gate` also runs the tiers
 before it, so the gate repeats the PR's checks and a nightly on macOS runs the
 Linux gate's tests there; a `release` run runs only `release` tasks, which
 publish.
+
+A run executes only this host's tasks: `--os` naming another operating
+system fails unless with `--query`, which runs nothing and lists any
+system's tasks for a runner's matrix. Two runs in one checkout cannot share
+report paths: a second run that picks a task whose `junit` or `metrics` file
+the first is writing fails until the first ends.
 
 Each task runs through [`quest gate`](#gate-cpu-heavy-commands), so independent
 tasks start together and wait only for the host's room. A task that sets

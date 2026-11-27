@@ -294,7 +294,9 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"env when a task run outside nix develop has an environment table, and nix outside that dev shell.\n\n" +
 				"A task that passes must write the junit and metrics files it declares, and metrics must hold a JSON " +
 				"object; --report copies them to <dir>/<task>/junit.xml and <dir>/<task>/metrics.json, where <dir> " +
-				"must not exist yet. A failed task skips the tasks after it, and with --fail-fast also stops every " +
+				"must not exist yet. A run executes only this host's tasks, and fails while another run in the checkout " +
+				"writes a report path one of its tasks declares. A failed task skips the tasks after it, and with " +
+				"--fail-fast also stops every " +
 				"running task. Exits 1 when a task fails.\n\n" +
 				"--query prints the picked tasks as JSON for a CI runner's matrix and runs nothing: " +
 				"{include: [{task, os, tier, after, nix, capabilities, caches}]}, one entry per task and operating " +
@@ -311,7 +313,7 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 		.option("--base <ref>", "Diff against the merge base of HEAD and this ref")
 		.option(
 			"--os <os>",
-			`Run the tasks for this operating system, one of ${HOST.join(", ")} (repeatable; default: this host's)`,
+			`Pick the tasks for this operating system, one of ${HOST.join(", ")} (repeatable; default: this host's); a run executes only this host's, --query any`,
 			(value: string, previous: Host[]) => {
 				if (!HOST.includes(value as Host)) throw new InvalidArgumentError(`expected one of ${HOST.join(", ")}`);
 				return [...previous, value as Host];

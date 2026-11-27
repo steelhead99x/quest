@@ -1,6 +1,7 @@
 // quest run: picking tasks from a change, running them in their order through the gate and the Nix dev shell,
 // and collecting their reports.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +10,7 @@ import { expect, test } from "vitest";
 
 import { main } from "../src/cli/main";
 import { REFERENCE_LINE } from "../src/core";
-import { type RunOptions, run } from "../src/cli/run";
+import { type RunOptions, nativeOs, run } from "../src/cli/run";
 import { initRepository, tempDir } from "./fixture";
 
 // The stubs are shell scripts.
@@ -82,7 +83,7 @@ async function runIn(
 			all: false,
 			only: null,
 			base: undefined,
-			os: ["linux"],
+			os: [nativeOs()],
 			failFast: false,
 			query: false,
 			report: undefined,
@@ -399,4 +400,45 @@ test.runIf(posix)("quest check reports a malformed quest.toml, and Nix tasks wit
 		code: 1,
 		stderr: "quest: quest.toml: must be a regular file, not a symlink\n",
 	});
+});
+
+test.runIf(posix)("refuses to run another operating system's tasks, which --query may still list", async () => {
+	const other = (["linux", "macos", "windows"] as const).find((os) => os !== nativeOs())!;
+	const dir = repository({ "quest.toml": task("port", "touch ran", `os = ["${other}"]`) });
+	await expect(runIn(dir, { all: true, os: [other] })).rejects.toThrow(
+		`quest run executes only this host's (${nativeOs()}) tasks, not ${other}'s; --query lists any operating system's`,
+	);
+	await expect(runIn(dir, { all: true, os: [nativeOs(), other] })).rejects.toThrow(`not ${other}'s`);
+	expect(existsSync(join(dir, "ran"))).toBe(false);
+	const query = await runIn(dir, { all: true, os: [other], query: true });
+	expect(JSON.parse(query.stdout).include).toEqual([expect.objectContaining({ task: "port", os: other })]);
+});
+
+test.runIf(posix)("a second run in the same checkout cannot take over a running task's reports", async () => {
+	// Each run writes its own name to the shared report path, then takes a while to finish.
+	const dir = repository({ "quest.toml": task("unit", 'echo "$RUN" > unit.xml; sleep 1', 'junit = "unit.xml"') });
+	const first = join(tempDir(), "first");
+	const a = runIn(dir, { all: true, report: first }, { RUN: "a" });
+	await new Promise((done) => setTimeout(done, 300));
+	await expect(runIn(dir, { all: true }, { RUN: "b" })).rejects.toThrow(
+		"another quest run in this checkout is writing unit.xml",
+	);
+	expect((await a).code).toBe(0);
+	expect(readFileSync(join(first, "unit", "junit.xml"), "utf8")).toBe("a\n");
+	// Once the first run ends, the next one may write the report.
+	expect((await runIn(dir, { all: true }, { RUN: "b" })).code).toBe(0);
+	expect(readFileSync(join(dir, "unit.xml"), "utf8")).toBe("b\n");
+});
+
+test.runIf(posix)("a claim left by a run that died is taken over", async () => {
+	const dir = repository({ "quest.toml": task("unit", "echo ok > Unit.xml", 'junit = "Unit.xml"') });
+	// The claim of a process that has exited, as a killed run leaves it; paths compare without case.
+	const dead = spawnSync("true").pid!;
+	const claims = join(dir, ".git", "quest-run-reports");
+	mkdirSync(claims, { recursive: true });
+	writeFileSync(join(claims, createHash("sha256").update("unit.xml").digest("hex").slice(0, 32)), String(dead));
+	const out = await runIn(dir, { all: true });
+	expect(out.code, out.stderr).toBe(0);
+	// The run releases its claims when it ends.
+	expect(execFileSync("ls", [claims], { encoding: "utf8" })).toBe("");
 });
