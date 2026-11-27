@@ -103,9 +103,13 @@ and `?`, the rarity ladder with its labels, and the amber square.
 
 The site footer and share card use the
 [official moq.dev wordmark](https://github.com/moq-dev/moq.dev/blob/77d39e45682b8896476e325e94b024974d28efd8/public/home/logo.svg).
-The [MIT notice](theme/moq-dev-license.txt) ships with the asset.
+The [MIT notice](theme/moq-dev-license.txt) ships with the file, and covers
+copyright in the SVG; it grants no right to use moq.dev's mark. That needs the
+moq.dev maintainer's (Luke's) written permission, which this fork doesn't have
+yet: ask before this lands, and record the permission here.
 Quest's own mark continues to identify the app in the header and on home
-screens.
+screens. On the share card the wordmark follows "from", so the card says where
+Quest comes from rather than reading as a MoQ product.
 
 ## Social image
 

@@ -12,5 +12,6 @@
   <text x="66" y="478" font-size="32">A shared quest log for you</text>
   <text x="66" y="518" font-size="32">and your coding agents.</text>
   <image href="route.svg" x="612" y="98" width="620" height="444"/>
+  <text x="792" y="596" font-size="26" text-anchor="end" style="fill:#94a3b8">from</text>
   <image href="moq-dev-wordmark.svg" x="806" y="559" width="240" height="52.5"/>
 </svg>
