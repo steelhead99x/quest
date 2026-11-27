@@ -7,14 +7,15 @@ name: Check
 # coalesce.
 #
 # A fork has no merge queue and no host runner, so queue.yml never builds its
-# pull requests. There `check` also runs on each pull request to main, as the
-# fork's pre-merge build; kixel-ai/quest's pull requests keep only the skipped
-# `Queue` context queue-pr.yml reports.
+# pull requests. There `check` also runs on each pull request, whatever its
+# base, so a PR stacked on another PR's branch is built too: this is the fork's
+# pre-merge build. kixel-ai/quest's pull requests keep only the skipped `Queue`
+# context queue-pr.yml reports. A pull request runs this file as its test merge
+# commit has it, so a PR whose base and head both predate the trigger gets no build.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
