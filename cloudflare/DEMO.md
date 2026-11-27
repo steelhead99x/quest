@@ -17,7 +17,12 @@ bun run demo:e2e    # in another shell, with Chrome installed
 
 `demo:e2e` walks the demo in headless Chrome at a phone's size: sign in, the
 board, a claimed quest's CI, re-running failed jobs, dispatching a workflow,
-the bench, installing to the home screen, opening offline, and signing out.
+the bench, installing to the home screen, opening offline, accessibility, and
+signing out. The accessibility step runs axe-core's WCAG 2.2 AA and
+best-practice rules on the home page, board, a quest, the bench, and the
+offline notice, in light and dark, and measures every text element's contrast
+itself (`demo/a11y.ts`), since the pages' decorative layers leave axe's own
+contrast rule undecided.
 It asserts each step, saves a screenshot of each to `.tmp/demo/`, prints a
 report, and exits 1 on any failure. `bun run test` also walks the demo's
 sign-in, board, re-run, dispatch, and bench inside workerd.

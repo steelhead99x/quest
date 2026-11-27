@@ -22,6 +22,7 @@
 		"demo/snapshot.ts",
 		"demo/build.ts",
 		"demo/e2e.ts",
+		"demo/a11y.ts",
 		"test/*.ts",
 		"vitest.config.ts",
 		"src/github/app.ts"
