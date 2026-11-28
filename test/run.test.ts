@@ -475,24 +475,47 @@ test.runIf(posix)("a run refuses a report path another process claims, until tha
 	expect(readFileSync(join(refused, "unit", "junit.xml"), "utf8")).toBe("ok\n");
 });
 
-test.runIf(posix)("a task an earlier run started keeps its reports claimed after that run is killed", async () => {
+test.runIf(posix)("a task keeps its reports claimed after its run and its gate are killed", async () => {
 	const fifo = join(tempDir(), "fifo");
+	const gate = join(tempDir(), "gate");
 	execFileSync("mkfifo", [fifo]);
-	// The stub gate execs the task, so its Bash holds the claim on descriptor 3; it closes it before saying so, which
-	// tells the test the claim is free without a sleep.
-	const script = 'echo "$RUN" > unit.xml; echo started; cat "$FIFO" > /dev/null; exec 3>&-; echo done > "$FIFO"';
+	execFileSync("mkfifo", [gate]);
+	// The real gate, admitted at once, holds the write end of the gate FIFO, which Bun closes in what it starts, so
+	// reading it to the end waits out the gate's death.
+	const bin = tempDir();
+	writeFileSync(
+		join(bin, "quest"),
+		`#!/bin/sh\nexec 9>${quote(gate)}\nexec ${quote(process.execPath)} --config=${quote(config)} ${quote(entry)} "$@"\n`,
+		{ mode: 0o755 },
+	);
+	const gone = readFile(gate);
+	// The task closes every claim it holds before saying so, which tells the test the claim is free without a sleep.
+	const script =
+		'echo "$RUN" > unit.xml; echo "started $PPID"; cat "$FIFO" > /dev/null; ' +
+		'exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-; echo done > "$FIFO"';
 	const dir = repository({ "quest.toml": task("unit", script, 'junit = "unit.xml"') });
-	const { bin } = stubs();
 	const launcher = spawn(process.execPath, [`--config=${config}`, entry, "run", "--all"], {
 		cwd: dir,
-		env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RUN: "a", FIFO: fifo },
+		env: {
+			...process.env,
+			PATH: `${bin}:${process.env.PATH}`,
+			QUEST_GATE_ADMITTED: "1",
+			QUEST_GATE_GROUP: "1",
+			RUN: "a",
+			FIFO: fifo,
+		},
 		stdio: ["ignore", "pipe", "inherit"],
 	});
-	await new Promise<void>((done) =>
-		launcher.stdout!.on("data", (chunk) => String(chunk).includes("started") && done()),
+	const pid = await new Promise<number>((done) =>
+		launcher.stdout!.on("data", (chunk) => {
+			const started = /started (\d+)/.exec(String(chunk));
+			if (started) done(Number(started[1]));
+		}),
 	);
-	// The task runs on in a process group of its own, as a force-stopped run leaves it.
+	// As a force-stopped run leaves it, the task runs on in a process group of its own, now without its gate.
 	await kill(launcher);
+	process.kill(pid, "SIGKILL");
+	await gone;
 	await expect(runIn(dir, { all: true }, { RUN: "b" })).rejects.toThrow("is writing unit.xml");
 	await writeFile(fifo, "");
 	expect(await readFile(fifo, "utf8")).toBe("done\n");

@@ -888,6 +888,20 @@ export async function measure(
 const ADMITTED = "QUEST_GATE_ADMITTED";
 
 /**
+ * How many descriptors, from 3 up, the gate's caller hands it to pass on to its command, such as `quest run`'s
+ * report claims (see run.ts): the command holds them while it runs, even after the gate is killed.
+ */
+export const KEEP = "QUEST_GATE_KEEP";
+
+/** The descriptors `env` hands the command through `KEEP`, and the command's environment without it. */
+function handed(env: NodeJS.ProcessEnv): [number[], NodeJS.ProcessEnv] {
+	const { [KEEP]: count, ...rest } = env;
+	if (count === undefined) return [[], env];
+	if (!/^[1-9][0-9]?$/.test(count)) throw new Error(`${KEEP} must count descriptors from 3, not ${count}`);
+	return [Array.from({ length: Number(count) }, (_, index) => 3 + index), rest];
+}
+
+/**
  * Set to 1 by whatever runs a check that lands PRs, such as a merge queue build
  * or the land daemon's sandbox, so every gate inside the check is admitted with
  * priority (see `Precedence`).
@@ -910,9 +924,13 @@ export type Owner = (command: string[], env: NodeJS.ProcessEnv, cancel: Cancella
  * owner's, is no kill here.
  */
 function plain(held: boolean): Owner {
-	return (command, env, cancel) =>
+	return (command, given, cancel) =>
 		new Promise((resolve, reject) => {
-			const child = spawn(command[0], command.slice(1), { env, stdio: "inherit" });
+			const [keep, env] = handed(given);
+			const child = spawn(command[0], command.slice(1), {
+				env,
+				stdio: ["inherit", "inherit", "inherit", ...keep],
+			});
 			const stop = () => {
 				if (forwards(cancel.signal, held)) child.kill(requested(cancel.signal));
 			};
@@ -946,9 +964,11 @@ export const inside: Owner = plain(true);
  */
 function background(unit: string, enclosing: string | null): Measuring {
 	let used: number | null = null;
-	const run: Owner = async (command, env, cancel) => {
+	const run: Owner = async (command, given, cancel) => {
+		const [keep, env] = handed(given);
 		const { status, cpu } = await measuredRun(unit, process.cwd(), command, {
 			env,
+			keep,
 			cancel,
 			within: enclosing,
 			slice: BACKGROUND_SLICE,
@@ -990,11 +1010,12 @@ export const job: Owner = (command, env, cancel) => direct(...stubbed(command, e
  * holder has exited, so each one, such as a leaf that outlives the wrappers around it, finishes its
  * own cleanup before the rest of the group is killed, unless a second signal kills it first.
  */
-export const group: Owner = (command, env, cancel) =>
+export const group: Owner = (command, given, cancel) =>
 	new Promise((resolve, reject) => {
+		const [keep, env] = handed(given);
 		const child = spawn("nice", ["-n", "10", ...command], {
 			env: { ...env, [GROUP]: "1" },
-			stdio: ["inherit", "inherit", "inherit", "pipe"],
+			stdio: ["inherit", "inherit", "inherit", "pipe", ...keep],
 			detached: true,
 		});
 		const token = child.stdio[TOKEN] as Readable;

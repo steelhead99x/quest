@@ -1616,7 +1616,8 @@ A run executes only this host's tasks: `--os` may name another operating
 system only with `--query`, which runs nothing and lists that system's tasks
 for a runner's matrix. Two runs in one checkout cannot share
 report paths: a second run that picks a task whose `junit` or `metrics` file
-the first is writing fails until the first ends.
+the first is writing fails until that task ends, even when the first run was
+killed and left the task running.
 
 Each task runs through [`quest gate`](#gate-cpu-heavy-commands), so independent
 tasks start together and wait only for the host's room. A task that sets
