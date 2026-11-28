@@ -121,7 +121,7 @@ describe("board", () => {
 		});
 		expect(response.status).toBe(200);
 		const html = await response.text();
-		expect(html).toContain("<h1>Alpha</h1>");
+		expect(html).toContain('<h1 id="s-alpha">Alpha</h1>');
 		expect(html).toContain('href="/repos/moq-dev/quest/quest/m0/b"');
 		expect(html).toContain(`href="https://github.com/moq-dev/quest/blob/${"a".repeat(40)}/docs/x.md#y"`);
 		expect(html).not.toContain("<script>alert(1)</script>");
@@ -349,7 +349,20 @@ describe("CI", () => {
 	test("an expired token on the board's CI still asks the person to sign in again", async () => {
 		const h = harness({ ...routes(), [RUNS]: () => json({ message: "Bad credentials" }, 401) });
 		const response = await h.request("/repos/moq-dev/quest", { cookies: [await signedIn()] });
-		expect(response.status).not.toBe(200);
+		expect(response.status).toBe(401);
+		expect(response.headers.get("Set-Cookie")).toMatch(/Max-Age=0/);
+	});
+
+	test("the board stays up when the runs are unreadable or rate-limited", async () => {
+		for (const [answer, says] of [
+			[() => json({}), "GitHub&#39;s list of workflow runs was unreadable"],
+			[() => json({ message: "API rate limit exceeded for user" }, 403), "GitHub is rate-limiting requests"],
+		] as const) {
+			const h = harness({ ...routes(), [RUNS]: answer });
+			const response = await h.request("/repos/moq-dev/quest", { cookies: [await signedIn()] });
+			expect(response.status).toBe(200);
+			expect(await response.text()).toContain(says);
+		}
 	});
 
 	test("reads workflow names and triggers from the YAML, not from its text", () => {

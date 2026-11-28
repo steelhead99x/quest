@@ -10,11 +10,12 @@ const links = {
 };
 
 test("a link to a heading in the same quest lands on that heading", () => {
-	const sections = render(
+	const { title, sections } = render(
 		links,
 		"quest/m0/a.md",
 		"# A\n\n## Goal\n\nSee [the details](#details) and [the plan's last step](#ship-it-v2).\n\n## Details\n\n### Ship it (v2)\n\nDone.\n",
 	);
+	expect(title).toBe("a");
 	const details = sections.find((s) => s.heading === "Details")!;
 	expect(details.id).toBe("details");
 	expect(details.html).toContain('<h4 id="ship-it-v2">Ship it (v2)</h4>');
@@ -24,7 +25,11 @@ test("a link to a heading in the same quest lands on that heading", () => {
 });
 
 test("ids follow GitHub's: visible text, lower case, punctuation dropped, repeats numbered in order", () => {
-	const sections = render(links, "quest/m0/a.md", "## Notes\n\n### `quest run` & caching\n\n## Notes\n\n### Notes\n");
+	const { sections } = render(
+		links,
+		"quest/m0/a.md",
+		"## Notes\n\n### `quest run` & caching\n\n## Notes\n\n### Notes\n",
+	);
 	expect(sections.map((s) => s.id)).toEqual(["notes", "notes-1"]);
 	expect(sections[0]!.html).toContain('id="quest-run--caching"');
 	expect(sections[1]!.html).toContain('id="notes-2"');
@@ -35,4 +40,33 @@ test("a heading's id is escaped, and one with only punctuation is empty but uniq
 	expect(s.slug('a"b<c')).toBe("abc");
 	expect(s.slug("!!!")).toBe("");
 	expect(s.slug("???")).toBe("-1");
+});
+
+test("a repeat skips an id an earlier heading already has, as GitHub's does", () => {
+	const s = new Slugger();
+	expect(["Phase", "Phase-1", "Phase", "Step-1", "Step", "Step"].map((t) => s.slug(t))).toEqual([
+		"phase",
+		"phase-1",
+		"phase-2",
+		"step-1",
+		"step",
+		"step-2",
+	]);
+});
+
+test("every `# ` heading takes its id in order, the first naming the page's title", () => {
+	const { title, sections } = render(links, "quest/m0/a.md", "# Notes\n\n## Notes\n\n# Notes\n\n### Notes\n");
+	expect(title).toBe("notes");
+	expect(sections[0]!.id).toBe("notes-1");
+	expect(sections[1]!.html).toContain('id="notes-3"');
+	expect(render(links, "quest/m0/a.md", "## Goal\n").title).toBe("");
+});
+
+test("character references in a heading decode as HTML does, and an invalid one never throws", () => {
+	const { sections } = render(
+		links,
+		"quest/m0/a.md",
+		"## Caf&eacute; &#x41;\n\n## <https://a.example/&#99999999999;>\n\n## &bogus; &#0;\n\n## &#99999999999; x\n",
+	);
+	expect(sections.map((s) => s.id)).toEqual(["café-a", "httpsaexample99999999999", "bogus-", "99999999999-x"]);
 });

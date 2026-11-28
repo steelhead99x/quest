@@ -2,6 +2,7 @@
 // contributors' forks, so raw HTML shows as text, images as their alt text,
 // and only web and mail links survive. Links into the tree open board pages.
 
+import { decodeNamedCharacterReference } from "decode-named-character-reference";
 import { Marked, type Token } from "marked";
 import { resolve } from "../../../src/core/index.ts";
 
@@ -16,10 +17,13 @@ export interface Links {
 /** One `## ` section of a quest, rendered, with the id its heading's anchor links use. */
 export type Section = { heading: string; id: string; html: string };
 
+/** A quest's page body: the id for its `# ` title, empty without one, and its sections. */
+export type Rendered = { title: string; sections: Section[] };
+
 /**
  * Heading ids as GitHub makes them, so a quest's `#details` links jump on the board as on GitHub: the heading's
  * text in lower case, without punctuation but for hyphens and underscores, spaces as hyphens, and a repeat
- * numbered -1, -2, and so on through the document.
+ * numbered -1, -2, and so on through the document, skipping any id an earlier heading already has.
  */
 export class Slugger {
 	#seen = new Map<string, number>();
@@ -30,21 +34,26 @@ export class Slugger {
 			.trim()
 			.replace(/[^\p{L}\p{M}\p{N}\p{Pc}\- ]/gu, "")
 			.replace(/ /g, "-");
-		const n = this.#seen.get(base);
-		this.#seen.set(base, (n ?? -1) + 1);
-		return n === undefined ? base : `${base}-${n + 1}`;
+		let id = base;
+		while (this.#seen.has(id)) {
+			const n = this.#seen.get(base)! + 1;
+			this.#seen.set(base, n);
+			id = `${base}-${n}`;
+		}
+		this.#seen.set(id, 0);
+		return id;
 	}
 }
 
-/** The text a reader sees in rendered inline HTML: tags dropped, entities decoded. */
+/** The text a reader sees in rendered inline HTML: tags dropped, character references decoded as HTML does. */
 function visible(html: string): string {
 	return html
 		.replace(/<[^>]*>/g, "")
-		.replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
-		.replace(/&amp;/g, "&")
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&quot;/g, '"');
+		.replace(/&(#\d+|#[xX][\da-fA-F]+|[A-Za-z][A-Za-z\d]*);/g, (ref, body: string) => {
+			if (!body.startsWith("#")) return decodeNamedCharacterReference(body) || ref;
+			const n = /^#[xX]/.test(body) ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+			return n > 0 && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff) ? String.fromCodePoint(n) : "\uFFFD";
+		});
 }
 
 function escape(text: string): string {
@@ -67,8 +76,11 @@ export function rewrite(links: Links, from: string, href: string): string | null
 	return page === null ? links.blob(target, hash) : page + hash;
 }
 
-/** The document's `## ` sections in order, each rendered to HTML. The `# ` title is left to the page. */
-export function render(links: Links, path: string, content: string): Section[] {
+/**
+ * The document's `## ` sections in order, each rendered to HTML, and the id of its first `# ` heading, which the
+ * page draws as its title. Every `# ` heading takes its id in document order, as on GitHub.
+ */
+export function render(links: Links, path: string, content: string): Rendered {
 	const slugger = new Slugger();
 	const marked = new Marked({
 		gfm: true,
@@ -92,21 +104,34 @@ export function render(links: Links, path: string, content: string): Section[] {
 			},
 		},
 	});
-	const sections: { heading: string; tokens: Token[] }[] = [];
+	const id = (text: string) => slugger.slug(visible(marked.parseInline(text, { async: false })));
+	// `# ` headings outside the title stay off the page, but each holds its place in the ids' order, so what
+	// follows one starts a section of its own.
+	const parts: ({ title: string } | { heading: string; tokens: Token[] })[] = [];
+	let open: { heading: string; tokens: Token[] } | undefined;
 	for (const token of marked.lexer(content)) {
-		if (token.type === "heading" && token.depth === 1) continue;
-		if (token.type === "heading" && token.depth === 2) {
-			sections.push({ heading: token.text.trim(), tokens: [] });
-		} else if (sections.length > 0) {
-			sections.at(-1)!.tokens.push(token);
+		if (token.type === "heading" && token.depth === 1) {
+			parts.push({ title: token.text.trim() });
+			open = undefined;
+		} else if (token.type === "heading" && token.depth === 2) {
+			parts.push((open = { heading: token.text.trim(), tokens: [] }));
+		} else if (open) {
+			open.tokens.push(token);
 		} else if (token.type !== "space") {
-			sections.push({ heading: "", tokens: [token] });
+			parts.push((open = { heading: "", tokens: [token] }));
 		}
 	}
 	// In document order, so a repeated heading's number matches GitHub's.
-	return sections.map(({ heading, tokens }) => ({
-		heading,
-		id: heading ? slugger.slug(visible(marked.parseInline(heading, { async: false }))) : "",
-		html: marked.parser(tokens),
-	}));
+	let title: string | undefined;
+	const sections: Section[] = [];
+	for (const part of parts) {
+		if ("title" in part) {
+			const slug = id(part.title);
+			title ??= slug;
+		} else {
+			const heading = part.heading ? id(part.heading) : "";
+			sections.push({ heading: part.heading, id: heading, html: marked.parser(part.tokens) });
+		}
+	}
+	return { title: title ?? "", sections };
 }
