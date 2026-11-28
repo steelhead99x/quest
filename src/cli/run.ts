@@ -16,7 +16,6 @@ import {
 	pickTasks,
 } from "../core";
 import { tryLock } from "./file-lock";
-import { KEEP } from "./gate";
 import { git } from "./git";
 import { GROUP, cancelled, follow, interrupts, requested } from "./interrupt";
 import { programCommand, requireProgram } from "./program";
@@ -318,12 +317,12 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 				const started = io.now();
 				const argv = programCommand(programs.quest, ["gate", ...command(task)], io.env);
 				io.stderr(`quest: ${task.name} started\n`);
-				// The gate inherits its reports' locks and passes them on to the task, so a task of a killed run, which
-				// runs on in a process group or scope of its own, keeps a retry from taking its reports until it ends.
+				// The gate inherits its reports' locks, so a gate this run started, which outlives a killed run in a
+				// process group of its own, keeps a retry from taking its reports until it and its command end.
 				const inherited = outputs.flatMap(({ path }) => locks.get(path.toLowerCase()) ?? []);
 				const child = spawn(argv.file, argv.args, {
 					cwd: top,
-					env: inherited.length === 0 ? env : { ...env, [KEEP]: String(inherited.length) },
+					env,
 					stdio: ["ignore", "pipe", "pipe", ...inherited],
 					detached,
 					windowsVerbatimArguments: argv.windowsVerbatimArguments,

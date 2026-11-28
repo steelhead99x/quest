@@ -73,8 +73,6 @@ export interface RunOptions {
 	within?: string | null;
 	/** The slice the scope runs in; the user manager's default, `app.slice`, when omitted. */
 	slice?: string;
-	/** Descriptors of this process the command also inherits, from descriptor 6 up. */
-	keep?: number[];
 	/** Reads the CPU microseconds a measured run's cgroup used; `cgroupUsage` when omitted. */
 	usage?(group: string): number | null;
 }
@@ -118,7 +116,7 @@ const handshake = (hold: boolean) =>
 	(hold ? HOLD : "") +
 	'printf "%s\\n" "$path" >&3; ' +
 	"read -r admitted <&4 || exit 125; " +
-	'exec 3>&- 4<&- 5<&-; exec "$@"';
+	`exec 3>&- 4<&-${hold ? " 5<&-" : ""}; exec "$@"`;
 
 /**
  * Keeps the scope's cgroup until the supervisor has read what it used: systemd removes an empty scope's cgroup as
@@ -420,8 +418,7 @@ function contain(
 		const child = spawn(launch[0], [...launch.slice(1), ...command], {
 			cwd,
 			env: options.env,
-			// The handshake closes 3 to 5 before it executes the command, which keeps the rest.
-			stdio: [pipe, pipe, pipe, "pipe", "pipe", describe.measure ? "pipe" : "ignore", ...(options.keep ?? [])],
+			stdio: [pipe, pipe, pipe, "pipe", "pipe", ...(describe.measure ? ["pipe" as const] : [])],
 		});
 		options.spawned?.(child as ChildProcessWithoutNullStreams);
 		const report = child.stdio[3] as Readable;
