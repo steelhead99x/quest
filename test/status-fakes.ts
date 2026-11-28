@@ -275,6 +275,49 @@ export function setup(
 				const contexts = { pageInfo: { hasNextPage: false, endCursor: null }, nodes };
 				return Response.json({ data: { repository: { object: { statusCheckRollup: { contexts } } } } });
 			}
+			if (request.query.includes("query ReviewTiers(")) {
+				// The statuses named, in the order given, each set a minute after the one before; by default the head's.
+				const pull = last?.data.repository.pullRequest;
+				const head = String(pull?.headRefOid ?? "");
+				const recorded = recordedRisk(String(pull?.body ?? ""));
+				const named =
+					options.statuses ??
+					({
+						[head]: reviewStatus(
+							"SUCCESS",
+							recorded === null || "malformed" in recorded
+								? "Risk low: passed"
+								: attestation(recorded, "passed"),
+							head,
+						),
+					} as Record<string, Node | null>);
+				const nodes = Object.entries(named).flatMap(([oid, status], i) =>
+					status == null
+						? []
+						: [
+								{
+									commit: {
+										oid,
+										status: {
+											context: {
+												...status,
+												createdAt: `2026-10-16T00:${String(i).padStart(2, "0")}:00Z`,
+											},
+										},
+									},
+								},
+							],
+				);
+				return Response.json({
+					data: {
+						repository: {
+							pullRequest: {
+								commits: { pageInfo: { hasPreviousPage: false, startCursor: null }, nodes },
+							},
+						},
+					},
+				});
+			}
 			if (request.query.includes("query ReviewStatus(")) {
 				const sha = String(request.variables.sha);
 				statusQueries.push(sha);

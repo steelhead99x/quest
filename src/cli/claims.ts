@@ -178,7 +178,7 @@ async function has(client: GitHub, repository: Repository, path: string): Promis
 }
 
 /** Whether two names are the same repository; GitHub ignores case. */
-function same(a: Repository, b: Repository): boolean {
+export function same(a: Repository, b: Repository): boolean {
 	return a.owner.toLowerCase() === b.owner.toLowerCase() && a.repo.toLowerCase() === b.repo.toLowerCase();
 }
 

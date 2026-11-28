@@ -82,6 +82,56 @@ export async function trustedReview(
 	return { body: "", head: null, localReview: false };
 }
 
+/**
+ * The review the `quest review` statuses on `pr`'s commits attest by themselves, with no `## Review` record that counts,
+ * as for a fork PR Kixel Quest does not serve, or null when none covers `head`. As the land gate picks it: the newest
+ * status a writer set on a commit whose diff from the base is the head's decides, counting only when it passed against
+ * `riskFile`, the base's current risk file blob, so a later failed round of the same diff outweighs an earlier pass.
+ * `state` is `current` when that commit is the head, else `diff-identical`.
+ */
+export async function statusReview(
+	github: GitHubReader,
+	pr: PullRequest & { base: string },
+	head: string,
+	riskFile: string | null,
+): Promise<{
+	state: "current" | "diff-identical";
+	head: string;
+	tier: string;
+	class: string | null;
+	localReview: boolean;
+} | null> {
+	const sha = head.toLowerCase();
+	// A diff GitHub will not give leaves that commit's status out, as the land gate leaves it, without failing the read.
+	const diffOf = async (oid: string) => {
+		try {
+			return await baseDiff(github, pr, oid);
+		} catch (error) {
+			if (error instanceof GitHubDeadline || !(error instanceof Error)) throw error;
+			return null;
+		}
+	};
+	let diff: Promise<string | null> | undefined;
+	for (const each of await reviewStatuses(github, pr)) {
+		if (each.oid !== sha) {
+			diff ??= diffOf(sha);
+			const own = await diff;
+			if (own === null || (await diffOf(each.oid)) !== own) continue;
+		}
+		const bound = await boundStatus(github, pr, each.oid, each.status);
+		if (typeof bound === "string") continue;
+		if (each.status.state !== "SUCCESS" || bound.riskFile !== riskFileId(riskFile)) return null;
+		return {
+			state: each.oid === sha ? "current" : "diff-identical",
+			head: each.oid,
+			tier: bound.tier,
+			class: bound.class,
+			localReview: bound.outcome !== "passed with no local reviewer",
+		};
+	}
+	return null;
+}
+
 /** The most files GitHub's compare API lists. */
 const FILE_LIMIT = 300;
 
