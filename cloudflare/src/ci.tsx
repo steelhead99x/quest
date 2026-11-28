@@ -66,16 +66,26 @@ export function RunList(props: {
 	repository: string;
 	next: string;
 	link: string;
+	/** Why the runs couldn't be read, shown in place of them. */
+	error?: string;
 }) {
 	return (
 		<section class="block ci">
 			<Heading title={props.title} />
-			{props.runs.length === 0 && <p class="muted">No runs yet.</p>}
-			<ul class="log">
-				{props.runs.map((run) => (
-					<RunRow run={run} repository={props.repository} next={props.next} />
-				))}
-			</ul>
+			{props.error ? (
+				<p class="muted">
+					{props.error} <a href={props.link}>See the runs on GitHub</a>
+				</p>
+			) : (
+				props.runs.length === 0 && <p class="muted">No runs yet.</p>
+			)}
+			{!props.error && (
+				<ul class="log">
+					{props.runs.map((run) => (
+						<RunRow run={run} repository={props.repository} next={props.next} />
+					))}
+				</ul>
+			)}
 			{props.more && (
 				<p>
 					<a href={props.link}>All runs on GitHub</a>

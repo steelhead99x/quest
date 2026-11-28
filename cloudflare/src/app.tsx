@@ -2,7 +2,7 @@ import { type Context as HonoContext, Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { authorizeUrl, type Config, exchange, type Refreshed, refreshed, revoke } from "./auth.ts";
 import { CALLBACK } from "./github/app.ts";
-import { type Fetch, GitHub, GitHubError, Spent } from "./github/client.ts";
+import { type Fetch, GitHub, GitHubError, Malformed, Spent } from "./github/client.ts";
 import { repositories } from "./github/repos.ts";
 import { load, NotFound, type Tree } from "./board/load.ts";
 import { board, lookup } from "./board/model.ts";
@@ -13,7 +13,7 @@ import { BenchPage } from "./bench/page.tsx";
 import { cached } from "./cache.ts";
 import { Offline } from "./home.tsx";
 import { CiElsewhere, Dispatch, PullCi, RunList } from "./ci.tsx";
-import { checks, dispatch, Refused, rerunFailed, runs } from "./github/ci.ts";
+import { checks, dispatch, Refused, rerunFailed, type Runs, runs } from "./github/ci.ts";
 import { Home, Message } from "./home.tsx";
 import type { User } from "./layout.tsx";
 import { local, open, pending, SESSION, type Session, STATE, seal, session } from "./session.ts";
@@ -144,13 +144,23 @@ export function app(deps: Deps): App {
 		const path = new URL(c.req.url).pathname;
 		const repository = b.tree.repository;
 		const github = c.get("github").withToken(c.get("session")!.token);
-		const recent = await runs(github, repository, { branch: b.tree.branch }, deps.now(), 5);
+		// The board is the quest tree; CI is one panel of it. GitHub refusing or garbling the runs, or the
+		// page's request budget running out on them, says so there rather than taking the board down. An
+		// expired token still throws, so the person signs in again.
+		let recent: Runs = { runs: [], more: false };
+		let ciError: string | undefined;
+		try {
+			recent = await runs(github, repository, { branch: b.tree.branch }, deps.now(), 5);
+		} catch (error) {
+			ciError = ciFailure(error);
+		}
 		return c.html(
 			<BoardPage b={b} user={user(c.get("session"))!} path={path}>
 				<RunList
 					title={`CI on ${b.tree.branch}`}
 					runs={recent.runs}
 					more={recent.more}
+					error={ciError}
 					repository={repository}
 					next={path}
 					link={`${b.tree.url}/actions?query=branch%3A${encodeURIComponent(b.tree.branch)}`}
@@ -348,6 +358,18 @@ export function app(deps: Deps): App {
 	});
 
 	return web;
+}
+
+/** What the board's CI panel says when listing the runs failed; rethrows what the page can't show there. */
+function ciFailure(error: unknown): string {
+	if (error instanceof Spent) return `Listing the workflow runs too: ${error.message}.`;
+	if (error instanceof Malformed) return `GitHub's list of workflow runs was unreadable: ${error.message}.`;
+	if (!(error instanceof GitHubError) || error.status === 401) throw error;
+	if (error.status === 403 && /rate limit/i.test(error.message))
+		return "GitHub is rate-limiting requests for the workflow runs; try again shortly.";
+	return error.status === 403 || error.status === 404
+		? `GitHub refused this repository's workflow runs (${error.status}).`
+		: `GitHub couldn't list this repository's workflow runs (${error.status}).`;
 }
 
 function user(s: Session | null): User | null {

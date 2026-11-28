@@ -286,7 +286,7 @@ export function QuestPage(props: { b: Board; path: string; doc: string; user: Us
 	const doc = b.docs.find((d) => d.path === props.doc)!;
 	const quest = b.quests.get(doc.path);
 	const content = b.tree.documents.find((d) => d.path === doc.path)!.content;
-	const sections = render(
+	const { title, sections } = render(
 		{
 			quest: (path) => (b.docs.some((d) => d.path === path) ? questHref(repository, path) : null),
 			blob: (path, fragment) => blob(b, path, fragment),
@@ -311,7 +311,7 @@ export function QuestPage(props: { b: Board; path: string; doc: string; user: Us
 			<article class="wrap quest-view">
 				<header class="quest-title">
 					{quest && <Marker status={quest.status} />}
-					<h1>{name(doc)}</h1>
+					<h1 id={title || undefined}>{name(doc)}</h1>
 				</header>
 				<p class="quest-meta">
 					{quest?.size && <Difficulty size={quest.size} />}
@@ -351,7 +351,7 @@ export function QuestPage(props: { b: Board; path: string; doc: string; user: Us
 				<div class="quest-page">
 					{sections.map((s) => (
 						<section>
-							{s.heading && <h2>{s.heading}</h2>}
+							{s.heading && <h2 id={s.id}>{s.heading}</h2>}
 							{raw(s.html)}
 						</section>
 					))}

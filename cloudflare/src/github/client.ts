@@ -14,6 +14,9 @@ export class Spent extends Error {
 	}
 }
 
+/** GitHub answered with JSON missing what the request lists. */
+export class Malformed extends Error {}
+
 /** GitHub answered with an error status. */
 export class GitHubError extends Error {
 	constructor(

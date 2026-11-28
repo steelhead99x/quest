@@ -3,7 +3,7 @@
 // dispatching a workflow. GitHub decides whether the person may; the site
 // shows its answer.
 
-import type { GitHub } from "./client.ts";
+import { type GitHub, Malformed } from "./client.ts";
 
 /** Check runs and workflow runs read per page; the page says when more exist. */
 export const PER_PAGE = 30;
@@ -50,7 +50,7 @@ function seconds(start: unknown, end: unknown, now: number): number | null {
  * waiting for approval, is re-run on GitHub, where its source is shown.
  */
 export function workflowRun(r: Record<string, any>, now: number, repository: string): Run {
-	if (!Number.isSafeInteger(r?.id)) throw new Error("GitHub listed a workflow run without an id");
+	if (!Number.isSafeInteger(r?.id)) throw new Malformed("GitHub listed a workflow run without an id");
 	const conclusion = typeof r.conclusion === "string" ? r.conclusion : null;
 	const waiting = conclusion === "action_required" || r.status === "waiting" || r.status === "action_required";
 	const head = typeof r.head_repository?.full_name === "string" ? r.head_repository.full_name : null;
@@ -71,7 +71,7 @@ export function workflowRun(r: Record<string, any>, now: number, repository: str
 
 /** A check run as the page shows it; check runs from other apps are re-run on GitHub. */
 export function checkRun(r: Record<string, any>, now: number): Run {
-	if (!Number.isSafeInteger(r?.id)) throw new Error("GitHub listed a check run without an id");
+	if (!Number.isSafeInteger(r?.id)) throw new Malformed("GitHub listed a check run without an id");
 	return {
 		id: r.id,
 		name: String(r.name),
@@ -91,7 +91,7 @@ export async function checks(github: GitHub, repository: string, sha: string, no
 	const out = await github.get<{ total_count: number; check_runs: Record<string, any>[] }>(
 		`/repos/${repository}/commits/${sha}/check-runs?per_page=${PER_PAGE}`,
 	);
-	if (!Array.isArray(out?.check_runs)) throw new Error("GitHub listed no check runs array");
+	if (!Array.isArray(out?.check_runs)) throw new Malformed("GitHub listed no check runs array");
 	return { runs: out.check_runs.map((r) => checkRun(r, now)), more: out.total_count > PER_PAGE };
 }
 
@@ -107,7 +107,7 @@ export async function runs(
 	const out = await github.get<{ total_count: number; workflow_runs: Record<string, any>[] }>(
 		`/repos/${repository}/actions/runs?${query}&per_page=${count}`,
 	);
-	if (!Array.isArray(out?.workflow_runs)) throw new Error("GitHub listed no workflow runs array");
+	if (!Array.isArray(out?.workflow_runs)) throw new Malformed("GitHub listed no workflow runs array");
 	return { runs: out.workflow_runs.map((r) => workflowRun(r, now, repository)), more: out.total_count > count };
 }
 
