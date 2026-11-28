@@ -112,13 +112,24 @@ export const UNSUPPORTED =
  * The shell proves it runs in the scope's own v2 cgroup, then waits for the supervisor before it
  * executes the command. A supervisor that died never acknowledges, so the command never starts.
  */
-const handshake = (hold: boolean) =>
+const handshake = (hold: boolean, kept: number) =>
 	"IFS=: read -r hierarchy controllers path </proc/self/cgroup || exit 125; " +
 	'[ "$hierarchy:$controllers" = 0: ] || exit 125; ' +
 	(hold ? HOLD : "") +
 	'printf "%s\\n" "$path" >&3; ' +
 	"read -r admitted <&4 || exit 125; " +
-	'exec 3>&- 4<&- 5<&-; exec "$@"';
+	"exec 3>&- 4<&- 5<&-; " +
+	(kept
+		? `${KEEPER}exec "$@"${Array.from({ length: kept }, (_, index) => ` ${6 + index}>&-`).join("")}`
+		: 'exec "$@"');
+
+/**
+ * Holds the descriptors the caller keeps (from 6 up, such as `quest run`'s report locks) inside the scope until the
+ * command exits, so the command itself runs without them: a task that reopens descriptor 6 for its own use cannot
+ * drop a lock it never held. `$$` is the shell's PID, which the command takes over at `exec`; the scope's stop kills
+ * the keeper with everything else once the command ends. Double-forked, it is no child the command could wait for.
+ */
+const KEEPER = "( (tail --pid=$$ -f /dev/null) </dev/null >/dev/null 2>&1 & ); ";
 
 /**
  * Keeps the scope's cgroup until the supervisor has read what it used: systemd removes an empty scope's cgroup as
@@ -337,7 +348,7 @@ function scoped(unit: string, cwd: string, command: string[], options: RunOption
 			"--",
 			"/bin/sh",
 			"-c",
-			handshake(measure),
+			handshake(measure, options.keep?.length ?? 0),
 			"quest-worktree",
 		],
 		(path) => path.endsWith(`/${unit}`),
@@ -420,7 +431,7 @@ function contain(
 		const child = spawn(launch[0], [...launch.slice(1), ...command], {
 			cwd,
 			env: options.env,
-			// The handshake closes 3 to 5 before it executes the command, which keeps the rest.
+			// The handshake closes 3 to 5 before it executes the command, and hands the rest to its keeper.
 			stdio: [pipe, pipe, pipe, "pipe", "pipe", describe.measure ? "pipe" : "ignore", ...(options.keep ?? [])],
 		});
 		options.spawned?.(child as ChildProcessWithoutNullStreams);
