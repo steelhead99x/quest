@@ -441,7 +441,7 @@ export interface ReviewDependencies {
 	 */
 	models?: (root: string, base: string, branch: string) => Promise<PullModels | null>;
 	/** Fails unless the run's record can be posted, before any reviewer spends a round; without it, nothing is checked. */
-	posting?: (root: string, base: string, branch: string) => Promise<void>;
+	posting?: (root: string, base: string, branch: string, baseSha: string) => Promise<void>;
 	/**
 	 * Queues a session for the record sender, as the stop hook does an interactive one, since no hook runs in a
 	 * reviewer. It says for itself anything the person must hear, and must not throw, so a round never fails on it.
@@ -2366,7 +2366,7 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 		: await fetchBase(root, options.base);
 	const { branch: baseBranch } = parseBase(root, baseRef);
 	const branch = sessionBranch(root, options.branch, baseBranch);
-	await deps.posting?.(root, baseRef, branch);
+	await deps.posting?.(root, baseRef, branch, baseSha);
 	// The PR's own record names its size and implementers, so the author passes neither as a flag.
 	const needed = options.size === undefined || (options.exclude ?? []).length === 0;
 	const record = needed ? await deps.models?.(root, baseRef, branch) : undefined;

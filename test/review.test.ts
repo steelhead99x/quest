@@ -1379,6 +1379,8 @@ function onGitHub(
 	/** The repository each of `statuses` was set in. */
 	attestedIn: string[];
 	forkMergeBase: string | undefined;
+	/** The fork's base tip on GitHub, by default the checkout's fetched one. */
+	forkBaseTip: string | undefined;
 	/** The repositories Kixel Quest serves. */
 	served: string[];
 	posts: ReviewUpload[];
@@ -1393,6 +1395,7 @@ function onGitHub(
 		attestedIn: [] as string[],
 		posts: [] as ReviewUpload[],
 		forkMergeBase: undefined as string | undefined,
+		forkBaseTip: undefined as string | undefined,
 		served: [`${fork ? "upstream" : "acme"}/widget`],
 	});
 	const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
@@ -1455,6 +1458,8 @@ function onGitHub(
 		}
 		// GitHub's merge base for a fork PR's head, by default the checkout's own; `forkMergeBase` stands in for a fork
 		// whose base moved past what the checkout fetched.
+		if (url.pathname === "/repos/acme/widget/branches/main" && fork)
+			return json({ commit: { sha: writes.forkBaseTip ?? git(repo, "rev-parse", "origin/main") } });
 		const compared = /^\/repos\/acme\/widget\/compare\/main\.\.\.([0-9a-f]{40})$/.exec(url.pathname);
 		if (compared && fork)
 			return json({
@@ -2658,6 +2663,19 @@ fakes(
 			);
 			expect(writes.statuses).toHaveLength(1);
 			writes.forkMergeBase = undefined;
+
+			// A fetched base behind the fork's, even with the same merge base, fails before any reviewer runs, since the
+			// head would be classified against a risk file the fork may have changed.
+			writes.forkBaseTip = "f".repeat(40);
+			const calls = s.calls().length;
+			const behind = await quest("--root", s.repo, "review");
+			expect(behind.code).not.toBe(0);
+			expect(behind.stderr).toContain(
+				`but acme/widget's main is at ${"f".repeat(40)}; fetch main from acme/widget itself`,
+			);
+			expect(s.calls()).toHaveLength(calls);
+			expect(writes.statuses).toHaveLength(1);
+			writes.forkBaseTip = undefined;
 			expect(writes.statuses[0]!.target_url).toMatch(/^https:\/\/github\.com\/acme\/widget\/compare\//);
 
 			// A remote that fetches upstream and pushes to the fork reads upstream's base, which the fork's PR may not

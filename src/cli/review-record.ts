@@ -123,6 +123,8 @@ async function openPull(
 			fork: boolean;
 			/** The PR's body as it is now. */
 			body(): Promise<string>;
+			/** The tip of the PR's base branch on GitHub; null when GitHub does not name it. */
+			baseTip(): Promise<string | null>;
 			/** The merge base GitHub finds for `head` with the PR's base, as the land gate binds the status to; null when it cannot compare them. */
 			mergeBase(head: string): Promise<string | null>;
 			/** Set the `quest review` status on `head`, for its diff from the merge base `from`, or say why not. */
@@ -200,6 +202,15 @@ async function openPull(
 							await github.client.request(`${repositoryPath(repository)}/pulls/${pull.number}`)
 						).json(),
 					).body as string | null) ?? ""),
+		baseTip: async () => {
+			if (github === null) return null;
+			const response = await github.client.request(
+				`${repositoryPath(repository)}/branches/${encodeURIComponent(base)}`,
+				{ allow: [404] },
+			);
+			if (!response.ok) return null;
+			return String(object(object(await response.json()).commit).sha);
+		},
 		mergeBase: async (sha) => {
 			if (github === null) return null;
 			const response = await github.client.request(
@@ -256,13 +267,24 @@ export async function requirePosting(
 	root: string,
 	baseRef: string,
 	branch: string,
+	baseSha: string,
 	deps: ClaimDependencies & Omit<ForgeDependencies, "warn">,
 ): Promise<void> {
 	const url = kixelUrl(deps.env);
 	const token = requireToken(url, deps.env);
 	const pull = await openPull(root, baseRef, branch, deps);
+	if ("skipped" in pull || pull.hosted) return;
+	// The fork's base is the remote's configured name, which a rewritten fetch URL, such as a mirror, may serve behind
+	// the fork, so the risk file the head is classified against could be one the fork's land gate no longer holds.
+	if (pull.fork) {
+		const tip = await pull.baseTip();
+		if (tip !== null && tip !== baseSha)
+			throw new Error(
+				`${baseRef} is at ${baseSha}, but ${pull.repository}'s ${pull.base} is at ${tip}; fetch ${pull.base} from ${pull.repository} itself, then review again`,
+			);
+	}
 	// A repository Kixel Quest hosts is one it serves, and a fork's own PR it does not serve records its status alone.
-	if ("skipped" in pull || pull.hosted || pull.fork) return;
+	if (pull.fork) return;
 	const [owner, repo] = pull.repository.split("/") as [string, string];
 	if (!(await new KixelQuest(url, token, deps, false).serves({ owner, repo })))
 		throw new Error(

@@ -2126,8 +2126,8 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				// Every run that records posts to Kixel Quest, so a host that cannot post spends no reviewer's round.
 				const posting = own
 					? undefined
-					: (dir: string, base: string, branch: string) =>
-							requirePosting(dir, base, branch, { ...forgeDependencies(), ...github });
+					: (dir: string, base: string, branch: string, baseSha: string) =>
+							requirePosting(dir, base, branch, baseSha, { ...forgeDependencies(), ...github });
 				const run = review(
 					{
 						...options,
