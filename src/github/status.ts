@@ -21,20 +21,16 @@ import {
 	type Reaction,
 	type Repository,
 	type Review,
-	type ReviewRecord,
 	type Status,
 	type Thread,
-	REVIEW_MARK,
 	RISK_FILE,
-	recordedRisk,
-	reviewSection,
 	riskFileId,
 } from "../core";
 import { readHoldStatus } from "./hold";
 import { readSignals, requiredPosters } from "./signals";
 import { login } from "./online-review";
 import { duplicateQuests } from "./duplicates";
-import { trustedReview } from "./review-trust";
+import { countedReview, reviewStatuses } from "./review-trust";
 
 /**
  * One query covers the PR; each connection pages by its own cursor, and a
@@ -172,25 +168,35 @@ export async function pullRequestStatus(
 			? { checks: [], workflows: [] }
 			: (base?.needs ?? (await requiredOf(github, pr, baseRef)));
 	const status = summarize(first!, rollup, current, needs, reviewNodes, threadNodes);
-	// A record counts only where a writer's `quest review` status attests it, so no one else's edit names a reviewed head.
-	const trusted = await trustedReview(
-		github,
-		{ ...pr, base: baseRef },
-		typeof first!.body === "string" ? first!.body : "",
-		deps.warn,
-	);
-	const record = await reviewRecord(github, pr, { ...first!, body: trusted.body }, deps.warn);
-	const recorded = recordedRisk(trusted.body);
-	// The tier set how much review the head got, so a review classified against a risk file the base no longer has
-	// covers it no longer; only an open PR can still land, and a closed one's base may be gone.
-	const moved = first!.state === "OPEN" ? riskFileMoved(recorded, baseRiskFile(first!)) : null;
-	if (moved !== null) deps.warn(`${pr.owner}/${pr.repo}#${pr.number}'s ## Review record ${moved}`);
-	status.reviewRecord = record && {
-		...record,
-		state: moved === null ? record.state : "stale",
-		localReview: trusted.localReview,
-	};
-	status.risk = risk(recorded, head, status.reviewRecord);
+	// The review that counts is a writer's `quest review` status, as the land gate reads it, so no edit of the body drops it.
+	const pull = { ...pr, base: baseRef };
+	const open = first!.state === "OPEN";
+	const reading = { report: true, merged: first!.state === "MERGED" };
+	const { counted, skipped } = await countedReview(github, pull, head, await reviewStatuses(github, pull), reading);
+	const where = `${pr.owner}/${pr.repo}#${pr.number}`;
+	if (skipped.length > 0) deps.warn(`${where}: a quest review status does not count: ${skipped.join("; ")}`);
+	if (counted !== null && !counted.passed)
+		deps.warn(`${where}: the newest quest review status on the head's diff, on ${counted.oid}, did not pass`);
+	if (counted?.passed) {
+		// The tier set how much review the head got, so a review classified against a risk file the base no longer has
+		// covers it no longer; only an open PR can still land, and a closed one's base may be gone.
+		const moved = open ? riskFileMoved(counted.attested.riskFile, baseRiskFile(first!)) : null;
+		if (moved !== null) deps.warn(`${where}'s quest review status on ${counted.oid} ${moved}`);
+		const state = moved === null ? counted.state : "stale";
+		status.reviewRecord = {
+			state,
+			head: counted.oid,
+			localReview: counted.attested.outcome !== "passed with no local reviewer",
+		};
+		// The status carries the final tier, after any reviewer raised it, but not the classifier's own or its reason.
+		status.risk = {
+			tier: counted.attested.tier,
+			reason: null,
+			classified: null,
+			class: counted.attested.class,
+			state,
+		};
+	}
 	if (status.autoMerge !== null) status.autoMerge.head = await enabledHead(github, first!, deps.warn);
 	const signaled = (await readSignals(github, pr, [pr.number])).get(pr.number)!;
 	if (signaled.head !== first!.headRefOid)
@@ -217,72 +223,19 @@ function baseRiskFile(pull: ObjectValue): string | null {
 }
 
 /**
- * Why `recorded` was classified against another risk file than `riskFile`, the blob at the base's tip, which may no
- * longer hold its tier or offer its class, or null when it was not.
+ * Why a review classified against the risk file `reviewed`, as {@link riskFileId} names it, was classified against
+ * another than `riskFile`, the blob at the base's tip, which may no longer hold its tier or offer its class, or null
+ * when it was not.
  */
-function riskFileMoved(recorded: ReturnType<typeof recordedRisk>, riskFile: string | null): string | null {
-	if (recorded === null || "malformed" in recorded) return null;
+function riskFileMoved(reviewed: string, riskFile: string | null): string | null {
 	const now = riskFileId(riskFile);
-	if (recorded.riskFile === now) return null;
+	if (reviewed === now) return null;
 	const was =
-		recorded.riskFile === "none"
+		reviewed === "none"
 			? "was classified when the base had no RISK.md"
-			: `was classified against RISK.md ${recorded.riskFile}`;
+			: `was classified against RISK.md ${reviewed}`;
 	const is = now === "none" ? "the base has none" : `the base's is ${now}`;
 	return `${was}, but ${is}, so it covers the head no longer: run quest review again`;
-}
-
-/** The risk the PR body records, judged against the head as its review record is, as {@link Status.risk} describes. */
-function risk(recorded: ReturnType<typeof recordedRisk>, head: string, record: ReviewRecord | null): Status["risk"] {
-	if (recorded === null) return null;
-	if ("malformed" in recorded) return { state: "malformed", error: recorded.malformed };
-	const state = record?.state ?? (head.startsWith(recorded.head) ? "current" : "stale");
-	return {
-		tier: recorded.tier,
-		reason: recorded.reason,
-		classified: recorded.classified,
-		class: recorded.class,
-		state,
-	};
-}
-
-async function reviewRecord(
-	github: GitHubReader,
-	pr: PullRequest,
-	pull: ObjectValue,
-	warn: (message: string) => void,
-): Promise<ReviewRecord | null> {
-	const body = typeof pull.body === "string" ? pull.body : "";
-	const section = reviewSection(body);
-	const text = section ? body.slice(section.start, section.end) : "";
-	// Only a section holding `quest review`'s record names a reviewed head, and only its last SHA, so a body naming
-	// many costs no more requests than one.
-	const reviewed = text.includes(REVIEW_MARK) && text.match(/\b[0-9a-f]{40}\b/g)?.at(-1);
-	if (!reviewed) return null;
-	const head = string(pull.headRefOid);
-	if (reviewed === head) return { state: "current", head: reviewed };
-	const base = encodeURIComponent(string(pull.baseRefName));
-	const diffs: string[] = [];
-	for (const sha of [head, reviewed]) {
-		const unknown = (why: string): ReviewRecord => {
-			warn(`cannot compare ${sha} with the base, so whether the review of ${reviewed} carries is unknown${why}`);
-			return { state: "unknown", head: reviewed };
-		};
-		let response: Response;
-		try {
-			response = await github.request(`/repos/${pr.owner}/${pr.repo}/compare/${base}...${sha}`, {
-				accept: "application/vnd.github.diff",
-				allow: [404, 406, 422],
-			});
-		} catch (error) {
-			// A deadline is the caller's to handle; a forbidden or failing compare is not.
-			if (error instanceof GitHubDeadline || !(error instanceof Error)) throw error;
-			return unknown(`: ${error.message}`);
-		}
-		if (!response.ok) return unknown("");
-		diffs.push(await response.text());
-	}
-	return { state: diffs[0] === diffs[1] ? "diff-identical" : "stale", head: reviewed };
 }
 
 /** Repository activity types that move a branch to a new head, including merges into it. */

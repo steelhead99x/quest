@@ -18,7 +18,6 @@ import {
 	parseForgeAnswer,
 	parseForgeInfo,
 	parseForgeRequest,
-	REVIEW_MARK,
 } from "../src/core";
 import { type ForgeDependencies, forgeFor, KixelQuest, KixelQuestForge } from "../src/cli/forge";
 import { waitForActivity, WaitTimeout } from "../src/cli/wait";
@@ -186,19 +185,36 @@ describe("status", () => {
 				]),
 		],
 		...[
-			["a malformed risk record", "- Risk:dire"],
-			["a risk record", "- Risk: high, `wire`\n- Classified: medium by default\n- Class: `wire`"],
-		].map(([name, lines]): (typeof scenarios)[number] => [
-			name!,
+			[
+				"a passing status on the head",
+				{
+					[status.A]: status.reviewStatus(
+						"SUCCESS",
+						`Risk high, class wire, risk file ${status.RISK_ID}: passed`,
+						status.A,
+					),
+				},
+				{},
+			],
+			[
+				"a passing status on an earlier commit with another diff",
+				{
+					[status.B]: status.reviewStatus(
+						"SUCCESS",
+						`Risk low, risk file ${status.RISK_ID}: passed`,
+						status.B,
+					),
+				},
+				{ diffs: { [status.A]: "new", [status.B]: "old" } },
+			],
+		].map(([name, statuses, options]): (typeof scenarios)[number] => [
+			name as string,
 			() =>
-				status.setup([
-					status.pull({
-						body: `## Review\n\n${REVIEW_MARK}\n\n- Head: ${status.A}\n${lines}`,
-						checks: null,
-						reviews: status.page([]),
-						threads: status.page([]),
-					}),
-				]),
+				status.setup([status.pull({ checks: null, reviews: status.page([]), threads: status.page([]) })], {
+					permissions: { maintainer: "admin" },
+					statuses,
+					...(options as object),
+				} as Parameters<typeof status.setup>[1]),
 		]),
 		[
 			"a maintainer decision and a hold",
@@ -680,6 +696,74 @@ describe("wire", () => {
 		expect(() => parseForgeInfo({ login: "kixelated", repositories: ["Moq-Dev/Quest"] })).toThrow(
 			"lowercase owner/repo",
 		);
+	});
+
+	test("the writers read takes a PR and answers each writer, refusing a missing field or a cost that is no number", () => {
+		const writer = {
+			harness: "claude",
+			model: "claude-opus-5-5",
+			effort: "high",
+			arm: "A",
+			cost: 1.5,
+			complete: true,
+		};
+		const unrecorded = { harness: "claude", model: null, effort: null, arm: null, cost: 0.25, complete: false };
+		expect(parseForgeRequest("writers", { pull })).toEqual({ pull });
+		expect(() => parseForgeRequest("writers", { pull, extra: 1 })).toThrow("request.extra");
+		expect(parseForgeAnswer("writers", { value: [writer, unrecorded], asOf: null })).toEqual({
+			value: [writer, unrecorded],
+			asOf: null,
+		});
+		expect(parseForgeAnswer("writers", { value: [], asOf: null }).value).toEqual([]);
+		for (const field of Object.keys(writer))
+			expect(() =>
+				parseForgeAnswer("writers", { value: [{ ...writer, [field]: undefined }], asOf: null }),
+			).toThrow(`answer.value[0].${field}`);
+		for (const cost of ["1.5", null, Number.NaN, Number.POSITIVE_INFINITY, -1])
+			expect(() => parseForgeAnswer("writers", { value: [{ ...writer, cost }], asOf: null })).toThrow(
+				"answer.value[0].cost: expected a cost",
+			);
+	});
+
+	test("the updated PRs read takes a first and a last page, and refuses a PR missing a field", () => {
+		const merged = {
+			number: 7,
+			url: "https://kixel.quest/example/project/pull/7",
+			branch: "quest/m0/one",
+			state: "merged",
+			created: 1_000,
+			updated: 5_000,
+			closed: 4_000,
+			body: "## Caused by\n",
+		};
+		const request = { repository, since: 0, cursor: null };
+		expect(parseForgeRequest("updated", request)).toEqual(request);
+		expect(parseForgeRequest("updated", { ...request, cursor: "p2" }).cursor).toBe("p2");
+		expect(() => parseForgeRequest("updated", { repository, since: 0 })).toThrow("request.cursor");
+		expect(() => parseForgeRequest("updated", { ...request, since: -1 })).toThrow("request.since");
+		expect(parseForgeAnswer("updated", { value: { pulls: [merged], next: "p2" }, asOf: null }).value.next).toBe(
+			"p2",
+		);
+		const last = parseForgeAnswer("updated", {
+			value: { pulls: [merged, { ...merged, number: 8 }], next: null },
+			asOf: null,
+		});
+		expect(last.value).toEqual({ pulls: [merged, { ...merged, number: 8 }], next: null });
+		for (const field of Object.keys(merged))
+			expect(() =>
+				parseForgeAnswer("updated", {
+					value: { pulls: [{ ...merged, [field]: undefined }], next: null },
+					asOf: null,
+				}),
+			).toThrow(`answer.value.pulls[0].${field}`);
+		const open = { ...merged, state: "open", closed: null };
+		expect(parseForgeAnswer("updated", { value: { pulls: [open], next: null }, asOf: null }).value.pulls).toEqual([
+			open,
+		]);
+		expect(() =>
+			parseForgeAnswer("updated", { value: { pulls: [{ ...merged, state: "draft" }], next: null }, asOf: null }),
+		).toThrow("answer.value.pulls[0].state");
+		expect(() => parseForgeAnswer("updated", { value: { pulls: [] }, asOf: null })).toThrow("answer.value.next");
 	});
 
 	test("an answer from a server older than the client reads, each later field failing closed", () => {

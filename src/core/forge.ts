@@ -64,10 +64,11 @@ export interface Thread {
 }
 
 /**
- * The head the `## Review` section holding `quest review`'s record names last, the latest reviewed one, which a
- * `quest review` status attests. `current` is the PR's head; `diff-identical` an earlier head whose diff from
- * the base (`git diff <base>...<sha>`) matches the head's; `unknown` one the forge cannot compare, such as a diff too
- * large to render.
+ * The commit holding the review that counts, which a passing `quest review` status of a user who can push attests.
+ * `current` is the PR's head; `diff-identical` an earlier commit whose diff from the base (`git diff <base>...<sha>`)
+ * matches the head's, or that the head only merged the base since, each merge the clean merge of its parents as
+ * `BaseMerges` checks it; `stale` one whose diff differs otherwise; `unknown` one the forge cannot compare, such as a
+ * diff too large to render.
  */
 export interface ReviewRecord {
 	state: "current" | "diff-identical" | "stale" | "unknown";
@@ -136,21 +137,27 @@ export interface Status {
 	/** The online reviewers whose rounds on the head have reached the point where the user decides. */
 	checkpoints: { reviewer: string; round: number; url: string }[];
 	/**
-	 * Null when the `## Review` section holds no record `quest review` wrote or names no full SHA, or no writer's passing `quest review` status attests it.
+	 * Null when no writer's passing `quest review` status on a commit of the PR counts for the head.
 	 * `localReview` is whether that status attests a local reviewer's round, false for a low head none ran on.
-	 * `state` is `stale` for an open PR whose base's risk file at its tip is not the one the record names, since the
+	 * `state` is `stale` for an open PR whose base's risk file at its tip is not the one the status names, since the
 	 * tier that file set decided how much review the head got.
 	 */
 	reviewRecord: (ReviewRecord & { localReview: boolean }) | null;
 	/**
-	 * The head's risk tier as the `## Review` record names it, and the classifier's own tier, lower when a reviewer
-	 * raised it; null when the record names none or does not count, as for `reviewRecord`. `state` is the review record's, which a line after it carries to a
-	 * later head, else `current` when the record names the head and `stale` when not. `class` is the class, built
-	 * in or the risk file's `## Automatic` one, the classifier found the change in, or null. A record whose risk lines do not parse is
-	 * `malformed`, with why, which `quest merge` refuses.
+	 * The risk tier of the review that counts, as its status attests it, as for `reviewRecord`: the final tier, after
+	 * any reviewer raised it. `reason` and `classified`, the classifier's own tier, are null where the forge does
+	 * not carry them, as GitHub's commit statuses do not. `state` is the review record's. `class` is the class, built
+	 * in or the risk file's `## Automatic` one, the classifier found the change in, or null. A risk the forge cannot
+	 * parse is `malformed`, with why, which `quest merge` refuses.
 	 */
 	risk:
-		| { tier: Tier; reason: string; classified: Tier; class: string | null; state: ReviewRecord["state"] }
+		| {
+				tier: Tier;
+				reason: string | null;
+				classified: Tier | null;
+				class: string | null;
+				state: ReviewRecord["state"];
+		  }
 		| { state: "malformed"; error: string }
 		| null;
 	reactions: Reaction[];
@@ -238,6 +245,46 @@ export interface PullFiles {
 	url: string;
 	/** Every path the PR adds, changes, or removes; a rename lists its new path. */
 	files: string[];
+}
+
+/** One harness, model, and effort that wrote a PR, with what its sessions cost at API list price in USD. */
+export interface Writer {
+	harness: string;
+	/** Null for the cost no model was recorded for. */
+	model: string | null;
+	effort: string | null;
+	/** The writer A/B arm its quest drew, if any. */
+	arm: string | null;
+	cost: number;
+	/** False when the cost is a lower bound, as {@link ModelSpend}'s. */
+	complete: boolean;
+}
+
+/**
+ * A PR the forge updated since an instant, open, merged, or closed, as the record sender reads it. A hosted
+ * repository has no forks, so its head repository is always the repository read.
+ */
+export interface UpdatedPull {
+	number: number;
+	/** The PR's page, which a session's recorded PR is matched by. */
+	url: string;
+	/** The head branch, as {@link OpenPull} names it. */
+	branch: string;
+	state: "open" | "closed" | "merged";
+	/** Epoch milliseconds; the sender dates a breakage from its fix's creation. */
+	created: number;
+	/** Epoch milliseconds of the last push, comment, or edit. */
+	updated: number;
+	/** Epoch milliseconds a merged or closed PR ended, or null while it is open. */
+	closed: number | null;
+	body: string;
+}
+
+/** One page of {@link UpdatedPull}s, newest update first. */
+export interface UpdatedPage {
+	pulls: UpdatedPull[];
+	/** The cursor for the following page, or null on the last. */
+	next: string | null;
 }
 
 /** A held quest branch, and the open PR from it if there is one. */
@@ -397,11 +444,19 @@ export interface ForgeWrites {
 export interface ForgeCalls {
 	status: { request: { pull: PullRequest }; value: Status };
 	pulls: { request: { repository: Repository }; value: OpenPull[] };
+	/**
+	 * The PRs updated at or after `since` (epoch milliseconds), merged and closed ones included, as `updatedPulls`
+	 * reads GitHub's. `cursor` is null for the first page, then each page's `next`; a cursor never skips a PR when
+	 * others move to the front. Kixel Quest sets the page size and serves it only for a repository it hosts.
+	 */
+	updated: { request: { repository: Repository; since: number; cursor: string | null }; value: UpdatedPage };
 	files: { request: { repository: Repository }; value: PullFiles[] };
 	held: { request: { sources: ClaimSources; branches: string[] }; value: Holdings };
 	/** `from` is a `--since` point or a cursor; null starts at the head's push time. */
 	watch: { request: { pull: PullRequest; from: string | null }; value: WatchPoll };
 	view: { request: { pull: PullRequest }; value: PullView };
+	/** Who wrote a PR, largest cost first. Only Kixel Quest answers it, as GitHub records no writer. */
+	writers: { request: { pull: PullRequest }; value: Writer[] };
 	open: { request: { opening: Opening }; value: OpenPull };
 	close: { request: { pull: PullRequest }; value: null };
 	edit: { request: { pull: PullRequest; title: string | null; body: string | null }; value: null };
@@ -421,10 +476,12 @@ export type ForgeCall = keyof ForgeCalls;
 export const FORGE_READS = [
 	"status",
 	"pulls",
+	"updated",
 	"files",
 	"held",
 	"watch",
 	"view",
+	"writers",
 ] as const satisfies readonly ForgeCall[];
 
 /** The writes, as their paths name them; Kixel Quest serves them only for a repository it hosts. */
@@ -495,6 +552,8 @@ const name: Parse<string> = (value, at) => (typeof value === "string" && value !
 const boolean: Parse<boolean> = (value, at) => (typeof value === "boolean" ? value : fail(at, "a boolean"));
 const count: Parse<number> = (value, at) =>
 	Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : fail(at, "a count");
+const cost: Parse<number> = (value, at) =>
+	typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fail(at, "a cost");
 const time: Parse<string> = (value, at) =>
 	typeof value === "string" &&
 	/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value) &&
@@ -613,8 +672,8 @@ const statusFields = shape<Status>({
 			? shape<MalformedStatus>({ state: oneOf(["malformed"] as const), error: string })(value, at, strict)
 			: shape<Exclude<RiskStatus, MalformedStatus>>({
 					tier,
-					reason: string,
-					classified: tier,
+					reason: nullable(string),
+					classified: nullable(tier),
 					// A server older than #802 sends none: in no class, so no standing pick lands it.
 					class: maybe(nullable(string), null),
 					state: oneOf(reviewStates),
@@ -675,6 +734,31 @@ const openPull = shape<OpenPull>({
 	updated: count,
 	handedBack: boolean,
 	body: string,
+});
+
+const writer = shape<Writer>({
+	harness: name,
+	model: nullable(name),
+	effort: nullable(name),
+	arm: nullable(name),
+	cost,
+	complete: boolean,
+});
+
+const updatedPage = shape<UpdatedPage>({
+	pulls: list(
+		shape<UpdatedPull>({
+			number: count,
+			url: string,
+			branch: name,
+			state: oneOf(["open", "closed", "merged"]),
+			created: count,
+			updated: count,
+			closed: nullable(count),
+			body: string,
+		}),
+	),
+	next: nullable(name),
 });
 
 const pullFiles = shape<PullFiles>({ number: count, url: string, files: list(name) });
@@ -739,6 +823,7 @@ const none: Parse<null> = (value, at) => (value === null ? null : fail(at, "null
 const REQUESTS: { [C in ForgeCall]: Parse<ForgeCalls[C]["request"]> } = {
 	status: shape({ pull: pullRequest }),
 	pulls: shape({ repository }),
+	updated: shape({ repository, since: count, cursor: nullable(name) }),
 	files: shape({ repository }),
 	held: shape({
 		sources: shape<ClaimSources>({ upstream: source, fork: maybe(source) }),
@@ -746,6 +831,7 @@ const REQUESTS: { [C in ForgeCall]: Parse<ForgeCalls[C]["request"]> } = {
 	}),
 	watch: shape({ pull: pullRequest, from: nullable(name) }),
 	view: shape({ pull: pullRequest }),
+	writers: shape({ pull: pullRequest }),
 	open: shape({
 		opening: shape<Opening>({
 			repository,
@@ -770,10 +856,12 @@ const REQUESTS: { [C in ForgeCall]: Parse<ForgeCalls[C]["request"]> } = {
 const VALUES: { [C in ForgeCall]: Parse<ForgeCalls[C]["value"]> } = {
 	status,
 	pulls: list(openPull),
+	updated: updatedPage,
 	files: list(pullFiles),
 	held: holdings,
 	watch: watchPoll,
 	view: pullView,
+	writers: list(writer),
 	open: openPull,
 	close: none,
 	edit: none,

@@ -1,0 +1,62 @@
+name: npm publish
+
+# Publishes a repository's npm packages with npm's trusted publishing, which
+# trades the job's GitHub OIDC token for a short-lived publish token, so no
+# repository holds an npm token. npm accepts those tokens only from
+# GitHub-hosted runners, so this is the one job here that runs on one.
+#
+# npm checks the caller's workflow file, not this one: name the caller in each
+# package's trusted publisher, with the Environment below. The caller grants
+# `id-token: write` too, and runs this only on the branch that releases:
+#
+#   on:
+#     push:
+#       branches: [release]
+#   permissions:
+#     contents: read
+#     id-token: write
+#   jobs:
+#     publish:
+#       uses: kixel-ai/quest/.github/workflows/npm-publish.yml@<sha> # vX.Y.Z
+#       with:
+#         run: just js release
+#
+# `run` publishes with npm 11.5.1 or newer from the repository's dev shell,
+# since older npm and other clients cannot use the OIDC token.
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: The Bash script that publishes, run in the repository's Nix dev shell from its root.
+        required: true
+        type: string
+      environment:
+        description: >-
+          The Environment npm's trusted publisher requires, which should admit only the releasing branch. Empty, for
+          a dry run, uses none.
+        default: npm
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # `$/` is this workflow's own repository at the commit running, the version the caller pinned.
+      - uses: $/.github/actions/setup-nix
+      - name: Publish
+        env:
+          RUN: ${{ inputs.run }}
+        run: nix develop --command bash -eo pipefail -c "$RUN"

@@ -438,13 +438,12 @@ class Queue {
 			...this.deps,
 			token: await token(touchesWorkflows(root, build.base, test.commit, build.base, prepared.head)),
 		});
-		const result = await mergePinned(
-			merge,
-			`/repos/${this.name}/pulls/${number}`,
+		const result = await mergePinned(merge, `/repos/${this.name}/pulls/${number}`, {
 			method,
-			prepared.head,
-			entry.head,
-		);
+			head: prepared.head,
+			previous: entry.head,
+			pick: entry,
+		});
 		if (result === null) {
 			// GitHub shows it merged, as after a lost response: nothing is left to land.
 			forgetHeads(state, number);
@@ -496,8 +495,9 @@ class Queue {
 		this.lines.push(`refused ${entry.number} ${reason}`);
 		// A conflict with a head that holds the tested base comes from a base that moved since: rebuild.
 		if (reason === "merge_conflict") return this.end(build);
-		// A writer's push ends the pick; the next pass ejects it for the moved head.
-		if (reason === "head_moved")
+		// A writer's push or a maintainer's withdrawal ends the pick; the next pass ejects it for a moved
+		// head and forgets a withdrawn one.
+		if (reason === "head_moved" || reason === "left_queue")
 			return this.end(build, {
 				status: "completed",
 				conclusion: "neutral",

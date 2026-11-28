@@ -18,9 +18,10 @@ usage() {
 # What a release ships or is built and checked by: everything the binaries and
 # the flake package build from (`assets/` is bundled into the binary), every
 # file Release publishes, such as `scripts/installer.sh`, and the workflows that
-# build, check, and publish it.
+# build, check, and publish it, and the shared action and workflows other
+# repositories call at a release.
 ships() {
-    grep -E '^(src/|assets/|nix/|scripts/|package\.json$|bun\.lock$|bunfig\.toml$|tsconfig\.json$|flake\.(nix|lock)$|\.github/workflows/(release|gate-macos|install-check)\.yml$)' >/dev/null
+    grep -E '^(src/|assets/|nix/|scripts/|package\.json$|bun\.lock$|bunfig\.toml$|tsconfig\.json$|flake\.(nix|lock)$|\.github/workflows/(release|gate-macos|install-check|platform|npm-publish)\.yml$|\.github/actions/)' >/dev/null
 }
 
 next() {

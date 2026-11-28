@@ -42,7 +42,7 @@ jobs:
   # only after it lands.
   build:
     name: Queue build
-    uses: kixel-ai/quest/.github/workflows/queue-build.yml@main
+    uses: kixel-ai/quest/.github/workflows/queue-build.yml@main # zizmor: ignore[unpinned-uses] the runner group admits only main's copy; see above.
     # The build's report job posts the required `Queue` check run itself.
     permissions:
       contents: read

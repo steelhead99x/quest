@@ -1,10 +1,11 @@
 name: Windows
 
-# The native Windows suite runs nightly on main, outside pull requests and the
-# merge queue, so a Windows regression may land and the next run catches it.
-# GitHub reports a failed scheduled run only to the account that last changed
-# the cron schedule (with Actions notifications on), not to the repository's
-# watchers; that is the maintainer, whose account lands the workflow.
+# The native Windows suite, quest.toml's nightly `windows` task, runs nightly on
+# main through platform.yml, outside pull requests and the merge queue, so a
+# Windows regression may land and the next run catches it. GitHub reports a
+# failed scheduled run only to the account that last changed the cron schedule
+# (with Actions notifications on), not to the repository's watchers; that is
+# the maintainer, whose account lands the workflow.
 on:
   schedule:
     - cron: "23 8 * * *"
@@ -18,27 +19,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows:
-    name: native Windows (${{ matrix.runner }})
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [windows-2022, windows-11-arm]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # Nix doesn't run here; package.json's packageManager pins the flake's Bun.
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: package.json
-      - run: bun install --frozen-lockfile
-      - name: Check CLI and core
-        run: bun run check
-      - name: Run the core and CLI suite
-        run: bun run test
-      - run: bun run build
-      - name: Verify native setup and removal without symlinks
-        run: bun scripts/lifecycle-check.mjs dist/quest.js dev
+  # This repository's own copy, so a change to it runs here first.
+  x64:
+    uses: ./.github/workflows/platform.yml # zizmor: ignore[self-repository] actionlint 1.7.12 cannot read `$/`.
+    with:
+      tier: nightly
+      os: '["windows"]'
+      timeout-minutes: 20
+  arm64:
+    uses: ./.github/workflows/platform.yml # zizmor: ignore[self-repository] actionlint 1.7.12 cannot read `$/`.
+    with:
+      tier: nightly
+      os: '["windows"]'
+      windows-runner: windows-11-arm
+      timeout-minutes: 20

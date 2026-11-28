@@ -19,7 +19,8 @@ expect() {
 
 for path in src/cli/main.ts assets/skills/x/SKILL.md nix/package.nix scripts/installer.sh package.json \
     bun.lock bunfig.toml tsconfig.json flake.nix flake.lock .github/workflows/release.yml \
-    .github/workflows/install-check.yml .github/workflows/gate-macos.yml; do
+    .github/workflows/install-check.yml .github/workflows/gate-macos.yml .github/workflows/platform.yml \
+    .github/workflows/npm-publish.yml .github/actions/setup-nix/action.yml; do
     bash "$plan" ships <<<"$path" || fail "$path should ship"
 done
 for path in README.md quest/m0/x.md test/cli.test.ts docs/windows.md .github/workflows/check.yml \

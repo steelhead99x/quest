@@ -23,7 +23,10 @@ export function tokensPath(env: NodeJS.ProcessEnv = process.env): string {
 	return join(configDirectory(env), "login.json");
 }
 
-/** The Kixel Quest `env` names, without a trailing slash; a malformed or clear-text URL throws. */
+/**
+ * The Kixel Quest `env` names, as its origin, the form git's credential requests take; a malformed or clear-text URL,
+ * or one with a path, throws.
+ */
 export function kixelUrl(env: NodeJS.ProcessEnv): string {
 	const named = env[KIXEL_QUEST_URL] || KIXEL_QUEST;
 	let url: URL;
@@ -36,7 +39,17 @@ export function kixelUrl(env: NodeJS.ProcessEnv): string {
 	const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
 	if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
 		throw new Error(`${KIXEL_QUEST_URL}: ${named} is not an HTTPS URL`);
-	return named.replace(/\/+$/, "");
+	// Kixel Quest's routes, its git repositories included, sit at the root of its origin.
+	if (url.pathname !== "/" || url.search || url.hash || url.username || url.password)
+		throw new Error(`${KIXEL_QUEST_URL}: ${named} is not an origin, such as ${KIXEL_QUEST}`);
+	return url.origin;
+}
+
+/** What follows the origin in `value`, without its leading slash, when `value` is a URL on the Kixel Quest at `base`. */
+export function kixelPath(value: string, base: string): string | null {
+	const url = URL.parse(value);
+	if (url === null || url.origin !== base) return null;
+	return `${url.pathname.slice(1)}${url.search}${url.hash}`;
 }
 
 /** The token this host signed in to `url` with, or null. */

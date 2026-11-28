@@ -29,9 +29,12 @@ export default defineConfig({
 		// The developer's own quest login would send reads to Kixel Quest where it serves this repository.
 		// Each test gets its own XDG_STATE_HOME and XDG_CONFIG_HOME (test/state.ts).
 		// An exported QUEST_FORGE=github would skip the Kixel Quest fakes the forge tests serve.
+		// A `quest run` task inherits QUEST_GATE_GROUP=1, which would tell the gates under test that an
+		// enclosing owner signals their group, so the signal tests would wait for signals that never come.
 		env: {
 			GIT_CONFIG_GLOBAL: "/dev/null",
 			QUEST_FORGE: "",
+			QUEST_GATE_GROUP: "",
 			CLAUDE_CODE_SESSION_ID: "",
 			CODEX_THREAD_ID: "",
 		},

@@ -43,18 +43,32 @@ interface Item {
 export const LABELS: Record<Side, string> = { ours: "ours", base: "base", theirs: "theirs" };
 
 /**
- * Merge `theirs` into `ours` from their common `base` by lines, exactly as
- * `git merge-file --diff3` does, into clean regions and conflicts.
+ * How git merges a file by lines: as `git merge-file --diff3` does, or as `git merge` and GitHub's merges do through
+ * merge-ort, which diff by histogram and settle a conflict whose sides end up the same.
  */
-export function merge(ours: string, base: string, theirs: string): Chunk[] {
+export type Strategy = "merge-file" | "ort";
+
+/**
+ * Merge `theirs` into `ours` from their common `base` by lines, exactly as
+ * `strategy` does, into clean regions and conflicts.
+ */
+export function merge(ours: string, base: string, theirs: string, strategy: Strategy = "merge-file"): Chunk[] {
 	const [o, b, t] = [ours, base, theirs].map(records);
+	const algorithm = strategy === "ort" ? "histogram" : "myers";
 	const out: Chunk[] = [];
 	// Clean text since the last conflict, copied as git copies it.
 	let clean = "";
 	let i = 0;
-	for (const m of regions(o, t, b.length, diff(b, o), diff(b, t))) {
+	for (const m of regions(o, t, b.length, diff(b, o, algorithm), diff(b, t, algorithm))) {
 		clean += o.slice(i, m.i1).join("");
-		if (m.mode === 1) {
+		// XDL_MERGE_ZEALOUS, which merge-ort runs, takes ours where both sides wrote the same non-empty lines.
+		const same =
+			strategy === "ort" &&
+			m.mode === 0 &&
+			m.chg1 > 0 &&
+			m.chg2 > 0 &&
+			o.slice(m.i1, m.i1 + m.chg1).join("") === t.slice(m.i2, m.i2 + m.chg2).join("");
+		if (m.mode === 1 || same) {
 			clean += o.slice(m.i1, m.i1 + m.chg1).join("");
 		} else if (m.mode === 2) {
 			clean += t.slice(m.i2, m.i2 + m.chg2).join("");

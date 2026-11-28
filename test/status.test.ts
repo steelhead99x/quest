@@ -5,7 +5,8 @@ import { GitHubReader } from "../src/github/client";
 import { main } from "../src/cli/main";
 import { statusLines } from "../src/cli/status";
 import { pullRequestStatus, requiredOf } from "../src/github/status";
-import { attestation } from "../src/github/review-trust";
+import { attestation, reviewTarget } from "../src/github/review-trust";
+import { commit, git, gitRoutes, repository } from "./git-history";
 import {
 	A,
 	baseTree,
@@ -835,98 +836,160 @@ test("refuses a head moved between the paged state and ownership read", async ()
 
 describe("the review record", () => {
 	const C = "c".repeat(40);
-	const RISK = `\n- Risk: low, \`docs only\`\n- Classified: low by default\n- Risk file: ${RISK_ID}`;
-	// The maintainer's passing status on `sha`, attesting the record above.
-	const on = (sha: string) => ({
-		statuses: { [sha]: reviewStatus("SUCCESS", `Risk low, risk file ${RISK_ID}: passed`, sha) },
-	});
-	const RECORD = `## Review\n\n${REVIEW_MARK}\n\n`;
-	const line = async (body: string, options: Parameters<typeof setup>[1] = {}) => {
-		const fixture = setup([pull({ body, checks: null, reviews: page([]), threads: page([]) })], options);
-		return statusLines(await pullRequestStatus(pr, fixture.deps)).find((l) => l.startsWith("review-record "));
-	};
-
-	test("is current when the section's last full SHA is the head, without comparing", async () => {
-		expect(await line(`${RECORD}- Head: ${A}${RISK}`)).toBe(`review-record current ${A} local-review`);
-	});
-
-	test("carries across a head whose diff from the base matches the reviewed head's, and not otherwise", async () => {
-		const body = `${RECORD}- Head: ${B}${RISK}`;
-		expect(await line(body, { ...on(B), diffs: { [A]: "same", [B]: "same" } })).toBe(
-			`review-record diff-identical ${B} local-review`,
-		);
-		expect(await line(body, { ...on(B), diffs: { [A]: "new", [B]: "old" } })).toBe(
-			`review-record stale ${B} local-review`,
-		);
-	});
-
-	test("is unknown, with a warning, when GitHub cannot compare a head", async () => {
-		for (const status of [406, 403]) {
-			const warnings: string[] = [];
-			expect(await line(`${RECORD}- Head: ${B}${RISK}`, { ...on(B), diffs: { [A]: status }, warnings })).toBe(
-				`review-record unknown ${B} local-review`,
-			);
-			expect(warnings).toHaveLength(1);
-		}
-	});
-
-	test("reads only the Review section, so a SHA elsewhere names no review", async () => {
-		expect(await line(`Fixes ${A}.\n\n## Review\n\nSkipped.\n\n## Models\n\n${C}`)).toBe("review-record -");
-	});
-
-	test("names no review for a section `quest review` never wrote, such as a skip naming the head", async () => {
-		expect(await line(`## Review\n\nSkipped as trivial at ${A}.`)).toBe("review-record -");
-	});
-});
-
-describe("whose review record counts", () => {
-	const C = "c".repeat(40);
-	const RISK = `\n- Risk: low, \`docs only\`\n- Classified: low by default\n- Risk file: ${RISK_ID}`;
-	const record = (head: string, risk = RISK) =>
-		`Fixes it.\n\n## Review\n\n${REVIEW_MARK}\n\n- Head: ${head}${risk}\n\n## Models\n\nSize: S`;
 	const permissions = { maintainer: "admin", writer: "write", alice: "read" };
 	const passed = (sha: string, login?: string) =>
 		reviewStatus("SUCCESS", `Risk low, risk file ${RISK_ID}: passed`, sha, login);
-	const read = async (body: string, options: Parameters<typeof setup>[1] = {}) => {
+	const read = async (options: Parameters<typeof setup>[1] = {}, fields: Node = {}) => {
 		const warnings: string[] = [];
-		const fixture = setup([pull({ body, checks: null, reviews: page([]), threads: page([]) })], {
+		const fixture = setup([pull({ checks: null, reviews: page([]), threads: page([]), ...fields })], {
 			warnings,
 			permissions,
 			...options,
 		});
-		const lines = statusLines(await pullRequestStatus(pr, fixture.deps));
+		const status = await pullRequestStatus(pr, fixture.deps);
+		const lines = statusLines(status);
 		const line = (type: string) => lines.find((l) => l.startsWith(`${type} `));
-		return { record: line("review-record"), risk: line("risk"), warnings, fixture };
+		return { record: line("review-record"), risk: line("risk"), class: line("class"), warnings, fixture, status };
 	};
-	const untrusted = (why: string) => [`example/project#1's ## Review record does not count: ${why}`];
+	const none = (why: string) => [`example/project#1: a quest review status does not count: ${why}`];
 
-	test("counts a record a writer's passing status attests on the head it names", async () => {
+	test("counts a writer's passing status on the head, with the tier and class it attests", async () => {
 		for (const login of ["maintainer", "writer"]) {
-			const attested = await read(record(A), { statuses: { [A]: passed(A, login) } });
-			expect(attested).toMatchObject({
+			const found = await read({ statuses: { [A]: passed(A, login) } });
+			expect(found).toMatchObject({
 				record: `review-record current ${A} local-review`,
-				risk: "risk low current low docs only",
+				// The status carries the final tier, not the classifier's own or its reason.
+				risk: "risk low current - -",
+				class: "class -",
 				warnings: [],
 			});
-			expect(attested.fixture.statusQueries).toEqual([A]);
-			expect(attested.fixture.permissionRequests).toEqual([login]);
+			expect(found.fixture.permissionRequests).toEqual([login]);
 		}
+		const classed = reviewStatus("SUCCESS", `Risk high, class wire, risk file ${RISK_ID}: passed`, A);
+		expect(await read({ statuses: { [A]: classed } })).toMatchObject({
+			risk: "risk high current - -",
+			class: "class wire",
+		});
 	});
 
-	test("carries an attested record to a head with the same diff, reading the status of the head it names", async () => {
-		const carried = await read(record(B), { statuses: { [B]: passed(B) }, diffs: { [A]: "same", [B]: "same" } });
-		expect(carried).toMatchObject({ record: `review-record diff-identical ${B} local-review`, warnings: [] });
-		expect(carried.fixture.statusQueries).toEqual([B]);
+	test("reads no body, so an edit neither drops a review that counts nor names one", async () => {
+		const forged = `## Review\n\n${REVIEW_MARK}\n\n- Head: ${A}\n- Risk: low, \`docs only\`\n- Classified: low by default`;
+		expect(await read({}, { body: forged })).toMatchObject({
+			record: "review-record -",
+			risk: "risk -",
+			warnings: [],
+		});
+		for (const body of ["", "Fixes it.\n\n## Models\n\nSize: S", `## Review\n\nSkipped at ${A}.`])
+			expect(await read({ statuses: { [A]: passed(A) } }, { body })).toMatchObject({
+				record: `review-record current ${A} local-review`,
+				risk: "risk low current - -",
+			});
 	});
 
-	test("counts no record without a passing status from a user who can write, and hides its risk", async () => {
-		const cases: [Record<string, ReturnType<typeof reviewStatus> | null>, string][] = [
-			[{}, `${A} has no quest review status`],
-			[{ [A]: null }, `example/project has no commit ${A}`],
-			[
-				{ [A]: reviewStatus("FAILURE", "Risk low: findings open", A) },
-				`the quest review status on ${A} is failure, not success`,
-			],
+	test("carries a status of an earlier commit to a head with its diff, and not to one with another", async () => {
+		const statuses = { [B]: passed(B) };
+		const carried = await read({ statuses, diffs: { [A]: "same", [B]: "same" } });
+		expect(carried).toMatchObject({
+			record: `review-record diff-identical ${B} local-review`,
+			risk: "risk low diff-identical - -",
+			warnings: [],
+		});
+		expect(await read({ statuses, diffs: { [A]: "new", [B]: "old" } })).toMatchObject({
+			record: `review-record stale ${B} local-review`,
+			risk: "risk low stale - -",
+		});
+		// A diff GitHub cannot render is not known to be the same.
+		for (const status of [406, 422])
+			expect(await read({ statuses, diffs: { [A]: status } })).toMatchObject({
+				record: `review-record unknown ${B} local-review`,
+			});
+		expect(await read({ statuses, diffs: { [A]: "same", [B]: 406 } })).toMatchObject({
+			record: `review-record unknown ${B} local-review`,
+		});
+	});
+
+	test("reads a refused diff as unknown, with a warning, and still prints the PR", async () => {
+		const found = await read({ statuses: { [B]: passed(B) }, diffs: { [A]: 403 } });
+		expect(found.record).toBe(`review-record unknown ${B} local-review`);
+		expect(found.warnings).toHaveLength(1);
+		expect(found.warnings[0]).toContain(
+			`a quest review status does not count: GitHub cannot compare ${A} with main`,
+		);
+		expect(found.status.head).toBe(A);
+	});
+
+	test("binds no merge base once the PR is merged, whose own moved with the landing", async () => {
+		const moved = { ...passed(A), targetUrl: `https://github.com/example/project/compare/${C}...${A}` };
+		expect(await read({ statuses: { [A]: moved } }, { state: "MERGED" })).toMatchObject({
+			record: `review-record current ${A} local-review`,
+			warnings: [],
+		});
+		// An open PR, or one closed without merging, still holds it to the merge base the status names.
+		for (const state of ["OPEN", "CLOSED"])
+			expect((await read({ statuses: { [A]: moved } }, { state })).record).toBe("review-record -");
+		// Merged by a merge commit, an earlier commit's diff against the base is empty too, so it covers nothing known.
+		expect(await read({ statuses: { [B]: passed(B) } }, { state: "MERGED" })).toMatchObject({
+			record: `review-record unknown ${B} local-review`,
+		});
+	});
+
+	test("does not call a pass current when a newer status cannot be compared with the head", async () => {
+		const failed = reviewStatus("FAILURE", `Risk low, risk file ${RISK_ID}: findings open`, B);
+		expect(await read({ statuses: { [A]: passed(A), [B]: failed }, diffs: { [A]: 403 } })).toMatchObject({
+			record: `review-record unknown ${A} local-review`,
+		});
+		// Anyone else's newer status could never supersede it, whatever its diff.
+		const bot = reviewStatus("FAILURE", "Risk low: findings open", B, "github-actions", "Bot");
+		expect(await read({ statuses: { [A]: passed(A), [B]: bot }, diffs: { [A]: 403 } })).toMatchObject({
+			record: `review-record current ${A} local-review`,
+		});
+		// An account whose permission cannot be read may be a writer, so the pass is in doubt, with a warning.
+		const unread = reviewStatus("FAILURE", "Risk low: findings open", B, "carol");
+		const doubted = await read({
+			statuses: { [A]: passed(A), [B]: unread },
+			permissions: { ...permissions, carol: 403 },
+			diffs: { [A]: 403 },
+		});
+		expect(doubted.record).toBe(`review-record unknown ${A} local-review`);
+		expect(doubted.warnings.join("\n")).toContain("cannot read the permission of carol");
+		// Comparable, it is the same diff, and the failure outweighs the pass.
+		expect(
+			await read({ statuses: { [A]: passed(A), [B]: failed }, diffs: { [A]: "same", [B]: "same" } }),
+		).toMatchObject({ record: "review-record -" });
+	});
+
+	test("lets the newest status bound to the head's diff decide, and falls back to a stale pass only without one", async () => {
+		const failed = (sha: string) => reviewStatus("FAILURE", `Risk low, risk file ${RISK_ID}: findings open`, sha);
+		const same = { diffs: { [A]: "same", [B]: "same" } };
+		// A round that failed after a pass of the same diff outweighs it, and a pass after a failure restores it.
+		expect(await read({ statuses: { [B]: passed(B), [A]: failed(A) }, ...same })).toMatchObject({
+			record: "review-record -",
+			risk: "risk -",
+			warnings: [`example/project#1: the newest quest review status on the head's diff, on ${A}, did not pass`],
+		});
+		expect(await read({ statuses: { [A]: failed(A), [B]: passed(B) }, ...same })).toMatchObject({
+			record: `review-record diff-identical ${B} local-review`,
+		});
+		// A failed round of the head alone counts for none, and a failed one of an older diff does not hide a pass of
+		// an older one.
+		expect(await read({ statuses: { [A]: failed(A) } })).toMatchObject({ record: "review-record -" });
+		expect(
+			await read({
+				statuses: { [C]: passed(C), [B]: failed(B) },
+				diffs: { [A]: "new", [B]: "old", [C]: "older" },
+			}),
+		).toMatchObject({ record: `review-record stale ${C} local-review` });
+		// A newer status that counts for none, as a non-writer's, does not outweigh a writer's.
+		const outsider = { [B]: passed(B), [A]: passed(A, "alice") };
+		const outvoted = await read({ statuses: outsider, ...same });
+		expect(outvoted).toMatchObject({ record: `review-record diff-identical ${B} local-review` });
+		expect(outvoted.warnings).toEqual([
+			`example/project#1: a quest review status does not count: alice, who set the quest review status on ${A}, has read access to example/project, not write`,
+		]);
+	});
+
+	test("counts no status from a non-writer or bound to another base, and says why", async () => {
+		const cases: [Record<string, ReturnType<typeof reviewStatus>>, string][] = [
 			[
 				{ [A]: passed(B) },
 				`the quest review status on ${A} attests another diff than main's, from ${MERGE_BASE}: https://github.com/example/project/compare/${MERGE_BASE}...${B}`,
@@ -958,179 +1021,140 @@ describe("whose review record counts", () => {
 			],
 		];
 		for (const [statuses, why] of cases)
-			expect(await read(record(A), { statuses })).toMatchObject({
+			expect(await read({ statuses })).toMatchObject({
 				record: "review-record -",
 				risk: "risk -",
-				warnings: untrusted(why),
+				class: "class -",
+				warnings: none(why),
 			});
-		const hidden = await read(record(A), { statuses: { [A]: passed(A) }, permissions: { maintainer: 403 } });
+		const hidden = await read({ statuses: { [A]: passed(A) }, permissions: { maintainer: 403 } });
 		expect(hidden.warnings).toEqual(
-			untrusted(
+			none(
 				`cannot read the permission of maintainer, who set the quest review status on ${A}: Must have push access`,
 			),
 		);
+		for (const status of [403, 404, 422]) {
+			const unread = await read({ statuses: { [A]: passed(A) }, mergeBase: status });
+			expect(unread.record).toBe("review-record -");
+			expect(unread.warnings).toHaveLength(1);
+			expect(unread.warnings[0]).toContain(`GitHub cannot compare ${A} with main`);
+		}
 	});
 
-	test("counts a record whose risk, class, and risk file are the ones its status attests, and hides a forged one", async () => {
-		const risk = `${RISK.replace("by default", "by Claude Code, m, low effort, session `s`")}\n- Class: \`test\``;
-		const attest = (description: string) => ({ statuses: { [A]: reviewStatus("SUCCESS", description, A) } });
-		// Whether a local reviewer ran comes from the status alone, whatever the body claims.
+	test("reads whether a local reviewer ran from the status", async () => {
 		for (const [outcome, review] of [
 			["passed", "local-review"],
 			["findings accepted", "local-review"],
 			["passed with no local reviewer", "no-local-review"],
 		] as const)
 			expect(
-				await read(
-					record(A, risk),
-					attest(attestation({ tier: "low", class: "test", riskFile: RISK_ID }, outcome)),
-				),
-			).toMatchObject({
-				record: `review-record current ${A} ${review}`,
-				risk: "risk low current low docs only",
-				warnings: [],
-			});
-		for (const description of [
-			"Risk high, class test: passed",
-			"Risk low: passed",
-			"Risk low, class chore: passed",
-			// So a body edited to name the base's current risk file still reads as the file the classifier read.
-			"Risk low, class test: passed",
-			"Risk low, class test, risk file none: passed",
-			`Risk low, class test, risk file ${"0".repeat(12)}: passed`,
-		])
-			expect(await read(record(A, risk), attest(description))).toMatchObject({
-				record: "review-record -",
-				risk: "risk -",
-				warnings: untrusted(`its risk differs from the quest review status on ${A}: ${description}`),
-			});
-		// A record whose risk was deleted after the status attested one counts for nothing either.
-		expect((await read(record(A, ""), attest("Risk high: passed"))).warnings).toEqual(
-			untrusted(`it names no risk, which the quest review status on ${A} attests`),
-		);
+				await read({
+					statuses: {
+						[A]: reviewStatus(
+							"SUCCESS",
+							attestation({ tier: "low", class: "test", riskFile: RISK_ID }, outcome),
+							A,
+						),
+					},
+				}),
+			).toMatchObject({ record: `review-record current ${A} ${review}`, class: "class test", warnings: [] });
 	});
 
-	test("reads the status of the last full SHA, so a land fixer's head or a hand-written line needs its own", async () => {
-		const open = `Fixes it.\n\n## Review\n\nmechanical fix by codex: merged (head ${A})\n\n${REVIEW_MARK}\n\n- Head: ${B.slice(0, 12)}, named in full once no reviewer reports a finding${RISK}`;
-		expect(await read(open, { statuses: { [B]: passed(B) } })).toMatchObject({
-			record: "review-record -",
-			warnings: untrusted(`${A} has no quest review status`),
-		});
-		const added = record(B, `${RISK}\n- Low findings fixed at ${C}`);
-		expect((await read(added, { statuses: { [B]: passed(B) } })).warnings).toEqual(
-			untrusted(`${C} has no quest review status`),
-		);
-	});
-
-	test("counts no record GitHub cannot compare with its base, still reading the PR", async () => {
-		for (const status of [403, 404, 422]) {
-			const unread = await read(record(A), { mergeBase: status });
-			expect(unread.record).toBe("review-record -");
-			expect(unread.warnings).toHaveLength(1);
-			expect(unread.warnings[0]).toMatch(
-				new RegExp(
-					`^example/project#1's ## Review record does not count: GitHub cannot compare ${A} with main`,
-				),
-			);
-		}
-	});
-
-	test("reads no status for a section that names no full SHA", async () => {
-		const skipped = await read("## Review\n\nSkipped.");
-		expect(skipped.fixture.statusQueries).toEqual([]);
-		expect(skipped.fixture.permissionRequests).toEqual([]);
-	});
-});
-
-describe("the risk tier", () => {
-	const risk = async (body: string, options: Parameters<typeof setup>[1] = {}) => {
-		const fixture = setup([pull({ body, checks: null, reviews: page([]), threads: page([]) })], options);
-		const status = await pullRequestStatus(pr, fixture.deps);
-		return { line: statusLines(status).find((l) => l.startsWith("risk ")), risk: status.risk };
-	};
-	const record = (head: string, file: string | null = RISK_ID) =>
-		`## Review\n\n${REVIEW_MARK}\n\n- Head: ${head}\n- Base: origin/main at bbbbbbbbbbbb\n- Risk: high, \`it rewrites the wire format\`\n` +
-		`- Classified: medium by Claude Code, claude-haiku-5-5, low effort, session \`s-1\`` +
-		(file === null ? "" : `\n- Risk file: ${file}`);
-
-	test("names the record's tier, the classifier's, and whether it covers the head", async () => {
-		expect(await risk(record(A))).toEqual({
-			line: "risk high current medium it rewrites the wire format",
-			risk: {
-				tier: "high",
-				reason: "it rewrites the wire format",
-				classified: "medium",
-				class: null,
-				state: "current",
-			},
-		});
-		// A record with an open finding names its head by 12 characters, and no full SHA, so no status attests its risk.
-		expect((await risk(record(A.slice(0, 12)))).line).toBe("risk -");
-	});
-
-	test("carries to a later head as the review record does", async () => {
-		const statuses = { [B]: reviewStatus("SUCCESS", `Risk high, risk file ${RISK_ID}: passed`, B) };
-		expect((await risk(record(B), { statuses, diffs: { [A]: "same", [B]: "same" } })).line).toMatch(
-			/^risk high diff-identical /,
-		);
-		expect((await risk(record(B), { statuses, diffs: { [A]: "new", [B]: "old" } })).line).toMatch(
-			/^risk high stale /,
-		);
-	});
-
-	test("is stale with its review record once the base's risk file is not the one it was classified against", async () => {
+	test("is stale, with a warning, once the base's risk file is not the one the status was classified against", async () => {
 		const base = (file: { oid: string } | null) => ({ baseRef: baseTree(file) });
-		const read = async (body: string, fields: Node, state = "OPEN", statuses?: Record<string, Node>) => {
-			const warnings: string[] = [];
-			const fixture = setup(
-				[pull({ body, state, checks: null, reviews: page([]), threads: page([]), ...fields })],
-				{ warnings, ...(statuses && { statuses }) },
+		const check = async (description: string, fields: Node, state = "OPEN") => {
+			const found = await read(
+				{ statuses: { [A]: reviewStatus("SUCCESS", description, A) } },
+				{ state, ...fields },
 			);
-			const status = await pullRequestStatus(pr, fixture.deps);
-			return { risk: status.risk?.state, record: status.reviewRecord?.state, warnings };
+			return {
+				risk: found.status.risk?.state,
+				record: found.status.reviewRecord?.state,
+				warnings: found.warnings,
+			};
 		};
 		const stale = (why: string) => ({
 			risk: "stale",
 			record: "stale",
 			warnings: [
-				`example/project#1's ## Review record ${why}, so it covers the head no longer: run quest review again`,
+				`example/project#1's quest review status on ${A} ${why}, so it covers the head no longer: run quest review again`,
 			],
 		});
 		const current = { risk: "current", record: "current", warnings: [] };
 		// The base changed RISK.md after the review, so it may no longer hold the tier or offer the class, and the tier
 		// decided how much review the head got.
-		expect(await read(record(A), base({ oid: "0".repeat(40) }))).toEqual(
-			stale(`was classified against RISK.md ${RISK_ID}, but the base's is ${"0".repeat(12)}`),
+		const old = "0".repeat(12);
+		expect(await check(`Risk low, risk file ${old}: passed`, base({ oid: RISK_BLOB }))).toEqual(
+			stale(`was classified against RISK.md ${old}, but the base's is ${RISK_ID}`),
 		);
-		expect(await read(record(A, "none"), base(null))).toEqual(current);
-		expect(await read(record(A, "none"), base({ oid: RISK_BLOB }))).toEqual(
+		expect(await check("Risk low, risk file none: passed", base(null))).toEqual(current);
+		expect(await check("Risk low, risk file none: passed", base({ oid: RISK_BLOB }))).toEqual(
 			stale(`was classified when the base had no RISK.md, but the base's is ${RISK_ID}`),
 		);
-		expect(await read(record(A), base(null))).toEqual(
+		expect(await check(`Risk low, risk file ${RISK_ID}: passed`, base(null))).toEqual(
 			stale(`was classified against RISK.md ${RISK_ID}, but the base has none`),
 		);
-		// A record and status from before the risk file line name none, so they cover a base that has none.
-		const before = { [A]: reviewStatus("SUCCESS", "Risk high: passed", A) };
-		expect(await read(record(A, null), base(null), "OPEN", before)).toEqual(current);
-		expect(await read(record(A, null), {}, "OPEN", before)).toEqual(
+		// A status from before the risk file line names none, so it covers a base that has none.
+		expect(await check("Risk high: passed", base(null))).toEqual(current);
+		expect(await check("Risk high: passed", {})).toEqual(
 			stale(`was classified when the base had no RISK.md, but the base's is ${RISK_ID}`),
 		);
 		// A closed PR cannot land, and its base may be gone, so only its head is compared.
-		expect(await read(record(A), { baseRef: null }, "MERGED")).toEqual(current);
+		expect(await check(`Risk low, risk file ${old}: passed`, { baseRef: null }, "MERGED")).toEqual(current);
 	});
-
-	test("is absent from a record without one, and marks a malformed one without failing the read", async () => {
-		expect((await risk(`## Review\n\n${REVIEW_MARK}\n\n- Head: ${A}`)).line).toBe("risk -");
-		// Read beside a well-formed PR, as a reader of many PRs does: only the malformed one's risk is marked.
-		const [malformed, sound] = await Promise.all([
-			risk(`## Review\n\n${REVIEW_MARK}\n\n- Head: ${A}\n- Risk:dire`),
-			risk(record(A)),
-		]);
-		expect(malformed).toEqual({
-			line: "risk - malformed - the ## Review record's risk is malformed: dire",
-			risk: { state: "malformed", error: "the ## Review record's risk is malformed: dire" },
-		});
-		expect(sound.line).toBe("risk high current medium it rewrites the wire format");
+	test("carries across clean merges of the base, whose diff text changed, read from GitHub's commits", async () => {
+		const text = (edits: Record<number, string>) =>
+			Array.from({ length: 20 }, (_, i) => `${edits[i + 1] ?? i + 1}\n`).join("");
+		const dir = repository();
+		commit(dir, { "a.txt": text({}) });
+		git(dir, "switch", "-q", "-c", "pr");
+		const reviewed = commit(dir, { "a.txt": text({ 5: "ours" }) });
+		const merge = () => {
+			git(dir, "switch", "-q", "main");
+			commit(dir, { "a.txt": git(dir, "show", "HEAD:a.txt").replace(/^(\d+)$/m, "$1 theirs") + "\n" });
+			git(dir, "switch", "-q", "pr");
+			git(dir, "merge", "-q", "--no-edit", "main");
+			return git(dir, "rev-parse", "HEAD");
+		};
+		const from = git(dir, "merge-base", "main", reviewed);
+		const statuses = { [reviewed]: { ...passed(reviewed), targetUrl: reviewTarget(pr, from, reviewed) } };
+		const routes = gitRoutes(dir);
+		const at = async (head: string, refuse: "diff" | "commit" | null = null) => {
+			const { record, warnings } = await read(
+				{
+					statuses,
+					git: (url, init) => {
+						// A diff too large for GitHub to send, or a commit GitHub fails to read.
+						if (
+							refuse === "diff" &&
+							new Headers(init?.headers).get("Accept") === "application/vnd.github.diff"
+						)
+							return Response.json({ message: "too large" }, { status: 406 });
+						if (refuse === "commit" && url.pathname.includes("/git/commits/"))
+							return Response.json({ message: "Not Found" }, { status: 404 });
+						return routes(url, init);
+					},
+				},
+				{ head },
+			);
+			return { record, warnings };
+		};
+		const carried = { record: `review-record diff-identical ${reviewed} local-review`, warnings: [] };
+		const once = merge();
+		expect(git(dir, "diff", `main...${once}`)).not.toBe(git(dir, "diff", `main...${reviewed}`));
+		expect(await at(once)).toEqual(carried);
+		expect(await at(once, "diff")).toEqual(carried);
+		const twice = merge();
+		expect(await at(twice)).toEqual(carried);
+		// A walk GitHub fails leaves the review unknown, with a warning, never carried or stale.
+		const failed = await at(twice, "commit");
+		expect(failed.record).toBe(`review-record unknown ${reviewed} local-review`);
+		expect(failed.warnings.join("\n")).toContain(
+			`cannot check whether ${twice} only merged the base since ${reviewed}`,
+		);
+		const pushed = commit(dir, { "b.txt": "b\n" });
+		expect(await at(pushed)).toEqual({ record: `review-record stale ${reviewed} local-review`, warnings: [] });
+		expect((await at(pushed, "diff")).record).toBe(`review-record unknown ${reviewed} local-review`);
 	});
 });
 

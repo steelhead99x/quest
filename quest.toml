@@ -1,0 +1,16 @@
+# The merge queue runs `just check` and `just test` on the self-hosted runner
+# (.github/workflows/queue-build.yml); this holds what runs elsewhere.
+
+# The native Windows suite, which .github/workflows/windows.yml runs nightly
+# through platform.yml, whose Bun, the one that built quest there, runs it.
+[tasks.windows]
+tier = "nightly"
+nix = false
+os = ["windows"]
+run = """
+bun install --frozen-lockfile
+bun run check
+bun run test
+bun run build
+bun scripts/lifecycle-check.mjs dist/quest.js dev
+"""

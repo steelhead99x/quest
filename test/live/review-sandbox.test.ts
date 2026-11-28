@@ -27,11 +27,12 @@ import { createInterface } from "node:readline";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import { type HarnessName, strippedEnvironment } from "../../src/cli/agent";
-import { DEFAULT_SIZE, REVIEWERS } from "../../src/cli/models";
+import { DEFAULT_SIZE, reviewRung } from "../../src/cli/models";
 import { ReviewerUnavailableError, claudeFlags, review, reviewerEnvironment, schema } from "../../src/cli/review";
 
 /** The model a sizeless review runs on `harness`. */
-const modelOf = (harness: HarnessName) => REVIEWERS[DEFAULT_SIZE].find((entry) => entry.harness === harness)!.model;
+const modelOf = (harness: HarnessName) =>
+	reviewRung(DEFAULT_SIZE, "medium").reviewers.find((entry) => entry.harness === harness)!.model;
 
 /** The cheapest effort both CLIs accept; the isolation under test does not depend on it. */
 const EFFORT = "low";

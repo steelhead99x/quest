@@ -175,7 +175,7 @@ jobs:
   gate-macos:
     needs: plan
     if: needs.plan.outputs.build == 'true'
-    uses: ./.github/workflows/gate-macos.yml
+    uses: ./.github/workflows/gate-macos.yml # zizmor: ignore[self-repository] actionlint 1.7.12 cannot read `$/`.
 
   windows:
     name: check (${{ matrix.target }})
@@ -251,6 +251,6 @@ jobs:
   # fail loudly; their fix ships as the next release.
   install-check:
     needs: [plan, publish]
-    uses: ./.github/workflows/install-check.yml
+    uses: ./.github/workflows/install-check.yml # zizmor: ignore[self-repository] actionlint 1.7.12 cannot read `$/`.
     with:
       tag: v${{ needs.plan.outputs.version }}

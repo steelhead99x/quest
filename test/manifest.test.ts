@@ -68,7 +68,9 @@ nix = false
 		os: ["linux", "macos"],
 		capabilities: [],
 		nix: true,
-		cache: true,
+		cargo: false,
+		// test runs after it, and a reused pass would restore none of its files.
+		cache: false,
 		environment: {},
 		junit: null,
 		metrics: null,
@@ -89,6 +91,61 @@ nix = false
 	});
 	// Without Nix a task runs everywhere by default.
 	expect(parsed.tasks[2]!.os).toEqual(["linux", "macos", "windows"]);
+});
+
+test("a Nix task's pass is cached unless another task runs after it or it says otherwise; never one without Nix", () => {
+	const parsed = manifest(`
+[tasks.build]
+tier = "pr"
+run = "x"
+
+[tasks.test]
+tier = "pr"
+run = "x"
+after = ["build"]
+cargo = true
+
+[tasks.kept]
+tier = "pr"
+run = "x"
+cache = true
+
+[tasks.host]
+tier = "pr"
+run = "x"
+nix = false
+os = ["linux"]
+after = ["kept"]
+
+[tasks.publish]
+tier = "release"
+run = "x"
+
+[tasks.interop]
+tier = "nightly"
+run = "x"
+
+[tasks.bench]
+tier = "pr"
+run = "x"
+metrics = "out/bench.json"
+`);
+	expect(parsed.tasks.map(({ name, cache, cargo }) => ({ name, cache, cargo }))).toEqual([
+		{ name: "build", cache: false, cargo: false },
+		{ name: "test", cache: true, cargo: true },
+		{ name: "kept", cache: true, cargo: false },
+		{ name: "host", cache: false, cargo: false },
+		// A reused pass would skip publishing, a live suite's rerun, or fresh metrics.
+		{ name: "publish", cache: false, cargo: false },
+		{ name: "interop", cache: false, cargo: false },
+		{ name: "bench", cache: false, cargo: false },
+	]);
+	expect(
+		problems('[tasks.a]\ntier = "pr"\nrun = "x"\nnix = false\ncache = true\nenvironment = { QUEST_CRATE = "a" }\n'),
+	).toEqual([
+		"quest.toml: [tasks.a] environment: quest run sets `QUEST_CRATE` itself",
+		"quest.toml: [tasks.a] cache: nothing pins the toolchain of a task without Nix, so its result cannot be reused",
+	]);
 });
 
 test("an empty manifest has the default repo and no tasks", () => {

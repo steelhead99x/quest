@@ -1,9 +1,8 @@
 // A fake GitHub for `quest status`: recorded GraphQL answers and the REST reads around them.
 import { expect } from "vitest";
 
-import { recordedRisk } from "../src/core";
 import { type GitHubReadDependencies } from "../src/github/client";
-import { attestation, reviewTarget } from "../src/github/review-trust";
+import { reviewTarget } from "../src/github/review-trust";
 
 export const A = "a".repeat(40);
 export const B = "b".repeat(40);
@@ -147,14 +146,15 @@ export function setup(
 		/** The open PRs as the duplicate read lists them, and each `<head>:<path>` blob's text. */
 		open?: { pulls: Node[]; blobs?: Record<string, string>; files?: Record<number, Node[]> };
 		/**
-		 * The latest `quest review` status on each commit, or null for a commit GitHub does not have; by default, the
-		 * maintainer's passing status attesting the body's risk on the head alone.
+		 * The latest `quest review` status on each commit of the PR, the later listed the later set; none by default.
 		 */
-		statuses?: Record<string, Node | null>;
+		statuses?: Record<string, Node>;
 		/** The status GitHub refuses every merge-base compare with, instead of naming `MERGE_BASE`. */
 		mergeBase?: number;
 		/** Each login's permission on the repository, or the status GitHub refuses it with; by default `maintainer` is an admin. */
 		permissions?: Record<string, string | number>;
+		/** A real repository answering commit, tree, blob, and comparison requests first. */
+		git?: (url: URL, init?: RequestInit) => Response | undefined;
 	} = {},
 ) {
 	const queries: Record<string, unknown>[] = [];
@@ -175,6 +175,12 @@ export function setup(
 		warn: (message) => options.warnings?.push(message),
 		fetch: async (url, init) => {
 			const path = new URL(String(url));
+			const routed = options.git?.(path, init);
+			if (routed) return routed;
+			// Without a repository, every commit is an ordinary one, merging nothing.
+			const read = /^\/repos\/example\/project\/git\/commits\/(\w+)$/.exec(path.pathname);
+			if (read)
+				return Response.json({ sha: read[1], tree: { sha: "0".repeat(40) }, parents: [{ sha: MERGE_BASE }] });
 			if (path.pathname === "/repos/fork/project/activity") {
 				activityRequests.push(`${path.pathname}${path.search}`);
 				const page = activityPages.shift();
@@ -275,27 +281,31 @@ export function setup(
 				const contexts = { pageInfo: { hasNextPage: false, endCursor: null }, nodes };
 				return Response.json({ data: { repository: { object: { statusCheckRollup: { contexts } } } } });
 			}
-			if (request.query.includes("query ReviewStatus(")) {
-				const sha = String(request.variables.sha);
-				statusQueries.push(sha);
-				// By default the maintainer's passing status on the head attests whatever the body's record says.
-				const pull = last?.data.repository.pullRequest;
-				const body = String(pull?.body ?? "");
-				const recorded = recordedRisk(body);
-				const status =
-					options.statuses !== undefined
-						? options.statuses[sha]
-						: sha !== pull?.headRefOid
-							? undefined
-							: reviewStatus(
-									"SUCCESS",
-									recorded === null || "malformed" in recorded
-										? "Risk low: passed"
-										: attestation(recorded, "passed"),
-									sha,
-								);
-				const object = status === null ? null : { status: status === undefined ? null : { context: status } };
-				return Response.json({ data: { repository: { object } } });
+			if (request.query.includes("query ReviewTiers(")) {
+				// A later entry was set later, unless the status names its own time.
+				const nodes = Object.entries(options.statuses ?? {})
+					.filter(([, status]) => status !== null)
+					.map(([oid, status], index) => ({
+						commit: {
+							oid,
+							status: {
+								context: {
+									createdAt: `2026-10-07T12:00:${String(index).padStart(2, "0")}Z`,
+									...status,
+								},
+							},
+						},
+					}));
+				statusQueries.push(...nodes.map((node) => node.commit.oid));
+				return Response.json({
+					data: {
+						repository: {
+							pullRequest: {
+								commits: { pageInfo: { hasPreviousPage: false, startCursor: null }, nodes },
+							},
+						},
+					},
+				});
 			}
 			if (request.query.includes("query HoldOwnership(")) {
 				holdQueries.push(request.variables);

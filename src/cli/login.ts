@@ -1,5 +1,6 @@
 // `quest login`: this host gets a token to post with once a person signed in at Kixel Quest approves the code it shows,
 // as OAuth's device authorization grant (RFC 8628) does, which Kixel Quest's `/login/device` and `/login/token` serve.
+import { signInGit, signOutGit } from "./git-credential";
 import { kixelUrl, removeLogin, saveLogin } from "./tokens";
 
 /** What signing in needs from its host. */
@@ -25,11 +26,13 @@ export interface SignedIn {
 	url: string;
 	label: string;
 	transcripts: boolean;
+	/** The global git config entries that sign git in to the repositories this Kixel Quest hosts. */
+	git: string[];
 }
 
 /**
- * Ask whether to upload transcripts, show a code to approve at Kixel Quest, wait for the approval, and store the token
- * it issues, replacing this host's earlier one.
+ * Ask whether to upload transcripts, show a code to approve at Kixel Quest, wait for the approval, store the token
+ * it issues, replacing this host's earlier one, and sign git in with it.
  */
 export async function login(deps: LoginDependencies): Promise<SignedIn> {
 	const url = kixelUrl(deps.env);
@@ -46,13 +49,17 @@ export async function login(deps: LoginDependencies): Promise<SignedIn> {
 		const token = issued(answer, url);
 		if (token === null) continue;
 		saveLogin(url, { token, transcripts }, deps.env);
-		return { url, label, transcripts };
+		return { url, label, transcripts, git: signInGit(url, deps.env) };
 	}
 }
 
-/** Forget this host's token for the Kixel Quest `env` names, returning its URL and whether there was one. */
+/**
+ * Sign git out of the Kixel Quest `env` names and forget this host's token for it, returning its URL and whether there
+ * was one. A git config it cannot write keeps the token.
+ */
 export function logout(env: NodeJS.ProcessEnv): { url: string; removed: boolean } {
 	const url = kixelUrl(env);
+	signOutGit(url, env);
 	return { url, removed: removeLogin(url, env) };
 }
 

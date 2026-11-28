@@ -10,6 +10,7 @@ Decided in [kixel-ai/kixel.quest#104](https://github.com/kixel-ai/kixel.quest/pu
 
 - Reuse the sender's path, so a backfilled record is indistinguishable from a live one except for when it was sent.
 - Build each saved round's post with `reviewRun` in `src/cli/review-record.ts`, as `quest review` does, and mark its session `posted` once sent, so a later run settles its findings there.
+- Only backfill a saved round with its own head's risk classification: a later head reviewed on the same branch (such as a `low`-risk follow-up head that kept the older sessions) overwrites branch-level `state.classified`, so never publish a newer head's tier, reason, and classifier alongside an older round's score. Match `state.classified` to the round's head/diff (or skip rounds whose original risk classification cannot be recovered).
 
 Tests: on a seeded host, a backfill since a date sends each session and each saved review session's last round once, and a second run sends nothing new.
 

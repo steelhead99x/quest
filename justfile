@@ -20,6 +20,7 @@ _check:
     bun run --silent quest check
     bun run --silent quest --root examples/export check
     actionlint
+    zizmor --offline .github
     shellcheck scripts/*.sh
     shfmt -d scripts/*.sh
     nixfmt --check flake.nix nix/*.nix

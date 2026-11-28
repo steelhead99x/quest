@@ -7,6 +7,7 @@ import type { GitHubDependencies, ObjectValue } from "../src/github/client";
 import { finish, land, release, take } from "../src/cli/hold";
 import { withoutHandBack } from "../src/core";
 import { reviewTarget } from "../src/github/review-trust";
+import { commit, git, gitRoutes, repository } from "./git-history";
 import { type Output, main } from "../src/cli/main";
 import { Refusal } from "../src/core";
 
@@ -80,8 +81,14 @@ class FakePull {
 	files: string[] = [];
 	/** Each commit's diff from the base, by SHA; its SHA by default, so no two commits share one. */
 	diffs: Record<string, string> = {};
+	/** The commits whose diff GitHub refuses to render, as one too large. */
+	unrenderable = new Set<string>();
+	/** The accounts whose repository permission GitHub refuses to show. */
+	forbidden = new Set<string>();
 	/** The `quest review` status on each commit, as GraphQL's `StatusContext` gives it. */
 	statuses: Record<string, ObjectValue> = {};
+	/** A real repository's commits, trees, blobs, and comparisons other than the head's with the base. */
+	git?: (url: URL, init?: RequestInit) => Response | undefined;
 	private clock = Date.parse("2026-10-21T12:00:00Z");
 
 	/** Add a label as GitHub does: re-adding one already on the PR records no event. */
@@ -139,8 +146,15 @@ class FakePull {
 		if (url.pathname === "/repos/example/project/actions/runs" && url.searchParams.get("head_sha") === this.head)
 			return json(200, { total_count: this.runs.length, workflow_runs: this.runs });
 		const compared = /^\/repos\/example\/project\/compare\/main\.\.\.(\w+)$/.exec(url.pathname);
+		const routed = compared?.[1] === this.head ? undefined : this.git?.(url, init);
+		if (routed) return routed;
+		// Without a repository, every commit is an ordinary one, merging nothing.
+		const read = /^\/repos\/example\/project\/git\/commits\/(\w+)$/.exec(url.pathname);
+		if (read) return json(200, { sha: read[1], tree: { sha: "0".repeat(40) }, parents: [{ sha: FORK }] });
 		if (compared && new Headers(init.headers).get("Accept") === "application/vnd.github.diff")
-			return new Response(this.diffs[compared[1]!] ?? compared[1]);
+			return this.unrenderable.has(compared[1]!)
+				? json(406, { message: "diff too large" })
+				: new Response(this.diffs[compared[1]!] ?? compared[1]);
 		if (compared) {
 			const files = this.files.map((filename) => ({ filename }));
 			// Only `quest merge`'s own check of the head against the base, which asks for one commit.
@@ -155,6 +169,8 @@ class FakePull {
 				files,
 			});
 		}
+		const asked = /^\/repos\/example\/project\/collaborators\/([^/]+)\/permission$/.exec(url.pathname)?.[1];
+		if (asked && this.forbidden.has(asked)) return json(403, { message: "Must have push access" });
 		if (url.pathname === "/repos/example/project/collaborators/maintainer/permission")
 			return json(200, { permission: "write" });
 		if (url.pathname === "/repos/example/project/rules/branches/main") {
@@ -1235,6 +1251,46 @@ describe("merge --land of a high head", () => {
 		expect(pull.writes).toEqual(Array(3).fill(`enablePullRequestAutoMerge ${HEAD} MERGE`));
 	});
 
+	test("lands a high head carried across a merge whose only conflict the quest driver resolved", async () => {
+		const quest = (related: string[]) =>
+			`# [S] Example\n\n## Goal\n\nDo it.\n\n## Related\n\n${related.map((name) => `- [${name}](/quest/${name}.md)`).join("\n")}\n`;
+		const dir = repository();
+		commit(dir, { ".gitattributes": "quest/** merge=quest\n", "quest/x.md": quest(["a", "b", "c"]) });
+		git(dir, "switch", "-q", "-c", "pr");
+		const reviewed = commit(dir, { "quest/x.md": quest(["a", "b", "x", "c"]) });
+		git(dir, "switch", "-q", "main");
+		commit(dir, { "quest/x.md": quest(["a", "c"]) });
+		git(dir, "switch", "-q", "pr");
+		git(dir, "merge", "-q", "--no-edit", "main");
+		const merged = git(dir, "rev-parse", "HEAD");
+		const pull = new FakePull();
+		pull.git = gitRoutes(dir);
+		pull.head = merged;
+		pull.files = ["quest/x.md"];
+		review(pull, reviewed, "high");
+		pull.statuses[reviewed]!.targetUrl = reviewTarget(PR, git(dir, "merge-base", "main", reviewed), reviewed);
+		const landing = (sha: string) => land(PR, { sha, method: "merge", check: clean }, pull.deps());
+		await landing(merged);
+		expect(pull.writes).toEqual([`enablePullRequestAutoMerge ${merged} MERGE`]);
+		// A push of the PR's own after the merge needs a new round.
+		pull.head = commit(dir, { "quest/x.md": quest(["a", "x", "c", "y"]) });
+		expect(await refused(landing(pull.head))).toContain(
+			`since the quest review status on ${reviewed} rates it high`,
+		);
+	});
+
+	test("says why when reading the head's merges of the base failed", async () => {
+		const pull = new FakePull();
+		review(pull, OLD, "high");
+		pull.git = (url) =>
+			url.pathname.includes("/git/commits/")
+				? Response.json({ message: "Not Found" }, { status: 404 })
+				: undefined;
+		expect(await refused(land_(pull))).toContain(
+			`since the quest review status on ${OLD} rates it high, and no quest review status covers it (reading its merges of the base failed: GitHub HTTP 404 for /repos/example/project/git/commits/${HEAD}`,
+		);
+	});
+
 	test("lets the most recently set status of the head's diff decide, whatever commit carries it", async () => {
 		const pull = new FakePull();
 		const MID = "e".repeat(40);
@@ -1248,6 +1304,38 @@ describe("merge --land of a high head", () => {
 			description: "Risk high: findings open",
 			createdAt: new Date(Date.UTC(2026, 11, 1)).toISOString(),
 		};
+		expect(await refused(land_(pull))).toContain("is high");
+		expect(pull.writes).toEqual([]);
+	});
+
+	test("refuses a high head whose pass a newer writer's uncomparable failure may supersede", async () => {
+		const pull = new FakePull();
+		review(pull, HEAD, "high");
+		review(pull, OLD, "high");
+		pull.statuses[OLD] = { ...pull.statuses[OLD]!, state: "FAILURE", description: "Risk high: findings open" };
+		pull.unrenderable.add(HEAD);
+		expect(await refused(land_(pull))).toContain("is high");
+		expect(pull.writes).toEqual([]);
+	});
+
+	test("refuses a high head whose newer uncomparable failure came from an account whose permission is unreadable", async () => {
+		const pull = new FakePull();
+		review(pull, HEAD, "high");
+		review(pull, OLD, "high");
+		pull.statuses[OLD] = {
+			...pull.statuses[OLD]!,
+			state: "FAILURE",
+			description: "Risk high: findings open",
+			creator: { __typename: "User", login: "other" },
+		};
+		pull.unrenderable.add(HEAD);
+		// Known not to write, it supersedes nothing and the head's pass covers it.
+		await land_(pull);
+		expect(pull.writes).toEqual([`enablePullRequestAutoMerge ${HEAD} MERGE`]);
+		pull.writes.length = 0;
+		pull.autoMerge = null;
+		// Unreadable, it may be a writer's, so the pass is in doubt.
+		pull.forbidden.add("other");
 		expect(await refused(land_(pull))).toContain("is high");
 		expect(pull.writes).toEqual([]);
 	});

@@ -21,7 +21,7 @@ export function statusLines(status: Status): string[] {
 			? "risk -"
 			: status.risk.state === "malformed"
 				? `risk - malformed - ${status.risk.error}`
-				: `risk ${status.risk.tier} ${status.risk.state} ${status.risk.classified} ${status.risk.reason}`,
+				: `risk ${status.risk.tier} ${status.risk.state} ${dash(status.risk.classified)} ${dash(status.risk.reason)}`,
 		`class ${dash(status.risk === null || status.risk.state === "malformed" ? null : status.risk.class)}`,
 		status.autoMerge === null
 			? "auto-merge -"

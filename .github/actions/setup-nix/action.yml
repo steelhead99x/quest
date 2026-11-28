@@ -1,0 +1,139 @@
+name: Set up Nix
+description: >-
+  Install Nix trusting the flake's own nixConfig, which names nix.kixel.quest, and optionally put mbx's Cargo shim
+  on PATH with a remote S3 cache, whose key every later step sees as AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+  For GitHub-hosted runners; Windows, where Nix does not run, gets only mbx.
+
+inputs:
+  mbx-remote:
+    description: The mbx cache bucket, such as s3://mbx-moq-dev. Empty sets up no mbx.
+    default: ""
+  mbx-endpoint:
+    description: The bucket's S3 endpoint, such as https://s3.us-east-005.backblazeb2.com.
+    default: ""
+  mbx-region:
+    description: The bucket's S3 region, such as us-east-005.
+    default: ""
+  mbx-access-key-id:
+    description: The bucket's access key id; required with mbx-remote.
+    default: ""
+  mbx-secret-access-key:
+    description: The secret key matching mbx-access-key-id; required with mbx-remote.
+    default: ""
+  mbx-write:
+    description: >-
+      Whether this job publishes its compilations. Only a job whose credentials an Environment scopes to trusted
+      refs passes true; every other job reads.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # Nix ignores a flake's nixConfig unless told to accept it, and would then
+    # build from source what nix.kixel.quest serves. The flake is the checkout
+    # the job already runs as code, so trusting its config grants nothing new.
+    - name: Install Nix
+      if: runner.os != 'Windows'
+      uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      with:
+        # A build of many derivations leaves all but one core idle at Nix's default of one job.
+        extra_nix_config: |
+          accept-flake-config = true
+          max-jobs = auto
+
+    # A remote without credentials would build every job cold with nothing to
+    # say why, so refuse instead.
+    - name: Configure mbx
+      if: inputs.mbx-remote != ''
+      shell: bash
+      env:
+        KEY_ID: ${{ inputs.mbx-access-key-id }}
+        SECRET: ${{ inputs.mbx-secret-access-key }}
+        ENDPOINT: ${{ inputs.mbx-endpoint }}
+        REGION: ${{ inputs.mbx-region }}
+        WRITE: ${{ inputs.mbx-write }}
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
+      run: |
+        if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+          echo "::error::setup-nix's mbx is for GitHub-hosted runners; a self-hosted runner keeps its own cache" >&2
+          exit 1
+        fi
+        if [ -z "$KEY_ID" ] || [ -z "$SECRET" ]; then
+          echo "::error::mbx-remote needs both mbx-access-key-id and mbx-secret-access-key" >&2
+          exit 1
+        fi
+        case "$WRITE" in true | false) ;; *)
+          echo "::error::mbx-write must be true or false, not '$WRITE'" >&2
+          exit 1
+          ;;
+        esac
+        {
+          echo "AWS_ACCESS_KEY_ID=$KEY_ID"
+          echo "AWS_SECRET_ACCESS_KEY=$SECRET"
+          if [ -n "$ENDPOINT" ]; then echo "MBX_REMOTE_S3_ENDPOINT=$ENDPOINT"; fi
+          if [ -n "$REGION" ]; then echo "MBX_REMOTE_S3_REGION=$REGION"; fi
+          # B2 answers conditional writes with 501, which mbx's `auto` learns only
+          # after the first refusal; only the task manifest's compare-and-swap is lost.
+          if [[ "$ENDPOINT" == *.backblazeb2.com ]]; then echo "MBX_REMOTE_S3_CONDITIONAL_WRITES=off"; fi
+          # The store's size budget also caps what one build restores, which a
+          # hosted disk would otherwise scale down to 5 GiB.
+          echo "MBX_GC_MAX_SIZE=20GiB"
+          if [ "$WRITE" = true ]; then
+            echo "MBX_REMOTE_MODE=read-write"
+            # mbx trusts only a push to a protected branch; the caller's
+            # Environment already decided who holds a write key.
+            echo "MBX_REMOTE_TRUST_WRITES=true"
+          else
+            echo "MBX_REMOTE_MODE=read-only"
+          fi
+        } >> "$GITHUB_ENV"
+
+    # mbx keys each compilation on its compiler, target, and inputs, so one
+    # bucket serves every toolchain; the namespace splits it per platform so
+    # each one's misses read off its own prefix.
+    - name: Install mbx
+      if: inputs.mbx-remote != ''
+      uses: jdx/mr-boxington-action@b3ef673bd77c5426927fe8836c6185cdae04c2dd # v1.7.4
+      with:
+        version: 1.31.0
+        backend: remote
+        remote-url: ${{ inputs.mbx-remote }}
+        namespace: ${{ runner.os }}-${{ runner.arch }}
+
+    # The action only warns when it cannot reach the bucket, which is how a
+    # revoked key looks, and a writer that comes out read-only would leave
+    # every reader drifting cold. Both fail here.
+    - name: Check the mbx cache
+      if: inputs.mbx-remote != ''
+      shell: bash
+      run: |
+        report=$(mbx doctor --json || true)
+        remote=$(jq -r '.checks[] | select(.name == "remote") | "\(.severity): \(.detail)"' <<< "$report")
+        policy=$(jq -r '.checks[] | select(.name == "policy") | .detail' <<< "$report")
+        echo "remote: $remote"
+        echo "policy: $policy"
+        case "$remote" in
+          pass:*) ;;
+          *) echo "::error::mbx cache unusable: $remote" >&2; exit 1 ;;
+        esac
+        if [ "$MBX_REMOTE_MODE" = read-write ] && [[ "$policy" != *"effective read-write" ]]; then
+          echo "::error::the mbx cache writer cannot publish: $policy" >&2
+          exit 1
+        fi
+
+    # The shim is how mbx reaches Cargo, so a setup that installed none would
+    # build every job uncached and still pass. A dev shell puts its own Cargo
+    # ahead of everything on PATH, so `quest run` puts
+    # MBX_CARGO_SHIM_DIR back in front inside `nix develop`.
+    - name: Put mbx's Cargo shim on PATH
+      if: inputs.mbx-remote != ''
+      shell: bash
+      run: | # zizmor: ignore[github-env] mbx names the shim's path; nothing from the event does.
+        mbx setup --yes
+        shim=$(mbx setup --status 2>/dev/null | sed -n '1s/.*: //p' || true)
+        if [ ! -e "$shim" ]; then
+          echo "::error::mbx setup installed no Cargo shim: $(mbx setup --status 2>&1)" >&2
+          exit 1
+        fi
+        echo "${shim%[/\\]*}" >> "$GITHUB_PATH"
+        echo "MBX_CARGO_SHIM_DIR=${shim%[/\\]*}" >> "$GITHUB_ENV"

@@ -10,7 +10,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { REFERENCE_MARKER, type Repository, lines } from "../core";
 import { originHost } from "./forge";
 import { parse } from "./shell";
-import { kixelUrl } from "./tokens";
+import { kixelPath, kixelUrl } from "./tokens";
 
 const EM_DASH = String.fromCharCode(0x2014);
 
@@ -860,12 +860,10 @@ function kixel({ args, env }: GhCall, check: Check) {
  */
 function namesHosted(value: string, hosted: Repository, base: string): boolean {
 	let parts: string[];
-	if (/^https?:\/\//.test(value)) {
-		if (!value.toLowerCase().startsWith(`${base.toLowerCase()}/`)) return false;
-		parts = value
-			.slice(base.length + 1)
-			.split(/[/?#]/)
-			.slice(0, 2);
+	if (/^https?:\/\//i.test(value)) {
+		const path = kixelPath(value, base);
+		if (path === null) return false;
+		parts = path.split(/[/?#]/).slice(0, 2);
 	} else {
 		parts = value.split("/").filter(Boolean);
 		if (parts.length === 3 && parts.shift()!.toLowerCase() !== new URL(base).host.toLowerCase()) return false;

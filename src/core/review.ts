@@ -1,4 +1,4 @@
-// A PR body's `## Review` record, which `quest review` writes and `quest status` reads.
+// A PR body's `## Review` record, which `quest review` once wrote and `quest usage` still reads for older PRs.
 
 import { markdown } from "./doc";
 

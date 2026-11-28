@@ -251,7 +251,8 @@ test("the sender posts with the token quest login stored", async () => {
 	const root = checkout();
 	const server = new FakeLogin(URL_);
 	await login({
-		env,
+		// Signing in also signs git in, in a global config of the test's own.
+		env: { ...env, PATH: process.env.PATH, GIT_CONFIG_GLOBAL: join(tempDir(), ".gitconfig") },
 		fetch: server.fetch,
 		now: () => 0,
 		sleep: async () => server.approve(),

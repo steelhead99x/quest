@@ -1,3 +1,13 @@
 self-hosted-runner:
   labels:
     - quest-queue
+# GitHub added job.workflow_repository and job.workflow_sha (April 2026) and
+# `uses: $/...` (July 2026) after actionlint 1.7.12; drop these once it knows them.
+paths:
+  .github/workflows/platform.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
+      - 'specifying action "\$/\.github/actions/setup-nix" in invalid format'
+  .github/workflows/npm-publish.yml:
+    ignore:
+      - 'specifying action "\$/\.github/actions/setup-nix" in invalid format'

@@ -1,0 +1,175 @@
+name: Platform
+
+# Runs a repository's macOS and Windows tasks from its quest.toml on
+# GitHub-hosted runners, one job per operating system, and uploads their JUnit
+# XML and metrics as `kixel-metrics-<os>-<arch>` for Kixel Quest. Linux stays on the
+# repository's own hosts; this covers only what they cannot run yet.
+#
+# Call it at a release tag or commit, never a branch, so a repository runs only
+# reviewed code it chose:
+#
+#   jobs:
+#     platform:
+#       uses: kixel-ai/quest/.github/workflows/platform.yml@<sha> # vX.Y.Z
+#       with:
+#         tier: nightly
+#
+# A nightly runs every task (`--all`). A release gate, such as a `release`
+# branch's merge group, passes `base: ${{ github.event.merge_group.base_sha }}`
+# to run only the tasks the change affects. A Windows task (`nix = false`)
+# installs its own tools, such as through a task it runs after.
+on:
+  workflow_call:
+    inputs:
+      tier:
+        description: The quest.toml tier to run, nightly or release-gate.
+        required: true
+        type: string
+      os:
+        description: A JSON list of the operating systems to run, macos and windows.
+        default: '["macos", "windows"]'
+        type: string
+      base:
+        description: Run only the tasks a change since this commit affects; empty runs every task.
+        default: ""
+        type: string
+      macos-runner:
+        description: An Apple Silicon runner, since the pinned nixpkgs no longer evaluates on Intel macOS.
+        default: macos-15
+        type: string
+      windows-runner:
+        default: windows-2022
+        type: string
+      timeout-minutes:
+        default: 90
+        type: number
+      environment:
+        description: The Environment each job runs in, such as one holding mbx's write key. Empty uses none.
+        default: ""
+        type: string
+      mbx-remote:
+        description: The mbx cache bucket for Cargo, such as s3://mbx-moq-dev. Empty sets up no mbx.
+        default: ""
+        type: string
+      mbx-endpoint:
+        default: ""
+        type: string
+      mbx-region:
+        default: ""
+        type: string
+      mbx-write:
+        description: >-
+          Whether these jobs publish compilations to mbx-remote. Needs an `environment` holding the write key, which
+          admits only trusted refs, since every reader trusts what this publishes.
+        default: false
+        type: boolean
+    secrets:
+      # An `environment` holding secrets of the same names overrides these.
+      MBX_ACCESS_KEY_ID:
+        required: false
+      MBX_SECRET_ACCESS_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  platform:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os) }}
+    runs-on: ${{ matrix.os == 'macos' && inputs.macos-runner || inputs.windows-runner }}
+    environment: ${{ inputs.environment }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the inputs
+        env:
+          OS: ${{ matrix.os }}
+          TIER: ${{ inputs.tier }}
+          MBX_WRITE: ${{ inputs.mbx-write }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          if [ "$MBX_WRITE" = true ] && [ -z "$ENVIRONMENT" ]; then
+            echo "::error::mbx-write needs an environment that holds the write key and admits only trusted refs" >&2
+            exit 1
+          fi
+          case "$OS" in macos | windows) ;; *)
+            echo "::error::platform.yml runs macos and windows, not '$OS'; Linux runs on the repository's own hosts" >&2
+            exit 1
+            ;;
+          esac
+          case "$TIER" in nightly | release-gate) ;; *)
+            echo "::error::platform.yml runs the nightly and release-gate tiers, not '$TIER'" >&2
+            exit 1
+            ;;
+          esac
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+          persist-credentials: false
+          # `--base` diffs against a merge base, which needs the history.
+          fetch-depth: ${{ inputs.base == '' && 1 || 0 }}
+      # This workflow's own commit, so the quest that runs the tasks is the
+      # version the caller pinned, outside the tree it diffs.
+      - name: Check out quest
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: quest
+          persist-credentials: false
+      # `$/` is this workflow's own repository at the commit running, like the checkout above.
+      - uses: $/.github/actions/setup-nix
+        with:
+          mbx-remote: ${{ inputs.mbx-remote }}
+          mbx-endpoint: ${{ inputs.mbx-endpoint }}
+          mbx-region: ${{ inputs.mbx-region }}
+          mbx-access-key-id: ${{ secrets.MBX_ACCESS_KEY_ID }}
+          mbx-secret-access-key: ${{ secrets.MBX_SECRET_ACCESS_KEY }}
+          mbx-write: ${{ inputs.mbx-write }}
+      # Nix doesn't run on Windows, so both build quest with the Bun its package.json pins.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: quest/package.json
+      - name: Build quest
+        working-directory: quest
+        run: |
+          bun install --frozen-lockfile
+          bun run compile
+          dist=$PWD/dist
+          # GITHUB_PATH takes a Windows path there, not Git Bash's.
+          if [ "$RUNNER_OS" = Windows ]; then dist=$(cygpath -w "$dist"); fi
+          echo "$dist" >> "$GITHUB_PATH"
+      # A hosted runner never sees a pass again, so recording one only costs the digests.
+      - name: Run the tasks
+        id: run
+        working-directory: repo
+        env:
+          OS: ${{ matrix.os }}
+          TIER: ${{ inputs.tier }}
+          BASE: ${{ inputs.base }}
+        run: |
+          args=(--tier "$TIER" --os "$OS" --no-cache --report "$RUNNER_TEMP/quest-report")
+          if [ -n "$BASE" ]; then args+=(--base "$BASE"); else args+=(--all); fi
+          quest run "${args[@]}"
+      # Kixel Quest reads only the junit.xml and metrics.json at an artifact's
+      # root, and --report keeps one of each per task or crate. The merge
+      # leads each test's class with its task, and fails naming any report it
+      # leaves out; the rest upload even then, or when a task failed.
+      - name: Merge the reports
+        if: ${{ !cancelled() && steps.run.outcome != 'skipped' }}
+        run: bun quest/scripts/kixel-metrics.ts "$RUNNER_TEMP/quest-report" "$RUNNER_TEMP/kixel-metrics"
+      # A run whose tasks declare no reports has nothing to upload.
+      - name: Upload the reports
+        if: ${{ !cancelled() && steps.run.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kixel-metrics-${{ matrix.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kixel-metrics
+          if-no-files-found: ignore

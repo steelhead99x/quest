@@ -46,7 +46,7 @@ import {
 	scope,
 } from "../src/cli/gate";
 import { forwards, foregroundStat, statProcess } from "../src/cli/interrupt";
-import { gateBoundary, main } from "../src/cli/main";
+import { argumentBoundary, main } from "../src/cli/main";
 import { measuredRun, alive as ownerAlive, questScope, START_LIMIT } from "../src/cli/supervise";
 import { readWaits } from "../src/cli/waits";
 import { created, onTerminal, run, signalled, tempDir } from "./fixture";
@@ -1816,7 +1816,7 @@ test.runIf(process.platform === "linux")("a terminal Ctrl-C reaches the gated co
 });
 
 test("the gated command keeps its own flags, even ones Quest also parses", () => {
-	expect(gateBoundary(["gate", "bun", "--help", "--root", "x"])).toEqual([
+	expect(argumentBoundary(["gate", "bun", "--help", "--root", "x"])).toEqual([
 		"gate",
 		"--",
 		"bun",
@@ -1824,15 +1824,15 @@ test("the gated command keeps its own flags, even ones Quest also parses", () =>
 		"--root",
 		"x",
 	]);
-	expect(gateBoundary(["--root", "r", "gate", "ls"])).toEqual(["--root", "r", "gate", "--", "ls"]);
-	expect(gateBoundary(["gate", "--help"])).toEqual(["gate", "--help"]);
-	expect(gateBoundary(["check"])).toEqual(["check"]);
+	expect(argumentBoundary(["--root", "r", "gate", "ls"])).toEqual(["--root", "r", "gate", "--", "ls"]);
+	expect(argumentBoundary(["gate", "--help"])).toEqual(["gate", "--help"]);
+	expect(argumentBoundary(["check"])).toEqual(["check"]);
 	// Quest's own global options may also follow the subcommand.
-	expect(gateBoundary(["gate", "--root", "r", "ls"])).toEqual(["gate", "--root", "r", "--", "ls"]);
-	expect(gateBoundary(["gate", "--root=r", "ls"])).toEqual(["gate", "--root=r", "--", "ls"]);
-	expect(gateBoundary(["gate", "--version"])).toEqual(["gate", "--version"]);
+	expect(argumentBoundary(["gate", "--root", "r", "ls"])).toEqual(["gate", "--root", "r", "--", "ls"]);
+	expect(argumentBoundary(["gate", "--root=r", "ls"])).toEqual(["gate", "--root=r", "--", "ls"]);
+	expect(argumentBoundary(["gate", "--version"])).toEqual(["gate", "--version"]);
 	// A flag after the executable is the command's.
-	expect(gateBoundary(["gate", "ls", "--host"])).toEqual(["gate", "--", "ls", "--host"]);
+	expect(argumentBoundary(["gate", "ls", "--host"])).toEqual(["gate", "--", "ls", "--host"]);
 });
 
 test("global options after gate keep working", async () => {
@@ -1851,8 +1851,8 @@ test("gate rejects unknown options before the executable and forwards flags afte
 	const result = run("gate", "--host", process.execPath, "-e", "process.exit(0)");
 	expect(result.code).toBe(2);
 	expect(result.stderr).toContain("unknown option '--host'");
-	expect(gateBoundary(["gate", "--unknown", "ls"])).toEqual(["gate", "--unknown", "ls"]);
-	expect(gateBoundary(["gate", "--", "-command"])).toEqual(["gate", "--", "-command"]);
+	expect(argumentBoundary(["gate", "--unknown", "ls"])).toEqual(["gate", "--unknown", "ls"]);
+	expect(argumentBoundary(["gate", "--", "-command"])).toEqual(["gate", "--", "-command"]);
 });
 
 describe.skipIf(process.platform === "win32")("the run record", () => {

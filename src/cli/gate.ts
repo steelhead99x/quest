@@ -136,7 +136,7 @@ export interface Precedence {
 export const COMMAND_MEMORY = 4 * 2 ** 30;
 
 /** Usable memory: physical RAM, or a smaller cgroup/container limit. */
-function usableMemory(uid?: number): number {
+export function usableMemory(uid?: number): number {
 	if (process.platform === "linux") return linuxMemory("/proc", "/sys/fs/cgroup", uid).total;
 	const constrained = process.constrainedMemory?.() ?? 0;
 	return constrained > 0 ? Math.min(totalmem(), constrained) : totalmem();
@@ -1077,6 +1077,14 @@ export function owner(env = process.env, cgroup = "/proc/self/cgroup"): { run: O
 	}
 }
 
+/**
+ * The user whose `background.slice` holds a command run as scope `unit`, which the slice's cap
+ * bounds and sizes the budget of; undefined for a command no scope runs, as without a systemd user manager.
+ */
+export function sliceUser(unit: string | undefined): number | undefined {
+	return unit === undefined ? undefined : process.getuid?.();
+}
+
 const notices: Record<Waiting, string> = {
 	load: "quest gate: waiting for CPU load to fall",
 	memory: "quest gate: waiting for free memory",
@@ -1237,8 +1245,7 @@ async function gated(
 			const precedence = {
 				priority: process.env[PRIORITY] === "1",
 			};
-			// Only a command launched into the slice is held to its cap, which also sizes its budget.
-			const user = unit === undefined ? undefined : process.getuid?.();
+			const user = sliceUser(unit);
 			const host = options.host ?? fileHost(claimDirectory(), Date.now, user);
 			const limits = hostLimits(undefined, usableMemory(user));
 			admitted = { host, id: await admit(limits, host, cancel.signal, notice, precedence) };
