@@ -442,7 +442,7 @@ export interface ReviewDependencies {
 	 */
 	models?: (root: string, base: string, branch: string) => Promise<PullModels | null>;
 	/** Fails unless the run's record can be posted, before any reviewer spends a round; without it, nothing is checked. */
-	posting?: (root: string, base: string, branch: string) => Promise<void>;
+	posting?: (root: string, base: string, branch: string, baseSha: string) => Promise<void>;
 	/**
 	 * Queues a session for the record sender, as the stop hook does an interactive one, since no hook runs in a
 	 * reviewer. It says for itself anything the person must hear, and must not throw, so a round never fails on it.
@@ -508,8 +508,11 @@ export interface Reviewed {
 	 * its rounds to; and those a failed post left for a later one.
 	 */
 	outcomes: (at: PostedOn) => FindingOutcome[];
-	/** Keeps the accepted findings among those the branch settled; for the caller to run once the acceptance is attested. */
-	remember?: () => void;
+	/**
+	 * Keeps the accepted findings among those the branch settled; for the caller to run once the acceptance is attested.
+	 * `unposted` names the PR it was attested on when nothing was posted there, so the outcomes are kept for a later post.
+	 */
+	remember?: (unposted?: PostedOn) => void;
 	/** Marks the run's rounds as posted on PR `at`, so the next run settles their findings there; for the caller to run once they are. */
 	posted?: (at: PostedOn) => void;
 }
@@ -521,6 +524,14 @@ export interface PostedOn {
 }
 
 const samePull = (a: PostedOn, b: PostedOn) => a.repository === b.repository && a.number === b.number;
+
+/** Whether two outcomes settle the same finding of the same posted round. */
+const sameFinding = (a: FindingOutcome, b: FindingOutcome) =>
+	samePull(a, b) &&
+	a.harness === b.harness &&
+	a.session === b.session &&
+	a.round === b.round &&
+	a.finding === b.finding;
 
 /**
  * A branch's review sessions, one per reviewer, kept in the clone's common Git directory so every worktree
@@ -2357,7 +2368,7 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 		: await fetchBase(root, options.base);
 	const { branch: baseBranch } = parseBase(root, baseRef);
 	const branch = sessionBranch(root, options.branch, baseBranch);
-	await deps.posting?.(root, baseRef, branch);
+	await deps.posting?.(root, baseRef, branch, baseSha);
 	// The PR's own record names its size and implementers, so the author passes neither as a flag.
 	const needed = options.size === undefined || (options.exclude ?? []).length === 0;
 	const record = needed ? await deps.models?.(root, baseRef, branch) : undefined;
@@ -2547,9 +2558,8 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 		// Kixel Quest stores no outcome of an accepted finding, so it keeps one left to later work: on the PR this run
 		// posts the rounds to, which holds them even when an earlier post failed, and on a since-replaced PR that
 		// holds them too.
-		const outcomes = (at: PostedOn) => [
-			...carried,
-			...last.flatMap((round) => {
+		const outcomes = (at: PostedOn) => {
+			const deferred = last.flatMap((round) => {
 				const posted = sessions.find((session) => session.last === round)?.posted;
 				const prs = posted === undefined || samePull(posted, at) ? [at] : [at, posted];
 				return prs.flatMap((pr) =>
@@ -2563,8 +2573,27 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 						reason: options.accept!,
 					})),
 				);
-			}),
-		];
+			});
+			// A deferral an earlier unposted acceptance left goes once, as this one's.
+			return [...carried.filter((left) => !deferred.some((each) => sameFinding(each, left))), ...deferred];
+		};
+		const unsent = () => {
+			const deferred = last.flatMap((round) => {
+				const posted = sessions.find((session) => session.last === round)?.posted;
+				return posted === undefined
+					? []
+					: round.findings.map((_, i) => ({
+							...posted,
+							harness: round.reviewer,
+							session: round.session,
+							round: round.round,
+							finding: i + 1,
+							outcome: "deferred" as const,
+							reason: options.accept!,
+						}));
+			});
+			return [...carried.filter((left) => !deferred.some((each) => sameFinding(each, left))), ...deferred];
+		};
 		return {
 			rounds: last.map((round) => ({ ...round, usage: [], unchanged: true })),
 			tallies,
@@ -2576,8 +2605,11 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 			sized,
 			accepted: options.accept,
 			outcomes,
-			// Run once the acceptance is attested, which is after its post.
-			remember: () => save(statePath, state(sessions, tallies, risk, kept)),
+			// Run once the acceptance is attested, which is after its post. An acceptance attested where nothing was
+			// posted keeps, for the next post, every outcome left before and the deferral of each accepted finding whose
+			// round was posted, on the PR it was posted on, which may be the one attested if it was served then.
+			remember: (unposted) =>
+				save(statePath, state(sessions, tallies, risk, kept, unposted === undefined ? [] : unsent())),
 		};
 	}
 
@@ -2668,7 +2700,10 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 		past,
 		done.map((each) => each.round),
 	);
-	const outcomes = [...carried, ...done.flatMap((each, i) => settledOutcomes(seats[i]!, each.round))];
+	const settled = done.flatMap((each, i) => settledOutcomes(seats[i]!, each.round));
+	// A finding this run settles again, as one an unposted acceptance deferred and a round since fixed, takes the newer
+	// outcome alone, since a post settles each finding once.
+	const outcomes = [...carried.filter((left) => !settled.some((each) => sameFinding(each, left))), ...settled];
 	// Until a post carries them, the branch keeps the outcomes, for the next run to post.
 	const store = (at: PostedOn | null) =>
 		save(

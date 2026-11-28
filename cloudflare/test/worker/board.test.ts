@@ -206,6 +206,20 @@ describe("loader", () => {
 		expect(t.branches).toEqual(["quest/m0/d"]);
 	});
 
+	test("agent instructions under quest/ are not quests, so they keep the ready and waiting lists", async () => {
+		const files = {
+			...FILES,
+			"quest/AGENTS.md": "Read the guide first.\n",
+			"quest/m0/CLAUDE.md": "See AGENTS.md.\n",
+		};
+		expect(tree(repository(files)).documents.map((d) => d.path)).toEqual(Object.keys(FILES));
+		const html = await (
+			await harness(routes(repository(files))).request("/repos/moq-dev/quest", { cookies: [await signedIn()] })
+		).text();
+		expect(html).toContain("Ready to start");
+		expect(html).toContain("pick a name");
+	});
+
 	test("refuses an answer that is not the query's shape", () => {
 		expect(() => tree({})).toThrow("repository name");
 		expect(() => tree({ ...repository(), defaultBranchRef: null })).toThrow("default branch");
@@ -363,6 +377,62 @@ describe("CI", () => {
 			expect(response.status).toBe(200);
 			expect(await response.text()).toContain(says);
 		}
+	});
+
+	test.each([
+		[
+			"a network failure",
+			() => Promise.reject(new TypeError("Network connection lost")),
+			"GitHub didn&#39;t answer",
+		],
+		["a 2xx that is not JSON", () => new Response("<html>", { status: 200 }), "was unreadable"],
+		[
+			"a body that breaks off",
+			() =>
+				new Response(
+					new ReadableStream({
+						pull: (controller) => controller.error(new Error("connection reset")),
+					}),
+					{ status: 200 },
+				),
+			"GitHub didn&#39;t answer",
+		],
+		[
+			"a rate-limited 403",
+			() => json({ message: "API rate limit exceeded for user" }, 403),
+			"GitHub is rate-limiting requests",
+		],
+		["a 429", () => json({ message: "slow down" }, 429), "GitHub is rate-limiting requests"],
+		[
+			"an answer over the byte budget",
+			() => new Response("{}", { status: 200, headers: { "content-length": String(64 * 1024 * 1024) } }),
+			"too large to read",
+		],
+	])("a quest page and the board stay up on %s from Actions, saying so in the CI panel", async (_, answer, says) => {
+		const h = harness({ ...routes(), [RUNS]: answer });
+		for (const page of ["/repos/moq-dev/quest/quest/m0/d", "/repos/moq-dev/quest"]) {
+			const response = await h.request(page, { cookies: [await signedIn()] });
+			expect(response.status).toBe(200);
+			const html = await response.text();
+			expect(html).toContain("Delta");
+			const ci = html.slice(html.indexOf('<section class="block ci">'));
+			expect(ci).toContain(says);
+			expect(ci).not.toContain("This site can&#39;t read");
+		}
+	});
+
+	test("an expired token on a quest page's CI still asks the person to sign in again", async () => {
+		const h = harness({ ...routes(), [RUNS]: () => json({ message: "Bad credentials" }, 401) });
+		const response = await h.request("/repos/moq-dev/quest/quest/m0/d", { cookies: [await signedIn()] });
+		expect(response.status).toBe(401);
+		expect(response.headers.get("Set-Cookie")).toMatch(/Max-Age=0/);
+	});
+
+	test("a quest address with a malformed escape is not found", async () => {
+		const response = await harness(routes()).request("/repos/moq-dev/quest/quest/m0/100%-done", {
+			cookies: [await signedIn()],
+		});
+		expect(response.status).toBe(404);
 	});
 
 	test("reads workflow names and triggers from the YAML, not from its text", () => {

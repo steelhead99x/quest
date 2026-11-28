@@ -14,8 +14,14 @@ export class Spent extends Error {
 	}
 }
 
-/** GitHub answered with JSON missing what the request lists. */
+/** GitHub answered with something other than the JSON the request lists. */
 export class Malformed extends Error {}
+
+/** GitHub's answer was larger than the byte budget a caller reads. */
+export class Oversized extends Error {}
+
+/** GitHub never answered: the request failed at the network layer. */
+export class Unreachable extends Error {}
 
 /** GitHub answered with an error status. */
 export class GitHubError extends Error {
@@ -69,6 +75,10 @@ export class GitHub {
 		const start = Date.now();
 		try {
 			return await this.fetch(input, init);
+		} catch (error) {
+			throw new Unreachable(`GitHub didn't answer ${input}: ${error instanceof Error ? error.message : error}`, {
+				cause: error,
+			});
 		} finally {
 			this.meter.time += Date.now() - start;
 		}
@@ -87,7 +97,12 @@ export class GitHub {
 			},
 			body: body === undefined ? undefined : JSON.stringify(body),
 		});
-		const text = await bounded(response, max);
+		const text = await bounded(response, max).catch((error: unknown) => {
+			// A status already says what GitHub meant, such as a 401's sign-out, though its body was cut off.
+			if (!response.ok && error instanceof Unreachable)
+				throw new GitHubError(response.status, path, error.message);
+			throw error;
+		});
 		if (!response.ok) {
 			let message = text.slice(0, 200);
 			try {
@@ -97,25 +112,34 @@ export class GitHub {
 			}
 			throw new GitHubError(response.status, path, message);
 		}
-		return (text ? JSON.parse(text) : null) as T;
+		if (!text) return null as T;
+		try {
+			return JSON.parse(text) as T;
+		} catch {
+			throw new Malformed(`GitHub's answer to ${path} is not JSON`);
+		}
 	}
 }
 
 /** A response's body as text, refusing one larger than MAX_RESPONSE. */
 export async function bounded(response: Response, max = MAX_RESPONSE): Promise<string> {
 	const declared = Number(response.headers.get("content-length"));
-	if (declared > max) throw new Error(`a GitHub response of ${declared} bytes exceeds ${max}`);
+	if (declared > max) throw new Oversized(`a GitHub response of ${declared} bytes exceeds ${max}`);
 	if (!response.body) return "";
 	const reader = response.body.getReader();
 	const chunks: Uint8Array[] = [];
 	let size = 0;
 	for (;;) {
-		const { done, value } = await reader.read();
+		const { done, value } = await reader.read().catch((error: unknown) => {
+			throw new Unreachable(`GitHub's answer broke off: ${error instanceof Error ? error.message : error}`, {
+				cause: error,
+			});
+		});
 		if (done) break;
 		size += value.byteLength;
 		if (size > max) {
 			await reader.cancel();
-			throw new Error(`a GitHub response exceeded ${max} bytes`);
+			throw new Oversized(`a GitHub response exceeded ${max} bytes`);
 		}
 		chunks.push(value);
 	}
