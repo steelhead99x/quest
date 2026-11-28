@@ -114,11 +114,23 @@ export async function statusReview(
 		}
 	};
 	let diff: Promise<string | null> | undefined;
+	// As the land gate counts it (`unreviewedHigh`): a head that only merged the base cleanly since the reviewed commit
+	// keeps that review, though its diff text changed. A failed read of those merges counts as no carry.
+	const merges = new BaseMerges(history(github, pr), sha);
+	const reached = async (oid: string) => {
+		try {
+			return await merges.reaches(oid);
+		} catch (error) {
+			if (error instanceof GitHubDeadline || !(error instanceof Error)) throw error;
+			return false;
+		}
+	};
 	for (const each of await reviewStatuses(github, pr)) {
 		if (each.oid !== sha) {
 			diff ??= diffOf(sha);
 			const own = await diff;
-			if (own === null || (await diffOf(each.oid)) !== own) continue;
+			const same = own !== null && (await diffOf(each.oid)) === own;
+			if (!same && !(await reached(each.oid))) continue;
 		}
 		const bound = await boundStatus(github, pr, each.oid, each.status);
 		if (typeof bound === "string") continue;

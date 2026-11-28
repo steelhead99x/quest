@@ -897,9 +897,8 @@ describe("the review record", () => {
 		const passed = reviewStatus("SUCCESS", `Risk low, risk file ${RISK_ID}: passed`, reviewed);
 		const statuses = { [reviewed]: { ...passed, targetUrl: reviewTarget(pr, from, reviewed) } };
 		const routes = gitRoutes(dir);
-		const read = async (head: string, large = false) => {
+		const read = async (head: string, large = false, body = `${RECORD}- Head: ${reviewed}${RISK}`) => {
 			const warnings: string[] = [];
-			const body = `${RECORD}- Head: ${reviewed}${RISK}`;
 			// A diff too large for GitHub to send.
 			const refused = (init?: RequestInit) =>
 				large && new Headers(init?.headers).get("Accept") === "application/vnd.github.diff";
@@ -919,6 +918,11 @@ describe("the review record", () => {
 			warnings: [],
 		});
 		expect(await read(once, true)).toEqual({
+			record: `review-record diff-identical ${reviewed} local-review`,
+			warnings: [],
+		});
+		// As on a fork PR, whose review only its status records: the status carries across the clean merge too.
+		expect(await read(once, false, "Fixes it.")).toEqual({
 			record: `review-record diff-identical ${reviewed} local-review`,
 			warnings: [],
 		});
