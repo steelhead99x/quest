@@ -198,16 +198,16 @@ describe("bench", () => {
 	});
 
 	test("skips a warm load the service worker never took control of", async () => {
-		const driver = fake(device(), [load()], [true, false, true]);
-		const report = await run(driver, { urls: ["https://q.dev/"], runs: 3, save: null });
-		expect(driver.calls.filter((call) => call.startsWith("warm"))).toHaveLength(2);
-		expect(report.pages[0]!.warm.load?.runs).toBe(2);
+		const driver = fake(device(), [load()], [true, false, true, true]);
+		const report = await run(driver, { urls: ["https://q.dev/"], runs: 4, save: null });
+		expect(driver.calls.filter((call) => call.startsWith("warm"))).toHaveLength(3);
+		expect(report.pages[0]!.warm.load?.runs).toBe(3);
 		expect(report.pages[0]!.uncontrolled).toBe(1);
-		expect(markdown([report], [])).toContain("- `/`: 1 of 3 warm loads skipped, as no service worker took control");
-		// With no warm load at all, the warm column is empty rather than the run failing.
-		const never = await run(fake(device(), [load()], [false]), { urls: ["https://q.dev/"], runs: 3, save: null });
-		expect(never.pages[0]!.warm).toEqual({});
-		expect(markdown([never], [])).toContain("| 300 / 300 ms | n/a |");
+		expect(markdown([report], [])).toContain("- `/`: 1 of 4 warm loads skipped, as no service worker took control");
+		// Too few warm loads to estimate spread fail the run rather than compare or record an empty summary.
+		await expect(
+			run(fake(device(), [load()], [true, false, true]), { urls: ["https://q.dev/"], runs: 3, save: null }),
+		).rejects.toThrow("after only 2 of 3 cold loads");
 	});
 
 	test.each([

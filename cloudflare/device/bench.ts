@@ -90,6 +90,11 @@ export async function run(driver: Driver, options: Options): Promise<DeviceRepor
 			}
 			warm.push(check(url, await driver.load(url, false)));
 		}
+		// Fewer warm loads can't estimate their spread, so they would neither compare nor make a baseline.
+		if (warm.length < 3)
+			throw new Error(
+				`${url}: a service worker controlled the page after only ${warm.length} of ${options.runs} cold loads, and a warm summary needs 3`,
+			);
 		const installable = await driver.installable(url);
 		const screenshots: PageReport["screenshots"] = [];
 		if (options.save)
@@ -121,7 +126,6 @@ export function check(url: string, load: Load): Load {
 /** Each metric's summary over the loads, leaving out ones a browser did not report. */
 export function metrics(loads: Load[]): Record<string, Summary> {
 	const out: Record<string, Summary> = {};
-	if (loads.length === 0) return out;
 	for (const key of Object.keys(FLOORS) as (keyof Load)[]) {
 		const values = loads.map((l) => l[key]).filter((v): v is number => typeof v === "number");
 		if (values.length === loads.length) out[key] = summarize(values);

@@ -4,6 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { isQuest } from "../../src/core/index.ts";
 
 const worker = join(import.meta.dirname, "..");
 const root = join(worker, "..");
@@ -27,7 +28,7 @@ writeFileSync(
 	"export default " +
 		JSON.stringify({
 			commit,
-			quests: files("quest", (n) => n.endsWith(".md")),
+			quests: files("quest", isQuest),
 			workflows: files(".github/workflows", (n) => /\.ya?ml$/.test(n)),
 		}) +
 		";\n",

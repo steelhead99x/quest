@@ -17,7 +17,8 @@ warm. A load that ends anywhere but the page asked for, such as GitHub's
 sign-in after the session expired, fails the run, and the iPad clears
 storage only on the site's own origin. A warm load waits, untimed, for the
 service worker to control the page; when none takes control within ten
-seconds, that warm load is skipped and the report counts it. For each it reports the median and 95th percentile of first
+seconds, that warm load is skipped and the report counts it, and a page
+left with fewer than three warm loads fails the run. For each it reports the median and 95th percentile of first
 contentful paint, load, the Worker's own time from `Server-Timing`, and
 bytes transferred, whether it installs to the home screen and opens
 offline, and light and dark screenshots. The page's own Navigation Timing

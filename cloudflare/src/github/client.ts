@@ -94,7 +94,12 @@ export class GitHub {
 			},
 			body: body === undefined ? undefined : JSON.stringify(body),
 		});
-		const text = await bounded(response, max);
+		const text = await bounded(response, max).catch((error: unknown) => {
+			// A status already says what GitHub meant, such as a 401's sign-out, though its body was cut off.
+			if (!response.ok && error instanceof Unreachable)
+				throw new GitHubError(response.status, path, error.message);
+			throw error;
+		});
 		if (!response.ok) {
 			let message = text.slice(0, 200);
 			try {
@@ -122,7 +127,11 @@ export async function bounded(response: Response, max = MAX_RESPONSE): Promise<s
 	const chunks: Uint8Array[] = [];
 	let size = 0;
 	for (;;) {
-		const { done, value } = await reader.read();
+		const { done, value } = await reader.read().catch((error: unknown) => {
+			throw new Unreachable(`GitHub's answer broke off: ${error instanceof Error ? error.message : error}`, {
+				cause: error,
+			});
+		});
 		if (done) break;
 		size += value.byteLength;
 		if (size > max) {

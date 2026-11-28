@@ -387,6 +387,17 @@ describe("CI", () => {
 		],
 		["a 2xx that is not JSON", () => new Response("<html>", { status: 200 }), "was unreadable"],
 		[
+			"a body that breaks off",
+			() =>
+				new Response(
+					new ReadableStream({
+						pull: (controller) => controller.error(new Error("connection reset")),
+					}),
+					{ status: 200 },
+				),
+			"GitHub didn&#39;t answer",
+		],
+		[
 			"a rate-limited 403",
 			() => json({ message: "API rate limit exceeded for user" }, 403),
 			"GitHub is rate-limiting requests",

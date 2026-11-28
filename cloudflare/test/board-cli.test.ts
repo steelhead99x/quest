@@ -7,6 +7,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
+import { isQuest } from "../../src/core/index.ts";
 import type { Tree } from "../src/board/load.ts";
 import { board, today } from "../src/board/model.ts";
 
@@ -38,7 +39,7 @@ function documents(dir: string): Tree["documents"] {
 		for (const name of readdirSync(d)) {
 			const p = join(d, name);
 			if (statSync(p).isDirectory()) walk(p);
-			else if (name.endsWith(".md")) out.push({ path: relative(dir, p), content: readFileSync(p, "utf8") });
+			else if (isQuest(name)) out.push({ path: relative(dir, p), content: readFileSync(p, "utf8") });
 		}
 	};
 	walk(join(dir, "quest"));
