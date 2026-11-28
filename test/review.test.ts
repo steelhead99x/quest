@@ -1372,17 +1372,31 @@ function onGitHub(
 	repo: string,
 	pulls: FakePull[],
 	fork = false,
+	/** The fork's own open PRs, from `acme/widget` into itself, when `fork` is set. */
+	forkPulls: FakePull[] = [],
 ): { body: string }[] & {
 	statuses: { sha: string; state: string; context: string; description: string; target_url: string }[];
+	/** The repository each of `statuses` was set in. */
+	attestedIn: string[];
+	forkMergeBase: string | undefined;
+	/** The fork's base tip on GitHub, by default the checkout's fetched one. */
+	forkBaseTip: string | undefined;
+	/** The repositories Kixel Quest serves. */
+	served: string[];
 	posts: ReviewUpload[];
 } {
+	const upstreamPulls = pulls;
 	const local = git(repo, "remote", "get-url", "origin");
 	git(repo, "remote", "set-url", "origin", "https://github.com/acme/widget.git");
 	git(repo, "config", `url.${local}.insteadOf`, "https://github.com/acme/widget.git");
 	const owner = fork ? "upstream" : "acme";
 	const writes = Object.assign([] as { body: string }[], {
 		statuses: [] as { sha: string; state: string; context: string; description: string; target_url: string }[],
+		attestedIn: [] as string[],
 		posts: [] as ReviewUpload[],
+		forkMergeBase: undefined as string | undefined,
+		forkBaseTip: undefined as string | undefined,
+		served: [`${fork ? "upstream" : "acme"}/widget`],
 	});
 	const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 	const info = (login: string, parent: string | null) => ({
@@ -1401,7 +1415,7 @@ function onGitHub(
 		if (url.origin === KIXEL) {
 			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret");
 			// It serves the repository, whose reads QUEST_FORGE keeps on GitHub.
-			if (url.pathname === "/forge") return json({ login: "agent", repositories: [`${owner}/widget`] });
+			if (url.pathname === "/forge") return json({ login: "agent", repositories: writes.served });
 			if (url.pathname === "/reviews" && init?.method === "POST") {
 				const upload = parseReviews(JSON.parse(String(init.body)));
 				writes.posts.push(upload);
@@ -1412,11 +1426,14 @@ function onGitHub(
 		if (url.pathname === "/repos/upstream/widget") return json(info("upstream", null));
 		if (url.pathname.startsWith("/repos/upstream/widget/contents/"))
 			return url.pathname.endsWith("/contents/quest/README.md") ? json({}) : json({}, 404);
-		if (url.pathname === `/repos/${owner}/widget/pulls`) {
+		const listed = /^\/repos\/(acme|upstream)\/widget\/pulls$/.exec(url.pathname);
+		if (listed && (listed[1] === owner || fork)) {
 			expect(url.searchParams.get("state")).toBe("open");
+			const at = listed[1]!;
+			const pulls = at === owner ? upstreamPulls : forkPulls;
 			const row = ({ head, sha, ...p }: FakePull, ref: string, base: string) => ({
 				...p,
-				html_url: `https://github.com/${owner}/widget/pull/${p.number}`,
+				html_url: `https://github.com/${at}/widget/pull/${p.number}`,
 				head: { ref, repo: { full_name: head ?? "acme/widget" }, ...(sha === undefined ? {} : { sha }) },
 				base: { ref: base },
 				draft: false,
@@ -1430,20 +1447,34 @@ function onGitHub(
 				row({ number: 91, body: "other" }, "feature", "release"),
 			]);
 		}
-		const patched = new RegExp(`^/repos/${owner}/widget/pulls/(\\d+)$`).exec(url.pathname);
+		const at = /^\/repos\/(acme|upstream)\/widget\/pulls\/(\d+)$/.exec(url.pathname);
+		const patched = at && (at[1] === owner || fork) ? [at[0], at[2]] : null;
+		const holding = at?.[1] === owner ? pulls : forkPulls;
 		if (patched && init?.method === "PATCH") {
 			const { body } = JSON.parse(String(init.body)) as { body: string };
 			writes.push({ body });
-			pulls.find((p) => p.number === Number(patched[1]))!.body = body;
+			holding.find((p) => p.number === Number(patched[1]))!.body = body;
 			return json({});
 		}
-		const attested = new RegExp(`^/repos/${owner}/widget/statuses/([0-9a-f]{40})$`).exec(url.pathname);
-		if (attested && init?.method === "POST") {
-			writes.statuses.push({ sha: attested[1]!, ...JSON.parse(String(init.body)) });
+		// GitHub's merge base for a fork PR's head, by default the checkout's own; `forkMergeBase` stands in for a fork
+		// whose base moved past what the checkout fetched.
+		if (url.pathname === "/repos/acme/widget/branches/main" && fork)
+			return json({ commit: { sha: writes.forkBaseTip ?? git(repo, "rev-parse", "origin/main") } });
+		const compared = /^\/repos\/acme\/widget\/compare\/main\.\.\.([0-9a-f]{40})$/.exec(url.pathname);
+		if (compared && fork)
+			return json({
+				merge_base_commit: {
+					sha: writes.forkMergeBase ?? git(repo, "merge-base", "origin/main", compared[1]!),
+				},
+			});
+		const attested = /^\/repos\/(acme|upstream)\/widget\/statuses\/([0-9a-f]{40})$/.exec(url.pathname);
+		if (attested && (attested[1] === owner || fork) && init?.method === "POST") {
+			writes.statuses.push({ sha: attested[2]!, ...JSON.parse(String(init.body)) });
+			writes.attestedIn.push(`${attested[1]}/widget`);
 			return json({}, 201);
 		}
 		if (patched && (init?.method ?? "GET") === "GET")
-			return json({ body: pulls.find((p) => p.number === Number(patched[1]))!.body });
+			return json({ body: holding.find((p) => p.number === Number(patched[1]))!.body });
 		throw new Error(`unexpected ${init?.method ?? "GET"} ${url.pathname}`);
 	});
 	return writes;
@@ -2589,6 +2620,88 @@ fakes("a review from a subdirectory of a fork records on the upstream PR", async
 	}
 });
 
+fakes(
+	"a fork with no PR upstream records its status on its own PR, posting only where Kixel Quest serves it",
+	async () => {
+		const s = setup();
+		const own: FakePull[] = [];
+		const writes = onGitHub(s.repo, [], true, own);
+		vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
+		try {
+			const none = await quest("--root", s.repo, "review");
+			expect(none.code, none.stderr).toBe(0);
+			expect(none.stdout).toContain(
+				"record skipped: no open PR from feature into main in upstream/widget or acme/widget\n",
+			);
+
+			// Another repository's PR in the fork is not the fork's own.
+			own.push({ number: 4, body: "Theirs.", head: "stranger/widget" });
+			const stranger = await quest("--root", s.repo, "review");
+			expect(stranger.stdout).toContain("record skipped: no open PR from feature into main");
+
+			own.push({ number: 5, body: "Own." });
+			const result = await quest("--root", s.repo, "review");
+			expect(result.code, result.stderr).toBe(0);
+			expect(result.stdout).toContain(
+				`record https://github.com/acme/widget/pull/5; post skipped: ${KIXEL} does not serve acme/widget\n`,
+			);
+			expect(writes.posts).toEqual([]);
+			const head = git(s.repo, "rev-parse", "HEAD");
+			// With nothing to post, the status is set once, as the run ends.
+			expect(writes.statuses.map(({ sha, state }) => ({ sha, state }))).toEqual([
+				{ sha: head, state: "success" },
+			]);
+			expect(writes.attestedIn).toEqual(["acme/widget"]);
+
+			// A fetch that reads another base than the fork's, as through a mirror behind it, sets no status GitHub's
+			// merge base would not bind.
+			writes.forkMergeBase = "e".repeat(40);
+			const mirrored = await quest("--root", s.repo, "review");
+			expect(mirrored.code).toBe(1);
+			expect(mirrored.stdout).toContain(
+				`; status refused: GitHub's merge base of ${head} with acme/widget's main is ${"e".repeat(40)}, but this checkout reviewed it from `,
+			);
+			expect(writes.statuses).toHaveLength(1);
+			writes.forkMergeBase = undefined;
+
+			// A fetched base behind the fork's, even with the same merge base, fails before any reviewer runs, since the
+			// head would be classified against a risk file the fork may have changed.
+			writes.forkBaseTip = "f".repeat(40);
+			const calls = s.calls().length;
+			const behind = await quest("--root", s.repo, "review");
+			expect(behind.code).not.toBe(0);
+			expect(behind.stderr).toContain(
+				`but acme/widget's main is at ${"f".repeat(40)}; fetch main from acme/widget itself`,
+			);
+			expect(s.calls()).toHaveLength(calls);
+			expect(writes.statuses).toHaveLength(1);
+			writes.forkBaseTip = undefined;
+			expect(writes.statuses[0]!.target_url).toMatch(/^https:\/\/github\.com\/acme\/widget\/compare\//);
+
+			// A remote that fetches upstream and pushes to the fork reads upstream's base, which the fork's PR may not
+			// share, so it records nothing there and names the remote to use instead.
+			const local = /^url\.(.+)\.insteadof /.exec(
+				git(s.repo, "config", "--get-regexp", "^url\\..*\\.insteadof$"),
+			)![1]!;
+			git(s.repo, "config", "--unset-all", `url.${local}.insteadOf`);
+			git(s.repo, "config", "--add", `url.${local}.insteadOf`, "https://github.com/upstream/widget.git");
+			git(s.repo, "config", "--add", `url.${local}.pushInsteadOf`, "https://github.com/acme/widget.git");
+			git(s.repo, "remote", "set-url", "origin", "https://github.com/upstream/widget.git");
+			git(s.repo, "remote", "set-url", "--push", "origin", "https://github.com/acme/widget.git");
+			write(s.repo, "src/lib.ts", "export const x = 9;\n");
+			git(s.repo, "commit", "-qam", "another constant");
+			const split = await quest("--root", s.repo, "review");
+			expect(split.code, split.stderr).toBe(0);
+			expect(split.stdout).toContain(
+				"record skipped: no open PR from feature into main in upstream/widget; for a PR into acme/widget, pass a base on a remote that fetches from it\n",
+			);
+			expect(writes.attestedIn).toHaveLength(1);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	},
+);
+
 fakes("a round on the head the last round passed runs no reviewer and repeats that round", async () => {
 	const s = setup();
 	vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
@@ -3087,6 +3200,85 @@ fakes("a post Kixel Quest refuses fails the command after printing the round", a
 		expect(accepted.code).toBe(1);
 		expect(accepted.stdout).toContain("\nnext stop: the acceptance was not recorded;");
 		expect(writes.statuses).toMatchObject([{ state: "failure" }, { state: "failure" }]);
+	} finally {
+		vi.unstubAllGlobals();
+	}
+});
+
+fakes(
+	"an acceptance on a fork's unposted PR keeps the deferrals of findings posted upstream for a later post",
+	async () => {
+		const s = setup();
+		const upstream: FakePull[] = [{ number: 7, body: "" }];
+		const own: FakePull[] = [];
+		const writes = onGitHub(s.repo, upstream, true, own);
+		try {
+			const first = await quest("--root", s.repo, "review");
+			expect(first.code, first.stderr).toBe(0);
+			expect(first.stdout).toContain("record https://github.com/upstream/widget/pull/7\n");
+			expect(writes.posts).toHaveLength(1);
+			// The work moves to a PR in the fork, which Kixel Quest does not serve.
+			upstream.length = 0;
+			own.push({ number: 5, body: "" });
+			const accepted = await quest("--root", s.repo, "review", "--accept", "Fine.");
+			expect(accepted.code, accepted.stderr).toBe(0);
+			expect(accepted.stdout).toContain(
+				`record https://github.com/acme/widget/pull/5; post skipped: ${KIXEL} does not serve acme/widget\n`,
+			);
+			expect(writes.posts).toHaveLength(1);
+			expect(writes.statuses.at(-1)).toMatchObject({ state: "success" });
+			// The branch keeps the deferral the acceptance could not send, for the PR that holds the finding.
+			const saved = JSON.parse(readFileSync(sessionFile(join(s.repo, ".git"), "feature"), "utf8")) as {
+				pending?: unknown[];
+			};
+			expect(saved.pending).toEqual([
+				expect.objectContaining({
+					repository: "upstream/widget",
+					number: 7,
+					finding: 1,
+					outcome: "deferred",
+					reason: "Fine.",
+				}),
+			]);
+			// Back on the upstream PR, a round that fixes the finding sends its newer outcome alone.
+			own.length = 0;
+			upstream.push({ number: 7, body: "" });
+			write(s.repo, "src/lib.ts", "export const x = 4;\n");
+			git(s.repo, "commit", "-qam", "fix");
+			vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
+			write(s.repo, ".tmp/responses.md", "1. Fixed at src/lib.ts:1.\n");
+			const next = await quest("--root", s.repo, "review", "--responses", join(s.repo, ".tmp", "responses.md"));
+			expect(next.code, next.stderr).toBe(0);
+			expect(writes.posts).toHaveLength(2);
+			expect(writes.posts[1]!.outcomes).toMatchObject([
+				{ repository: "upstream/widget", number: 7, finding: 1, outcome: "fixed" },
+			]);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	},
+);
+
+fakes("an acceptance on a fork PR Kixel Quest no longer serves keeps its deferrals for that PR", async () => {
+	const s = setup();
+	const own: FakePull[] = [{ number: 5, body: "" }];
+	const writes = onGitHub(s.repo, [], true, own);
+	writes.served.push("acme/widget");
+	try {
+		const first = await quest("--root", s.repo, "review");
+		expect(first.code, first.stderr).toBe(0);
+		expect(first.stdout).toContain("record https://github.com/acme/widget/pull/5\n");
+		expect(writes.posts).toHaveLength(1);
+		writes.served.pop();
+		const accepted = await quest("--root", s.repo, "review", "--accept", "Fine.");
+		expect(accepted.code, accepted.stderr).toBe(0);
+		expect(accepted.stdout).toContain("; post skipped: ");
+		const saved = JSON.parse(readFileSync(sessionFile(join(s.repo, ".git"), "feature"), "utf8")) as {
+			pending?: unknown[];
+		};
+		expect(saved.pending).toEqual([
+			expect.objectContaining({ repository: "acme/widget", number: 5, finding: 1, outcome: "deferred" }),
+		]);
 	} finally {
 		vi.unstubAllGlobals();
 	}

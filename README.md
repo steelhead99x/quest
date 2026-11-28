@@ -618,7 +618,7 @@ comes last, and a missing value prints as `-`:
 | --- | --- |
 | `url`, `state`, `draft`, `head` | The PR URL; `open`, `closed`, or `merged`; `true` or `false`; the head SHA. |
 | `mergeable`, `merge-state`, `review-decision` | GitHub's values, lowercased. |
-| `review-record` | Whether the review that counts still covers the head, and the head it reviewed: `current` when it is the head, `diff-identical` when `git diff <base>...<head>` prints the same as for it, `stale` otherwise, or `unknown` when the forge cannot compare them, such as a diff too large; then `local-review`, or `no-local-review` for a low head no local reviewer ran on. The review that counts is the newest passing run [`quest review` posted](#review-locally) to Kixel Quest from someone who can push to the repository, read through Kixel Quest; a run with findings open counts for none. `-` when none counts. Read from GitHub, as with `QUEST_FORGE=github`, it is only a PR body's `## Review` record an earlier `quest review` wrote, with a warning saying so, counted only where a writer's passing `quest review` commit status on the head it names attests it, and `stale`, with a warning, once `RISK.md` at the base's tip is not the file the record names. |
+| `review-record` | Whether the review that counts still covers the head, and the head it reviewed: `current` when it is the head, `diff-identical` when `git diff <base>...<head>` prints the same as for it, `stale` otherwise, or `unknown` when the forge cannot compare them, such as a diff too large; then `local-review`, or `no-local-review` for a low head no local reviewer ran on. The review that counts is the newest passing run [`quest review` posted](#review-locally) to Kixel Quest from someone who can push to the repository, read through Kixel Quest; a run with findings open counts for none. `-` when none counts. Read from GitHub, as with `QUEST_FORGE=github`, it is only a PR body's `## Review` record an earlier `quest review` wrote, with a warning saying so, counted only where a writer's passing `quest review` commit status on the head it names attests it, and `stale`, with a warning, once `RISK.md` at the base's tip is not the file the record names. Without a record that covers the head, as on a fork PR Kixel Quest does not serve, the `quest review` statuses count as the land gate counts them: the newest a writer set on a commit whose diff is the head's decides, counting when it passed against the base's `RISK.md`, `current` on the head and `diff-identical` on an earlier commit. |
 | `risk` | The counted review's [risk tier](#risk-tiers), `low`, `medium`, or `high`; the same state as `review-record`; the tier its classifier set; and the reason. `-` when none counts, and `- malformed -` with why when a body record's risk lines do not parse. |
 | `class` | The class, built in or from the base's `RISK.md` `## Automatic` list, the counted review's classifier found the change in, or `-`. |
 | `auto-merge` | Method, who enabled it, when, and the head it was enabled on. |
@@ -1968,8 +1968,12 @@ outcome for its findings; the outcomes a failed post carried are kept for
 the branch, and its next post sends them, after `--new` too. Kixel Quest counts a run toward merging only when its poster
 can push, so a contributor's own runs are recorded but a maintainer's review
 decides, and `quest status` reads the review from there; the PR body is left
-as written. With no such PR, or a remote off GitHub and Kixel Quest, it posts
-nothing and prints `record skipped: <why>`. A post Kixel Quest refuses, or a
+as written. A fork whose upstream keeps the quest tree records on its
+upstream's PR, or, with none there, on the fork's own open PR from the branch
+into the same base, which posts only where Kixel Quest serves the fork; else it
+prints `; post skipped: <why>` after the record's URL and the status alone
+records the run. With no such PR, or a remote off GitHub and Kixel Quest, it
+posts nothing and prints `record skipped: <why>`. A post Kixel Quest refuses, or a
 status GitHub refuses, fails the command after the round's report, with exit
 status 1, a status printing `; status refused: <why>`. It exits 0 once the
 round finishes, whatever it found, 2 for invalid arguments or a checkout that

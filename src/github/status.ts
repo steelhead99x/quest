@@ -29,12 +29,13 @@ import {
 	recordedRisk,
 	reviewSection,
 	riskFileId,
+	type Tier,
 } from "../core";
 import { readHoldStatus } from "./hold";
 import { readSignals, requiredPosters } from "./signals";
 import { login } from "./online-review";
 import { duplicateQuests } from "./duplicates";
-import { trustedReview } from "./review-trust";
+import { REVIEW_CONTEXT, statusReview, trustedReview } from "./review-trust";
 
 /**
  * One query covers the PR; each connection pages by its own cursor, and a
@@ -191,6 +192,24 @@ export async function pullRequestStatus(
 		localReview: trusted.localReview,
 	};
 	status.risk = risk(recorded, head, status.reviewRecord);
+	// With no record that covers the head, the `quest review` statuses still attest its review by themselves, as on a
+	// fork PR Kixel Quest does not serve, picked as the land gate picks them; a current one outranks a stale record.
+	const covered = status.reviewRecord?.state === "current" || status.reviewRecord?.state === "diff-identical";
+	if (!covered && first!.state === "OPEN") {
+		const attested = await statusReview(github, { ...pr, base: baseRef }, head, baseRiskFile(first!));
+		if (attested !== null) {
+			status.reviewRecord = { state: attested.state, head: attested.head, localReview: attested.localReview };
+			const tier = attested.tier as Tier;
+			status.risk = {
+				tier,
+				reason: `the ${REVIEW_CONTEXT} status on ${attested.head} attests it`,
+				// The status names only the tier that holds, so the classifier's own is taken to be it.
+				classified: tier,
+				class: attested.class,
+				state: attested.state,
+			};
+		}
+	}
 	if (status.autoMerge !== null) status.autoMerge.head = await enabledHead(github, first!, deps.warn);
 	const signaled = (await readSignals(github, pr, [pr.number])).get(pr.number)!;
 	if (signaled.head !== first!.headRefOid)
