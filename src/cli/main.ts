@@ -294,8 +294,9 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"env when a task run outside nix develop has an environment table, and nix outside that dev shell.\n\n" +
 				"A task that passes must write the junit and metrics files it declares, and metrics must hold a JSON " +
 				"object; --report copies them to <dir>/<task>/junit.xml and <dir>/<task>/metrics.json, where <dir> " +
-				"must not exist yet. A run executes only this host's tasks, and fails while another run in the checkout " +
-				"writes a report path one of its tasks declares. A failed task skips the tasks after it, and with " +
+				"must not exist yet. A run executes only this host's tasks, and fails while another run in the checkout, " +
+				"or a task an earlier one started, writes a report path one of its tasks declares. A failed task " +
+				"skips the tasks after it, and with " +
 				"--fail-fast also stops every " +
 				"running task. Exits 1 when a task fails.\n\n" +
 				"--query prints the picked tasks as JSON for a CI runner's matrix and runs nothing: " +
