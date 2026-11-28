@@ -15,7 +15,7 @@ import {
 // The PR-body record's reader lives in core, which the quest log Worker shares; callers keep importing it here.
 export { type Counts, type ReviewSummary, parseReview } from "../core";
 import { recorded } from "./models-record";
-import { type ClaimDependencies, upstream } from "./claims";
+import { type ClaimDependencies, same, upstream } from "./claims";
 import { pullsFrom } from "../github/claims";
 import { object, repositoryPath } from "../github/client";
 import { REVIEW_CONTEXT, attestation, reviewTarget } from "../github/review-trust";
@@ -87,7 +87,7 @@ export const passed = ({ rounds, tallies, accepted }: Pick<Reviewed, "rounds" | 
  * Where a run's record went: the PR it was posted for, and why its status was not set, skipped for a token that cannot
  * push, whose status would count for nothing, else refused; or why nothing was posted.
  */
-export type Recorded = { url: string; status?: Unattested } | { skipped: string };
+export type Recorded = { url: string; status?: Unattested; post?: { skipped: string } } | { skipped: string };
 
 /** Why `quest review` set no status on the head it recorded. */
 type Unattested = { skipped: string } | { refused: string };
@@ -112,6 +112,8 @@ async function openPull(
 			base: string;
 			/** Whether Kixel Quest hosts the repository, rather than GitHub. */
 			hosted: boolean;
+			/** Whether the PR is the head fork's own, found there when its upstream has none. */
+			fork: boolean;
 			/** The PR's body as it is now. */
 			body(): Promise<string>;
 			/** Set the `quest review` status on `head`, for its diff from the merge base `from`, or say why not. */
@@ -130,7 +132,8 @@ async function openPull(
 	const up = await upstream(top, requireRemote(top, remote), deps);
 	const hosting = up.hosting;
 	if (hosting === null) return { skipped: `${remote} is not on GitHub or Kixel Quest` };
-	const { repository, head } = hosting;
+	const { head } = hosting;
+	let repository = hosting.repository;
 	const name = `${head.owner}/${head.repo}`.toLowerCase();
 	const candidates = pullsFrom((await (await hosting.forge()).pulls(repository)).value, branch).filter(
 		(each) => each.base === base,
@@ -139,23 +142,36 @@ async function openPull(
 	// Another repository's PR counts only when this checkout holds its pushed head, so a stranger's PR from a
 	// branch of the same name neither sets the round's size nor receives its record.
 	const held = candidates.filter((each) => each.sha !== undefined && contains(top, each.sha, "HEAD"));
-	const pull = own ?? (held.length === 1 ? held[0] : undefined);
+	let pull = own ?? (held.length === 1 ? held[0] : undefined);
+	// A fork that works on itself opens its PRs there, never upstream: with none upstream, the head repository's own
+	// PR from the branch into the same base takes the record, as `quest merge` on that fork reads it.
+	let fork = false;
+	const github = up.github;
+	if (pull === undefined && held.length === 0 && github !== null && !same(head, repository)) {
+		pull = pullsFrom((await (await deps.forge(head)).pulls(head)).value, branch).find(
+			(each) => each.base === base && each.head?.toLowerCase() === name,
+		);
+		if (pull !== undefined) {
+			repository = head;
+			fork = true;
+		}
+	}
 	if (pull === undefined)
 		return {
 			skipped:
 				candidates.length === 0
-					? `no open PR from ${branch} into ${base}`
+					? `no open PR from ${branch} into ${base}${github !== null && !same(head, repository) ? ` in ${repository.owner}/${repository.repo} or ${head.owner}/${head.repo}` : ""}`
 					: held.length === 0
 						? `no open PR from ${branch} into ${base} from ${head.owner} or with a head this checkout holds: ${candidates.map((each) => each.url).join(", ")}`
 						: `several open PRs from ${branch} into ${base} with heads this checkout holds, none from ${head.owner}: ${held.map((each) => each.url).join(", ")}`,
 		};
-	const github = up.github;
 	return {
 		url: pull.url,
 		repository: `${repository.owner}/${repository.repo}`.toLowerCase(),
 		number: pull.number,
 		base,
 		hosted: github === null,
+		fork,
 		// The forge's list may predate an edit just made, such as the `## Models` record written before a round, so on
 		// GitHub the body comes fresh from the PR itself, on the person's token.
 		body: async () =>
@@ -218,8 +234,8 @@ export async function requirePosting(
 	const url = kixelUrl(deps.env);
 	const token = requireToken(url, deps.env);
 	const pull = await openPull(root, baseRef, branch, deps);
-	// A repository Kixel Quest hosts is one it serves.
-	if ("skipped" in pull || pull.hosted) return;
+	// A repository Kixel Quest hosts is one it serves, and a fork's own PR it does not serve records its status alone.
+	if ("skipped" in pull || pull.hosted || pull.fork) return;
 	const [owner, repo] = pull.repository.split("/") as [string, string];
 	if (!(await new KixelQuest(url, token, deps, false).serves({ owner, repo })))
 		throw new Error(
@@ -236,13 +252,20 @@ export async function requirePosting(
 export async function recordRounds(
 	root: string,
 	reviewed: Reviewed,
-	deps: ClaimDependencies & { env: NodeJS.ProcessEnv; fetch: typeof fetch },
+	deps: ClaimDependencies & Omit<ForgeDependencies, "warn">,
 ): Promise<Recorded> {
 	// Checked first, so a host that cannot post sets no status for a run it never records.
 	const url = kixelUrl(deps.env);
 	const token = requireToken(url, deps.env);
 	const pull = await openPull(root, reviewed.base.ref, reviewed.branch, deps);
 	if ("skipped" in pull) return pull;
+	// A fork's own PR posts only where Kixel Quest serves the fork; elsewhere its status alone records the run, which
+	// is all the fork's land gate reads.
+	const [owner, repo] = pull.repository.split("/") as [string, string];
+	const unposted =
+		pull.fork && !(await new KixelQuest(url, token, deps, false).serves({ owner, repo }))
+			? `${url} does not serve ${pull.repository}`
+			: null;
 	const outcome = runOutcome(reviewed);
 	const mergeBase = git(root, ["merge-base", reviewed.base.sha, reviewed.head]);
 	const attest = (state: "success" | "failure") =>
@@ -263,17 +286,20 @@ export async function recordRounds(
 	// An acceptance no status records has not happened, so nothing posts it.
 	if (status !== null && reviewed.accepted !== undefined) return { url: pull.url, status };
 	const at = { repository: pull.repository, number: pull.number };
-	await postReviews(url, token, deps.fetch, {
-		runs: [reviewRun(reviewed, { ...at, base: pull.base, mergeBase })],
-		outcomes: reviewed.outcomes(at),
-	});
-	reviewed.posted?.(at);
+	if (unposted === null) {
+		await postReviews(url, token, deps.fetch, {
+			runs: [reviewRun(reviewed, { ...at, base: pull.base, mergeBase })],
+			outcomes: reviewed.outcomes(at),
+		});
+		reviewed.posted?.(at);
+	}
+	const post = unposted === null ? {} : { post: { skipped: unposted } };
 	// A status the token could not set before would fail the same way again.
 	if (status === null && outcome !== "findings open") {
 		const passed = await attest("success");
-		if (passed !== null) return { url: pull.url, status: passed };
+		if (passed !== null) return { url: pull.url, status: passed, ...post };
 	}
-	return status === null ? { url: pull.url } : { url: pull.url, status };
+	return status === null ? { url: pull.url, ...post } : { url: pull.url, status, ...post };
 }
 
 /** How a run left its head, as its status and post name it. */

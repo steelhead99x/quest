@@ -1372,16 +1372,22 @@ function onGitHub(
 	repo: string,
 	pulls: FakePull[],
 	fork = false,
+	/** The fork's own open PRs, from `acme/widget` into itself, when `fork` is set. */
+	forkPulls: FakePull[] = [],
 ): { body: string }[] & {
 	statuses: { sha: string; state: string; context: string; description: string; target_url: string }[];
+	/** The repository each of `statuses` was set in. */
+	attestedIn: string[];
 	posts: ReviewUpload[];
 } {
+	const upstreamPulls = pulls;
 	const local = git(repo, "remote", "get-url", "origin");
 	git(repo, "remote", "set-url", "origin", "https://github.com/acme/widget.git");
 	git(repo, "config", `url.${local}.insteadOf`, "https://github.com/acme/widget.git");
 	const owner = fork ? "upstream" : "acme";
 	const writes = Object.assign([] as { body: string }[], {
 		statuses: [] as { sha: string; state: string; context: string; description: string; target_url: string }[],
+		attestedIn: [] as string[],
 		posts: [] as ReviewUpload[],
 	});
 	const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
@@ -1412,11 +1418,14 @@ function onGitHub(
 		if (url.pathname === "/repos/upstream/widget") return json(info("upstream", null));
 		if (url.pathname.startsWith("/repos/upstream/widget/contents/"))
 			return url.pathname.endsWith("/contents/quest/README.md") ? json({}) : json({}, 404);
-		if (url.pathname === `/repos/${owner}/widget/pulls`) {
+		const listed = /^\/repos\/(acme|upstream)\/widget\/pulls$/.exec(url.pathname);
+		if (listed && (listed[1] === owner || fork)) {
 			expect(url.searchParams.get("state")).toBe("open");
+			const at = listed[1]!;
+			const pulls = at === owner ? upstreamPulls : forkPulls;
 			const row = ({ head, sha, ...p }: FakePull, ref: string, base: string) => ({
 				...p,
-				html_url: `https://github.com/${owner}/widget/pull/${p.number}`,
+				html_url: `https://github.com/${at}/widget/pull/${p.number}`,
 				head: { ref, repo: { full_name: head ?? "acme/widget" }, ...(sha === undefined ? {} : { sha }) },
 				base: { ref: base },
 				draft: false,
@@ -1430,20 +1439,23 @@ function onGitHub(
 				row({ number: 91, body: "other" }, "feature", "release"),
 			]);
 		}
-		const patched = new RegExp(`^/repos/${owner}/widget/pulls/(\\d+)$`).exec(url.pathname);
+		const at = /^\/repos\/(acme|upstream)\/widget\/pulls\/(\d+)$/.exec(url.pathname);
+		const patched = at && (at[1] === owner || fork) ? [at[0], at[2]] : null;
+		const holding = at?.[1] === owner ? pulls : forkPulls;
 		if (patched && init?.method === "PATCH") {
 			const { body } = JSON.parse(String(init.body)) as { body: string };
 			writes.push({ body });
-			pulls.find((p) => p.number === Number(patched[1]))!.body = body;
+			holding.find((p) => p.number === Number(patched[1]))!.body = body;
 			return json({});
 		}
-		const attested = new RegExp(`^/repos/${owner}/widget/statuses/([0-9a-f]{40})$`).exec(url.pathname);
-		if (attested && init?.method === "POST") {
-			writes.statuses.push({ sha: attested[1]!, ...JSON.parse(String(init.body)) });
+		const attested = /^\/repos\/(acme|upstream)\/widget\/statuses\/([0-9a-f]{40})$/.exec(url.pathname);
+		if (attested && (attested[1] === owner || fork) && init?.method === "POST") {
+			writes.statuses.push({ sha: attested[2]!, ...JSON.parse(String(init.body)) });
+			writes.attestedIn.push(`${attested[1]}/widget`);
 			return json({}, 201);
 		}
 		if (patched && (init?.method ?? "GET") === "GET")
-			return json({ body: pulls.find((p) => p.number === Number(patched[1]))!.body });
+			return json({ body: holding.find((p) => p.number === Number(patched[1]))!.body });
 		throw new Error(`unexpected ${init?.method ?? "GET"} ${url.pathname}`);
 	});
 	return writes;
@@ -2588,6 +2600,45 @@ fakes("a review from a subdirectory of a fork records on the upstream PR", async
 		vi.unstubAllGlobals();
 	}
 });
+
+fakes(
+	"a fork with no PR upstream records its status on its own PR, posting only where Kixel Quest serves it",
+	async () => {
+		const s = setup();
+		const own: FakePull[] = [];
+		const writes = onGitHub(s.repo, [], true, own);
+		vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
+		try {
+			const none = await quest("--root", s.repo, "review");
+			expect(none.code, none.stderr).toBe(0);
+			expect(none.stdout).toContain(
+				"record skipped: no open PR from feature into main in upstream/widget or acme/widget\n",
+			);
+
+			// Another repository's PR in the fork is not the fork's own.
+			own.push({ number: 4, body: "Theirs.", head: "stranger/widget" });
+			const stranger = await quest("--root", s.repo, "review");
+			expect(stranger.stdout).toContain("record skipped: no open PR from feature into main");
+
+			own.push({ number: 5, body: "Own." });
+			const result = await quest("--root", s.repo, "review");
+			expect(result.code, result.stderr).toBe(0);
+			expect(result.stdout).toContain(
+				`record https://github.com/acme/widget/pull/5; post skipped: ${KIXEL} does not serve acme/widget\n`,
+			);
+			expect(writes.posts).toEqual([]);
+			const head = git(s.repo, "rev-parse", "HEAD");
+			expect(writes.statuses.map(({ sha, state }) => ({ sha, state }))).toEqual([
+				{ sha: head, state: "failure" },
+				{ sha: head, state: "success" },
+			]);
+			expect(writes.attestedIn).toEqual(["acme/widget", "acme/widget"]);
+			expect(writes.statuses[0]!.target_url).toMatch(/^https:\/\/github\.com\/acme\/widget\/compare\//);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	},
+);
 
 fakes("a round on the head the last round passed runs no reviewer and repeats that round", async () => {
 	const s = setup();

@@ -2000,6 +2000,8 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 				"On GitHub it first sets the `quest review` commit status on the head, on the GitHub token, so push the head first: failure, which a run with no finding open sets to success once the post below is stored, " +
 				"its description the head's risk tier, class, and risk file and whether a local reviewer ran, its target the diff from the head's merge base with the PR's base, which the land gate counts only from a user who can push. " +
 				"For a token that cannot push, it sets none and prints `; status skipped: <why>` after the record's URL; a status GitHub refuses otherwise prints `; status refused: <why>` and exits 1. " +
+				"A fork whose upstream keeps the quest tree records on its upstream's PR, or, with none there, on the fork's own open PR from the branch into the same base; " +
+				"that PR posts below only where Kixel Quest serves the fork, else it prints `; post skipped: <why>` and its status alone records the run. " +
 				"It then posts the run to Kixel Quest (POST /reviews, QUEST_KIXEL_URL naming another), and prints `record <url>`: the head, the base and merge base, the risk tier and reason, the classifier's tier, class, and who set it, " +
 				"and each reviewer's round, its seat (pick or second), session, round number, score and rationale, and findings with their file, line, and severity, " +
 				"with the outcome of each finding of an earlier posted round that this run fixed or refuted, sent to the PR that round was posted on, and kept for the branch's next post when the post fails. Notes are not posted. A low head no reviewer ran on posts its classification alone. " +
@@ -2153,7 +2155,7 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 						try {
 							record = own
 								? { skipped: OWN_REVIEW }
-								: await recordRounds(root(), reviewed, { ...github, env: process.env, fetch });
+								: await recordRounds(root(), reviewed, { ...forgeDependencies(), ...github });
 						} catch (error) {
 							failure = error;
 						}
@@ -2189,7 +2191,7 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 							if (record !== undefined)
 								print(
 									"url" in record
-										? `record ${record.url}${status === undefined ? "" : "skipped" in status ? `; status skipped: ${status.skipped}` : `; status refused: ${status.refused}`}`
+										? `record ${record.url}${status === undefined ? "" : "skipped" in status ? `; status skipped: ${status.skipped}` : `; status refused: ${status.refused}`}${record.post === undefined ? "" : `; post skipped: ${record.post.skipped}`}`
 										: `record skipped: ${record.skipped}`,
 								);
 							print(next);
