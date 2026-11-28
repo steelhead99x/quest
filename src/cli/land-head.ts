@@ -350,21 +350,36 @@ export function touchesWorkflows(root: string, parent: string, commit: string, b
 }
 
 export type MergeResult =
-	{ sha: string } | { reason: "head_moved" | "merge_conflict" | "merge_refused"; detail: string } | null;
+	| { sha: string }
+	| { reason: "head_moved" | "left_queue" | "merge_conflict" | "merge_refused"; detail: string }
+	| null;
+
+/** What `mergePinned` lands: the PR's `head`, and the pick (an `Entry`'s id, number, and `enabledAt`) that armed it. */
+export interface Pin {
+	method: LandMethod;
+	head: string;
+	/** The head before the gate pushed its own base merge as `head`, if it did. */
+	previous: string;
+	pick: Pick<Entry, "id" | "number" | "enabledAt">;
+}
 
 /**
  * Retry only GitHub's pending mergeability or base refresh. Any other refusal, such as `method` being
  * disabled or a rule the bot cannot bypass, would refuse every round after a full check, so it ejects.
- * `previous` is the head before the gate pushed its own base merge as `head`, if it did.
+ * Before every retry it re-reads the pick, since the pinned commit stays the head while a maintainer
+ * withdraws the PR during the backoff, and a retry would still merge it.
  */
 export async function mergePinned(
 	github: GitHub,
 	path: string,
-	method: LandMethod,
-	head: string,
-	previous = head,
+	{ method, head, previous, pick }: Pin,
 ): Promise<MergeResult> {
 	for (let attempt = 0; ; attempt++) {
+		if (attempt > 0 && !(await armed(github, pick)))
+			return {
+				reason: "left_queue",
+				detail: `PR #${pick.number} left the queue while its merge waited to retry`,
+			};
 		const response = await github.request(`${path}/merge`, {
 			method: "PUT",
 			body: { merge_method: method, sha: head },
@@ -411,6 +426,16 @@ export async function mergePinned(
 		const state = `mergeable ${String(pull.mergeable)}, mergeable_state ${String(pull.mergeable_state)}`;
 		return { reason: "merge_refused", detail: `${detail} (${state})` };
 	}
+}
+
+/** Whether the pick still holds the PR's auto-merge, the same arm and not a later one. */
+async function armed(github: GitHub, pick: Pin["pick"]): Promise<boolean> {
+	const data = await github.graphql(
+		"query($id: ID!) { node(id: $id) { ... on PullRequest { autoMergeRequest { enabledAt } } } }",
+		{ id: pick.id },
+	);
+	const request = object(data.node).autoMergeRequest;
+	return request != null && object(request).enabledAt === pick.enabledAt;
 }
 
 /**

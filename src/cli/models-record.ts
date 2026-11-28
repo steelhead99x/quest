@@ -1,7 +1,7 @@
 // A pull request body's `## Models` record, which names the PR's size and each session that implemented it.
 
 import { SIZES } from "../core";
-import { ARMS, ARM_NAMES, type Arm, CLASSIFIERS, REVIEWERS, SPLITTERS, WRITERS } from "./models";
+import { ARMS, ARM_NAMES, type Arm, CLASSIFIERS, REVIEW_RUNGS, SPLITTERS, WRITERS } from "./models";
 
 const SECTION = /^## Models[ \t]*\r?$/m;
 
@@ -68,7 +68,7 @@ const KNOWN = new Map(
 	[
 		...[
 			...Object.values(WRITERS),
-			...Object.values(REVIEWERS),
+			...REVIEW_RUNGS.map((rung) => rung.reviewers),
 			...Object.values(ARMS).flatMap(Object.values),
 			CLASSIFIERS,
 			SPLITTERS,

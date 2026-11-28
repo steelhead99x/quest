@@ -16,6 +16,7 @@ import {
 import { appOf, checksState, contextOutcome } from "./checks";
 import { EJECTED, LAND_CHECK, pinned } from "./land";
 import {
+	BaseMerges,
 	type Check,
 	type PullRequest,
 	type Reaction,
@@ -35,6 +36,7 @@ import { readSignals, requiredPosters } from "./signals";
 import { login } from "./online-review";
 import { duplicateQuests } from "./duplicates";
 import { trustedReview } from "./review-trust";
+import { history } from "./history";
 
 /**
  * One query covers the PR; each connection pages by its own cursor, and a
@@ -261,28 +263,42 @@ async function reviewRecord(
 	if (!reviewed) return null;
 	const head = string(pull.headRefOid);
 	if (reviewed === head) return { state: "current", head: reviewed };
-	const base = encodeURIComponent(string(pull.baseRefName));
+	const base = string(pull.baseRefName);
+	// Why the two diffs, or the merges between the heads, could not be read; the first failure is the one reported.
+	const failures: string[] = [];
 	const diffs: string[] = [];
 	for (const sha of [head, reviewed]) {
-		const unknown = (why: string): ReviewRecord => {
-			warn(`cannot compare ${sha} with the base, so whether the review of ${reviewed} carries is unknown${why}`);
-			return { state: "unknown", head: reviewed };
-		};
 		let response: Response;
 		try {
-			response = await github.request(`/repos/${pr.owner}/${pr.repo}/compare/${base}...${sha}`, {
-				accept: "application/vnd.github.diff",
-				allow: [404, 406, 422],
-			});
+			response = await github.request(
+				`/repos/${pr.owner}/${pr.repo}/compare/${encodeURIComponent(base)}...${sha}`,
+				{ accept: "application/vnd.github.diff", allow: [404, 406, 422] },
+			);
 		} catch (error) {
 			// A deadline is the caller's to handle; a forbidden or failing compare is not.
 			if (error instanceof GitHubDeadline || !(error instanceof Error)) throw error;
-			return unknown(`: ${error.message}`);
+			failures.push(`cannot compare ${sha} with the base: ${error.message}`);
+			break;
 		}
-		if (!response.ok) return unknown("");
+		if (!response.ok) {
+			failures.push(`cannot compare ${sha} with the base (HTTP ${response.status})`);
+			break;
+		}
 		diffs.push(await response.text());
 	}
-	return { state: diffs[0] === diffs[1] ? "diff-identical" : "stale", head: reviewed };
+	if (failures.length === 0 && diffs[0] === diffs[1]) return { state: "diff-identical", head: reviewed };
+	// A head that only merged the base since the review has another diff text, but no change of its own; this needs
+	// no diff, so it also settles one too large for GitHub to send.
+	try {
+		if (await new BaseMerges(history(github, { ...pr, base }), head).reaches(reviewed))
+			return { state: "diff-identical", head: reviewed };
+	} catch (error) {
+		if (error instanceof GitHubDeadline || !(error instanceof Error)) throw error;
+		failures.push(`cannot check the merges between ${reviewed} and ${head}: ${error.message}`);
+	}
+	if (failures.length === 0) return { state: "stale", head: reviewed };
+	warn(`${failures[0]}, so whether the review of ${reviewed} carries is unknown`);
+	return { state: "unknown", head: reviewed };
 }
 
 /** Repository activity types that move a branch to a new head, including merges into it. */

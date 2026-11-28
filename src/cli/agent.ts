@@ -422,9 +422,13 @@ export const processDependencies = (out: Pick<AgentDependencies, "stdout" | "std
 	env: process.env,
 	base: agentDirectory(),
 	...out,
+	// A launch strips the gate's marks from the agent's environment (see `strippedEnvironment`), so its builds
+	// run in a scope of their own; a standalone `admit` is for a sub-agent that inherits this process's.
 	admit: (signal, held) =>
 		admission.admit(
-			processAdmission((text) => out.stderr(`quest: ${text}\n`)),
+			processAdmission(held === undefined ? process.env : strippedEnvironment(process.env), (text) =>
+				out.stderr(`quest: ${text}\n`),
+			),
 			signal,
 			held,
 		),

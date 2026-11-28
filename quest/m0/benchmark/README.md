@@ -109,7 +109,10 @@ week past its merge. The earliest such quest PR found is
 [#850](https://github.com/kixel-ai/quest/pull/850), merged 2026-11-24 03:02
 UTC, whose sessions all ran on one host after its sender started; check
 it, or an earlier one whose sessions all reached Kixel Quest. Run `quest
-usage --pr <n>` with `--ssh` for every host that ran its sessions.
+usage --since <date> --pr <n>` (with `--since` on or before the local date of
+the PR's first session, e.g. `--since 2026-11-23` for `#850`, since the default
+7-day window on 2026-12-02 starts 2026-11-25 and misses it) with `--ssh` for
+every host that ran its sessions.
 
 Per axis, on #819, #832, #849, #850, #871, and #887:
 

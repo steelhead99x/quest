@@ -4,8 +4,8 @@ import { TIERS, type Tier } from "./risk";
 // A review post, `POST /reviews` on Kixel Quest: what one `quest review` run settled on a PR's head, and the outcomes
 // of its findings as later rounds settle them. Kixel Quest imports this shape and parser, so sender and store agree.
 
-/** A reviewing seat's role: the size's pick, the shadow one effort away that gates nothing, or a high head's second. */
-export const SEATS = ["pick", "shadow", "second"] as const;
+/** A reviewing seat's role: the rung's pick, the shadow one effort away that gates nothing, or a multi-seat rung's second or third. */
+export const SEATS = ["pick", "shadow", "second", "third"] as const;
 export type SeatRole = (typeof SEATS)[number];
 
 /** How severe a local reviewer judged a finding. */
@@ -65,7 +65,7 @@ export interface PostedRisk {
 	riskFile: string | null;
 }
 
-/** One `quest review` run on a PR's head: its classification, and each seat's round, none for a low head. */
+/** One `quest review` run on a PR's head: its classification, and each seat's round (empty only on older low-tier runs). */
 export interface ReviewRun {
 	repository: string;
 	number: number;

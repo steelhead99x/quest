@@ -7,6 +7,7 @@ import type { GitHubDependencies, ObjectValue } from "../src/github/client";
 import { finish, land, release, take } from "../src/cli/hold";
 import { withoutHandBack } from "../src/core";
 import { reviewTarget } from "../src/github/review-trust";
+import { commit, git, gitRoutes, repository } from "./git-history";
 import { type Output, main } from "../src/cli/main";
 import { Refusal } from "../src/core";
 
@@ -82,6 +83,8 @@ class FakePull {
 	diffs: Record<string, string> = {};
 	/** The `quest review` status on each commit, as GraphQL's `StatusContext` gives it. */
 	statuses: Record<string, ObjectValue> = {};
+	/** A real repository's commits, trees, blobs, and comparisons other than the head's with the base. */
+	git?: (url: URL, init?: RequestInit) => Response | undefined;
 	private clock = Date.parse("2026-10-21T12:00:00Z");
 
 	/** Add a label as GitHub does: re-adding one already on the PR records no event. */
@@ -139,6 +142,11 @@ class FakePull {
 		if (url.pathname === "/repos/example/project/actions/runs" && url.searchParams.get("head_sha") === this.head)
 			return json(200, { total_count: this.runs.length, workflow_runs: this.runs });
 		const compared = /^\/repos\/example\/project\/compare\/main\.\.\.(\w+)$/.exec(url.pathname);
+		const routed = compared?.[1] === this.head ? undefined : this.git?.(url, init);
+		if (routed) return routed;
+		// Without a repository, every commit is an ordinary one, merging nothing.
+		const read = /^\/repos\/example\/project\/git\/commits\/(\w+)$/.exec(url.pathname);
+		if (read) return json(200, { sha: read[1], tree: { sha: "0".repeat(40) }, parents: [{ sha: FORK }] });
 		if (compared && new Headers(init.headers).get("Accept") === "application/vnd.github.diff")
 			return new Response(this.diffs[compared[1]!] ?? compared[1]);
 		if (compared) {
@@ -1233,6 +1241,46 @@ describe("merge --land of a high head", () => {
 		delete pull.statuses[HEAD];
 		await land_(pull);
 		expect(pull.writes).toEqual(Array(3).fill(`enablePullRequestAutoMerge ${HEAD} MERGE`));
+	});
+
+	test("lands a high head carried across a merge whose only conflict the quest driver resolved", async () => {
+		const quest = (related: string[]) =>
+			`# [S] Example\n\n## Goal\n\nDo it.\n\n## Related\n\n${related.map((name) => `- [${name}](/quest/${name}.md)`).join("\n")}\n`;
+		const dir = repository();
+		commit(dir, { ".gitattributes": "quest/** merge=quest\n", "quest/x.md": quest(["a", "b", "c"]) });
+		git(dir, "switch", "-q", "-c", "pr");
+		const reviewed = commit(dir, { "quest/x.md": quest(["a", "b", "x", "c"]) });
+		git(dir, "switch", "-q", "main");
+		commit(dir, { "quest/x.md": quest(["a", "c"]) });
+		git(dir, "switch", "-q", "pr");
+		git(dir, "merge", "-q", "--no-edit", "main");
+		const merged = git(dir, "rev-parse", "HEAD");
+		const pull = new FakePull();
+		pull.git = gitRoutes(dir);
+		pull.head = merged;
+		pull.files = ["quest/x.md"];
+		review(pull, reviewed, "high");
+		pull.statuses[reviewed]!.targetUrl = reviewTarget(PR, git(dir, "merge-base", "main", reviewed), reviewed);
+		const landing = (sha: string) => land(PR, { sha, method: "merge", check: clean }, pull.deps());
+		await landing(merged);
+		expect(pull.writes).toEqual([`enablePullRequestAutoMerge ${merged} MERGE`]);
+		// A push of the PR's own after the merge needs a new round.
+		pull.head = commit(dir, { "quest/x.md": quest(["a", "x", "c", "y"]) });
+		expect(await refused(landing(pull.head))).toContain(
+			`since the quest review status on ${reviewed} rates it high`,
+		);
+	});
+
+	test("says why when reading the head's merges of the base failed", async () => {
+		const pull = new FakePull();
+		review(pull, OLD, "high");
+		pull.git = (url) =>
+			url.pathname.includes("/git/commits/")
+				? Response.json({ message: "Not Found" }, { status: 404 })
+				: undefined;
+		expect(await refused(land_(pull))).toContain(
+			`since the quest review status on ${OLD} rates it high, and no quest review status covers it (reading its merges of the base failed: GitHub HTTP 404 for /repos/example/project/git/commits/${HEAD}`,
+		);
 	});
 
 	test("lets the most recently set status of the head's diff decide, whatever commit carries it", async () => {

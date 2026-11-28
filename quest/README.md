@@ -58,6 +58,14 @@ adds read-only `quest advise` (`gemini-4-neon` via `agy` → `gpt-6.2-astra` via
 the routine advisor A/B ([kixel-ai/quest#934](https://github.com/kixel-ai/quest/pull/934)) runs Claude `--advisor` writer
 A/B arms across `XS`–`XL` (rejected: `opencode` for Neon; T3-only advisor;
 skipping routine `--advisor` arms).
+Amended 2026-11-27 (maintainer, `/quest-plan`): ✅ Replace the `0/1/2` flat
+risk-tier seating with one 7-rung `(size + risk)` reviewer ladder
+(`XS=1`…`XL=5`, `low=-1`, `medium=0`, `high=+1` → rungs `0`–`6`) so every
+`low` PR gets Sol (dropping `passed with no local reviewer`), `sol("low")` is
+retired, and rungs `5`–`6` (`L high`, `XL med`, `XL high`) add `gemini-4-neon`
+via `agy` as a 3rd reviewer reusing [Stuck-agent advisor](/quest/m0/advise.md)'s
+read-only `agy` runner (rejected: a 15-cell 2D matrix; clamping `low`/`high`
+seats; keeping `low` unreviewed; 2 reviewers max without Neon). Planned in [Neon third reviewer](/quest/m0/review-third-seat.md) (the 7-rung Codex/Claude ladder landed first).
 
 Decided 2026-11-21 (maintainer, `/quest-plan` in
 [kixel-ai/kixel.quest#85](https://github.com/kixel-ai/kixel.quest/pull/85)),

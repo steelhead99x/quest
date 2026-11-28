@@ -3,7 +3,7 @@
 // the session following it passes as flags. The model check
 // (quest/m1/model-check.md) audits these lists each milestone.
 import { createHash } from "node:crypto";
-import { type Doc, SIZES, type Size, onMaintainer, size, waits } from "../core";
+import { type Doc, SIZES, type Size, TIERS, type Tier, onMaintainer, size, waits } from "../core";
 
 /** The agent CLIs `quest` runs. */
 export const HARNESSES = ["claude", "codex"] as const;
@@ -62,20 +62,43 @@ export const unfit =
 	(entry: Model): boolean =>
 		entry.model === model || weaker(entry.model, model);
 
+/** One rung of the `(size + risk)` reviewer ladder: how many seats run at once, and the ranked reviewers for it. */
+export interface ReviewRung {
+	/** How many gating reviewers run at once (1 on rungs 0–2; 2 on rungs 3–6 until Neon joins rungs 5–6). */
+	seats: 1 | 2;
+	/** Ordered reviewers: on a 1-seat rung, the pick with its fallback; on a 2-seat rung, both required seats. */
+	reviewers: readonly Model[];
+}
+
 /**
- * Each size's two reviewers, one per vendor: Sol reviews a medium head alone, whoever wrote it, Opus takes its
- * place when Sol cannot run, and a high head gets both. Opus reviews at the effort it writes
- * the size at, since it may review its own work. No list names Fable, whose xhigh reviews measured at ten times
- * Sol xhigh's cost per PR for half its high findings, or Astra, which no review showed finding what these two
- * missed.
+ * The 7-rung `(size + risk)` reviewer ladder (`SIZES.indexOf(size) + TIERS.indexOf(tier)` → `0..6`):
+ * every `low` head runs Sol (no unreviewed tier), `sol("low")` is retired, rungs `0..2` run 1 seat (falling from Sol
+ * to Opus when Sol cannot run), and rungs `3..6` run both Sol and Opus. No rung names Fable, whose xhigh reviews
+ * measured at ten times Sol xhigh's cost per PR for half its high findings, or Astra, which no review showed finding
+ * what these two missed.
  */
-export const REVIEWERS: Record<Size, readonly Model[]> = {
-	XS: [sol("low"), opus("medium")],
-	S: [sol("medium"), opus("medium")],
-	M: [sol("high"), opus("high")],
-	L: [sol("xhigh"), opus("high")],
-	XL: [sol("xhigh"), opus("xhigh")],
-};
+export const REVIEW_RUNGS: readonly ReviewRung[] = [
+	// 0: XS low
+	{ seats: 1, reviewers: [sol("medium"), opus("medium")] },
+	// 1: XS medium, S low
+	{ seats: 1, reviewers: [sol("high"), opus("medium")] },
+	// 2: XS high, S medium, M low
+	{ seats: 1, reviewers: [sol("xhigh"), opus("high")] },
+	// 3: S high, M medium, L low
+	{ seats: 2, reviewers: [sol("xhigh"), opus("medium")] },
+	// 4: M high, L medium, XL low
+	{ seats: 2, reviewers: [sol("xhigh"), opus("high")] },
+	// 5: L high, XL medium
+	{ seats: 2, reviewers: [sol("xhigh"), opus("high")] },
+	// 6: XL high
+	{ seats: 2, reviewers: [sol("xhigh"), opus("xhigh")] },
+];
+
+/** The rung index (`0..6`) for `(size, tier)`: `XS..XL` (`0..4`) plus `low..high` (`0..2`). */
+export const reviewRungIndex = (size: Size, tier: Tier): number => SIZES.indexOf(size) + TIERS.indexOf(tier);
+
+/** The reviewer rung for `(size, tier)`. */
+export const reviewRung = (size: Size, tier: Tier): ReviewRung => REVIEW_RUNGS[reviewRungIndex(size, tier)]!;
 
 /** One side of the writer A/B: A runs the size's own first writer, B the alternative. */
 export type Arm = "A" | "B";

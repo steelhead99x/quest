@@ -63,7 +63,13 @@ export interface ManifestTask {
 	capabilities: string[];
 	/** Whether the task runs in the repository's Nix dev shell. */
 	nix: boolean;
-	/** Whether a passing result may be reused for the same inputs. */
+	/** Whether the task runs once per crate of the root Cargo workspace, with `QUEST_CRATE` naming it. */
+	cargo: boolean;
+	/**
+	 * Whether a passing result may be reused for the same inputs: by default a Nix task's that no task runs after,
+	 * since a reused result restores no files another task could read, that declares no metrics and is outside the
+	 * nightly and release tiers, and never a task without Nix, whose host toolchain nothing pins.
+	 */
 	cache: boolean;
 	/** Variables set for the task. */
 	environment: Record<string, string>;
@@ -77,7 +83,7 @@ export interface ManifestTask {
 export type ParsedManifest = { ok: true; manifest: Manifest } | { ok: false; problems: string[] };
 
 /** The variables `quest run` sets for every task, which a task's `environment` cannot replace. */
-const RESERVED = ["QUEST_BASE", "QUEST_TIER"];
+const RESERVED = ["QUEST_BASE", "QUEST_CRATE", "QUEST_TIER"];
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const LABEL = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
@@ -94,6 +100,7 @@ const TASK_KEYS = [
 	"os",
 	"capabilities",
 	"nix",
+	"cargo",
 	"cache",
 	"environment",
 	"junit",
@@ -186,12 +193,23 @@ export function parseQuestManifest(text: string): ParsedManifest {
 	const repo = readRepo(read, root.repo ?? Object.create(null));
 	const tables = root.tasks ?? Object.create(null);
 	const tasks: ManifestTask[] = [];
+	/** The tasks whose `cache` is the default, which depends on whether another task runs after them. */
+	const settle: ManifestTask[] = [];
 	if (!isTable(tables)) read.problem("tasks", "expected a table of `[tasks.<name>]` tables");
 	else {
 		for (const [name, table] of Object.entries(tables)) {
 			const task = readTask(read, name, table);
-			if (task !== null) tasks.push(task);
+			if (task === null) continue;
+			tasks.push(task);
+			if (task.cache && !task.nix)
+				read.problem(
+					`[tasks.${name}] cache`,
+					"nothing pins the toolchain of a task without Nix, so its result cannot be reused",
+				);
+			// A result reused for a task others run after would leave them without the files it writes.
+			else if ((table as Table).cache === undefined) settle.push(task);
 		}
+		for (const task of settle) task.cache &&= !tasks.some((other) => other.after.includes(task.name));
 		checkAfter(read, tasks);
 		checkReports(read, tasks);
 	}
@@ -268,7 +286,14 @@ function readTask(read: Reader, name: string, table: unknown): ManifestTask | nu
 		os: HOST.filter((host) => os.includes(host)),
 		capabilities: list("capabilities", (where, value) => read.labels(where, value)),
 		nix,
-		cache: table.cache === undefined ? true : (read.boolean(field("cache"), table.cache) ?? true),
+		cargo: table.cargo === undefined ? false : (read.boolean(field("cargo"), table.cargo) ?? false),
+		// The default is settled once every task's `after` is known.
+		// A nightly task, such as a benchmark or a live interop suite, must run again on the same code, a release
+		// task publishes, and metrics describe the run that wrote them: a reused pass would skip each.
+		cache:
+			table.cache === undefined
+				? nix && tier !== "nightly" && tier !== "release" && table.metrics === undefined
+				: (read.boolean(field("cache"), table.cache) ?? false),
 		environment,
 		junit: table.junit === undefined ? null : read.file(field("junit"), table.junit),
 		metrics: table.metrics === undefined ? null : read.file(field("metrics"), table.metrics),

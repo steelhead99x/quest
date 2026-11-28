@@ -35,7 +35,7 @@ import { type GitHubDependencies, reading } from "../github/client";
 import { GitHubForge } from "../github/forge";
 import { GitError } from "./git";
 import { pullRequest, type RemoteHost, readRemote, remoteHost } from "./github";
-import { kixelUrl, notSignedIn, tokenFor, tokensPath } from "./tokens";
+import { kixelPath, kixelUrl, notSignedIn, tokenFor, tokensPath } from "./tokens";
 
 /** The variable that, set to `github`, reads GitHub even where Kixel Quest serves the repository. */
 export const FORGE = "QUEST_FORGE";
@@ -139,12 +139,13 @@ export interface Located {
  */
 export function locate(value: string, root: string, env: NodeJS.ProcessEnv): Located {
 	const base = kixelUrl(env);
+	const path = kixelPath(value, base);
 	if (/^[1-9]\d*$/.test(value)) {
 		// Outside a checkout, pullRequest says so.
 		const host = originHost(root, env);
 		if (host?.forge === "kixel") return { pull: { ...host.repository, number: Number(value) }, hosted: true };
-	} else if (value.startsWith(`${base}/`)) {
-		const match = /^([\w.-]+)\/([\w.-]+)\/pull\/([1-9]\d*)\/?(?:[?#].*)?$/.exec(value.slice(base.length + 1));
+	} else if (path !== null) {
+		const match = /^([\w.-]+)\/([\w.-]+)\/pull\/([1-9]\d*)\/?(?:[?#].*)?$/.exec(path);
 		if (!match) throw new InputError(`expected a Kixel Quest PR URL, ${base}/<owner>/<repo>/pull/<number>`);
 		return { pull: { owner: match[1]!, repo: match[2]!, number: Number(match[3]) }, hosted: true };
 	}
