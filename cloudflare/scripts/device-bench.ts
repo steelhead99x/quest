@@ -71,7 +71,8 @@ for (const report of reports) {
 	const file = join(BASELINES, baselineName(report.device));
 	if (values.record) {
 		mkdirSync(BASELINES, { recursive: true });
-		writeFileSync(file, JSON.stringify(baseline(report, new Date().toISOString()), null, "\t") + "\n");
+		const was = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Baseline) : undefined;
+		writeFileSync(file, JSON.stringify(baseline(report, new Date().toISOString(), was), null, "\t") + "\n");
 		console.error(`Recorded ${file}`);
 		recorded.push(report.device.model);
 	} else if (existsSync(file)) {

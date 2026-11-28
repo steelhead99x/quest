@@ -204,10 +204,21 @@ describe("bench", () => {
 		expect(report.pages[0]!.warm.load?.runs).toBe(3);
 		expect(report.pages[0]!.uncontrolled).toBe(1);
 		expect(markdown([report], [])).toContain("- `/`: 1 of 4 warm loads skipped, as no service worker took control");
-		// Too few warm loads to estimate spread fail the run rather than compare or record an empty summary.
-		await expect(
-			run(fake(device(), [load()], [true, false, true]), { urls: ["https://q.dev/"], runs: 3, save: null }),
-		).rejects.toThrow("after only 2 of 3 cold loads");
+		// Too few warm loads to estimate spread keep the cold results, flagged, and neither compare nor record warm ones.
+		const few = await run(fake(device(), [load({ load: 900 })], [true, false, true]), {
+			urls: ["https://q.dev/"],
+			runs: 3,
+			save: null,
+		});
+		expect(few.pages[0]!.cold.load?.median).toBe(900);
+		expect(few.pages[0]!.warm).toEqual({});
+		expect(markdown([few], [])).toContain("| 900 / 900 ms | n/a |");
+		expect(markdown([few], [])).toContain("too few remain to summarize");
+		const base = baseline(report, "2026-11-25T00:00:00Z");
+		expect(compare(base, few).map((f) => `${f.phase} ${f.regression.metric}`)).toEqual(["cold load"]);
+		expect(baseline(few, "2026-11-26T00:00:00Z", base).pages["/"]!.warm).toEqual(base.pages["/"]!.warm);
+		const otherBrowser = { ...few, device: { ...few.device, browser: "Chrome/143.0" } };
+		expect(baseline(otherBrowser, "2026-11-26T00:00:00Z", base).pages["/"]!.warm).toEqual({});
 	});
 
 	test.each([

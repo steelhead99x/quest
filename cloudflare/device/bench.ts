@@ -30,6 +30,7 @@ export const MIN_BATTERY = 20;
 export interface PageReport {
 	path: string;
 	cold: Record<string, Summary>;
+	/** Empty when fewer than three warm loads had a service worker in control, too few to estimate spread. */
 	warm: Record<string, Summary>;
 	installable: Installable;
 	/** Warm loads skipped because no service worker took control after the cold one. */
@@ -90,11 +91,6 @@ export async function run(driver: Driver, options: Options): Promise<DeviceRepor
 			}
 			warm.push(check(url, await driver.load(url, false)));
 		}
-		// Fewer warm loads can't estimate their spread, so they would neither compare nor make a baseline.
-		if (warm.length < 3)
-			throw new Error(
-				`${url}: a service worker controlled the page after only ${warm.length} of ${options.runs} cold loads, and a warm summary needs 3`,
-			);
 		const installable = await driver.installable(url);
 		const screenshots: PageReport["screenshots"] = [];
 		if (options.save)
@@ -105,7 +101,8 @@ export async function run(driver: Driver, options: Options): Promise<DeviceRepor
 		pages.push({
 			path: new URL(url).pathname,
 			cold: metrics(cold),
-			warm: metrics(warm),
+			// Fewer warm loads can't estimate their spread, so they neither compare nor make a baseline.
+			warm: warm.length < 3 ? {} : metrics(warm),
 			installable,
 			uncontrolled,
 			disagreements: disagreements([...cold, ...warm]),
@@ -150,12 +147,15 @@ export function baselineName(device: DeviceInfo): string {
 	return `${device.kind}-${slug(device.model)}.json`;
 }
 
-/** A baseline of this report. */
-export function baseline(report: DeviceReport, recorded: string): Baseline {
+/** A baseline of this report, keeping `was`'s warm summary for a page this run has none for, from the same browser. */
+export function baseline(report: DeviceReport, recorded: string, was?: Baseline): Baseline {
+	const same = was?.device.os === report.device.os && was?.device.browser === report.device.browser;
+	const warm = (p: PageReport) =>
+		Object.keys(p.warm).length === 0 && same ? (was?.pages[p.path]?.warm ?? {}) : p.warm;
 	return {
 		device: report.device,
 		recorded,
-		pages: Object.fromEntries(report.pages.map((p) => [p.path, { cold: p.cold, warm: p.warm }])),
+		pages: Object.fromEntries(report.pages.map((p) => [p.path, { cold: p.cold, warm: warm(p) }])),
 	};
 }
 
@@ -172,9 +172,12 @@ export function compare(
 	for (const page of report.pages) {
 		const was = base.pages[page.path];
 		if (!was) continue;
-		for (const phase of ["cold", "warm"] as const)
+		for (const phase of ["cold", "warm"] as const) {
+			// An undersampled warm phase, which the report flags, has nothing to compare.
+			if (phase === "warm" && Object.keys(page.warm).length === 0) continue;
 			for (const regression of regressions(was[phase], page[phase], FLOORS))
 				out.push({ path: page.path, phase, regression });
+		}
 	}
 	return out;
 }
@@ -208,7 +211,10 @@ export function markdown(
 			if (p.uncontrolled)
 				lines.push(
 					"",
-					`- \`${p.path}\`: ${p.uncontrolled} of ${p.cold.load?.runs ?? 0} warm loads skipped, as no service worker took control`,
+					`- \`${p.path}\`: ${p.uncontrolled} of ${p.cold.load?.runs ?? 0} warm loads skipped, as no service worker took control` +
+						(Object.keys(p.warm).length === 0
+							? "; too few remain to summarize, so its warm results are left out, uncompared and unrecorded"
+							: ""),
 				);
 		lines.push("");
 	}
