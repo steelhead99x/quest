@@ -3,7 +3,7 @@
 // and only web and mail links survive. Links into the tree open board pages.
 
 import { decodeNamedCharacterReference } from "decode-named-character-reference";
-import { Marked, type Token } from "marked";
+import { Marked, Parser, type Token, type Tokens } from "marked";
 import { resolve } from "../../../src/core/index.ts";
 
 /** Where a quest's links go: other quests' board pages, and other files on GitHub. */
@@ -77,8 +77,9 @@ export function rewrite(links: Links, from: string, href: string): string | null
 }
 
 /**
- * The document's `## ` sections in order, each rendered to HTML, and the id of its first `# ` heading, which the
- * page draws as its title. Every `# ` heading takes its id in document order, as on GitHub.
+ * The document's `## ` sections in order, each rendered to HTML, and the id of its last `# ` heading, which the
+ * page draws as its title (as `src/core/doc.ts` picks it). Every `# ` heading takes its id in document order, as on
+ * GitHub.
  */
 export function render(links: Links, path: string, content: string): Rendered {
 	const slugger = new Slugger();
@@ -104,34 +105,36 @@ export function render(links: Links, path: string, content: string): Rendered {
 			},
 		},
 	});
-	const id = (text: string) => slugger.slug(visible(marked.parseInline(text, { async: false })));
+	// From the heading's tokens as the whole document lexed them, so a reference link resolves to its text.
+	const id = (heading: Tokens.Heading) => slugger.slug(visible(Parser.parseInline(heading.tokens, marked.defaults)));
 	// `# ` headings outside the title stay off the page, but each holds its place in the ids' order, so what
 	// follows one starts a section of its own.
-	const parts: ({ title: string } | { heading: string; tokens: Token[] })[] = [];
-	let open: { heading: string; tokens: Token[] } | undefined;
+	type Part = { heading?: Tokens.Heading; tokens: Token[] };
+	const parts: ({ title: Tokens.Heading } | Part)[] = [];
+	let open: Part | undefined;
 	for (const token of marked.lexer(content)) {
 		if (token.type === "heading" && token.depth === 1) {
-			parts.push({ title: token.text.trim() });
+			parts.push({ title: token as Tokens.Heading });
 			open = undefined;
 		} else if (token.type === "heading" && token.depth === 2) {
-			parts.push((open = { heading: token.text.trim(), tokens: [] }));
+			parts.push((open = { heading: token as Tokens.Heading, tokens: [] }));
 		} else if (open) {
 			open.tokens.push(token);
 		} else if (token.type !== "space") {
-			parts.push((open = { heading: "", tokens: [token] }));
+			parts.push((open = { tokens: [token] }));
 		}
 	}
 	// In document order, so a repeated heading's number matches GitHub's.
-	let title: string | undefined;
+	let title = "";
 	const sections: Section[] = [];
 	for (const part of parts) {
-		if ("title" in part) {
-			const slug = id(part.title);
-			title ??= slug;
-		} else {
-			const heading = part.heading ? id(part.heading) : "";
-			sections.push({ heading: part.heading, id: heading, html: marked.parser(part.tokens) });
-		}
+		if ("title" in part) title = id(part.title);
+		else
+			sections.push({
+				heading: part.heading?.text.trim() ?? "",
+				id: part.heading ? id(part.heading) : "",
+				html: marked.parser(part.tokens),
+			});
 	}
-	return { title: title ?? "", sections };
+	return { title, sections };
 }

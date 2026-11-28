@@ -54,9 +54,9 @@ test("a repeat skips an id an earlier heading already has, as GitHub's does", ()
 	]);
 });
 
-test("every `# ` heading takes its id in order, the first naming the page's title", () => {
+test("every `# ` heading takes its id in order, the last naming the page's title", () => {
 	const { title, sections } = render(links, "quest/m0/a.md", "# Notes\n\n## Notes\n\n# Notes\n\n### Notes\n");
-	expect(title).toBe("notes");
+	expect(title).toBe("notes-2");
 	expect(sections[0]!.id).toBe("notes-1");
 	expect(sections[1]!.html).toContain('id="notes-3"');
 	expect(render(links, "quest/m0/a.md", "## Goal\n").title).toBe("");
@@ -66,7 +66,23 @@ test("character references in a heading decode as HTML does, and an invalid one 
 	const { sections } = render(
 		links,
 		"quest/m0/a.md",
-		"## Caf&eacute; &#x41;\n\n## <https://a.example/&#99999999999;>\n\n## &bogus; &#0;\n\n## &#99999999999; x\n",
+		"## Caf&eacute; &#x41;\n\n## <https://a.example/&#99999999999;>\n\n## &bogus; &#0;\n\n## &#99999999999; x\n\n## <https://b.example/&#2000000;>\n",
 	);
-	expect(sections.map((s) => s.id)).toEqual(["café-a", "httpsaexample99999999999", "bogus-", "99999999999-x"]);
+	expect(sections.map((s) => s.id)).toEqual([
+		"café-a",
+		"httpsaexample99999999999",
+		"bogus-",
+		"99999999999-x",
+		"httpsbexample",
+	]);
+});
+
+test("a heading's reference link takes its id from the link's text, its definition anywhere in the document", () => {
+	const { title, sections } = render(
+		links,
+		"quest/m0/README.md",
+		"# [Worker guide][docs]\n\n## [Plan][docs]\n\n[docs]: https://example.com/guide\n",
+	);
+	expect(title).toBe("worker-guide");
+	expect(sections[0]!.id).toBe("plan");
 });
