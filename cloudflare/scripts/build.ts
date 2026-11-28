@@ -1,5 +1,5 @@
-// Build the Worker's static assets into build/public (ignored by Git): the theme
-// from design/theme/, Kixel Quest's brand from brand/, the site's open-licensed fonts, the site CSS, the page script, the web app manifest, and
+// Build the Worker's static assets into build/public (ignored by Git): Quest's theme
+// stylesheet from design/theme/, Kixel Quest's brand from brand/, the site's open-licensed fonts, the site CSS, the page script, the web app manifest, and
 // the service worker stamped with this build's commit, so a deploy replaces the
 // cached shell. Wrangler runs this before dev and deploy; check and test run it first.
 import { execFileSync } from "node:child_process";
@@ -30,9 +30,22 @@ const version = dirty ? `${commit}-${Date.now()}` : commit;
 
 rmSync(join(worker, "build"), { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
-cpSync(join(root, "design", "theme"), join(out, "theme"), { recursive: true });
-// Kixel Quest's mark, icons, hero route, and social image (brand/README.md).
-cpSync(join(worker, "brand"), join(out, "brand"), { recursive: true });
+// Of Quest's theme, only its stylesheet: the markers and size colours. Its mark, icons,
+// art, and the moq-dev wordmark (shown by permission) are not Kixel Quest's to serve.
+mkdirSync(join(out, "theme"));
+cpSync(join(root, "design", "theme", "theme.css"), join(out, "theme", "theme.css"));
+// Kixel Quest's mark, icons, and hero route (brand/README.md); not the README or sources.
+export const BRAND = [
+	"logo.svg",
+	"route.svg",
+	"icon-180.png",
+	"icon-192.png",
+	"icon-512.png",
+	"icon-maskable-192.png",
+	"icon-maskable-512.png",
+];
+mkdirSync(join(out, "brand"));
+for (const file of BRAND) cpSync(join(worker, "brand", file), join(out, "brand", file));
 // The site's fonts, served from this site so pages render in them offline and without
 // asking a third party: the Latin subset of each face, with its licence.
 const fonts = join(out, "fonts");

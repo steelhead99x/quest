@@ -5,7 +5,7 @@ import type { Child } from "hono/jsx";
 // markers and size colours from design/theme.md (/theme/theme.css). The type is
 // Atkinson Hyperlegible (src/site.css), served from /fonts.
 
-export const repo = "https://github.com/moq-dev/quest";
+export const repo = "https://github.com/kixel-ai/quest";
 
 /** The signed-in person, as the header shows them. */
 export type User = { login: string };
@@ -103,8 +103,8 @@ export function Layout(props: Page & { children: Child }) {
 						kixel.ai
 					</a>
 					<p>
-						Kixel Quest runs <a href={repo}>Quest</a>, moq.dev's open-source quest log, under MIT or
-						Apache-2.0.
+						Kixel Quest is built on moq.dev's Quest and open source under MIT or Apache-2.0.{" "}
+						<a href={repo}>Read the source on GitHub</a>.
 					</p>
 				</footer>
 			</body>

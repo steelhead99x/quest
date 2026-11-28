@@ -25,7 +25,7 @@ const ASSETS = [
 	"/fonts/atkinson-hyperlegible-mono-latin-wght-normal.woff2",
 	OFFLINE,
 ];
-// Not /og.png: only link previews fetch it, never a page, and at 120 KB it was
+// Not /og.png: only link previews fetch it, never a page, and at about 50 KB it was
 // nearly half of what install downloaded before the worker could take control.
 
 self.addEventListener("install", (event) =>
