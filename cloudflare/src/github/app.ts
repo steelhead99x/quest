@@ -40,7 +40,7 @@ export function manifest(origin: string, redirect: string, name: string): Manife
 		name,
 		url: site.origin,
 		description:
-			"Find the next ready quest, see what it unblocks, and follow its pull request from your phone. Quest keeps the plan in your Git repository.",
+			"Find the next ready quest, see what it unblocks, and follow its pull request from your phone. Kixel Quest keeps the plan in your Git repository.",
 		// Installable on any account, so the maintainer's organization can install a contributor's App.
 		public: true,
 		redirect_url: redirect,

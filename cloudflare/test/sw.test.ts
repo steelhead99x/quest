@@ -1,6 +1,6 @@
 // The service worker's page cache, run against a fake Cache API.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { expect, test } from "vitest";
@@ -103,6 +103,20 @@ test("install precaches the shell and the offline notice, never the link-preview
 	expect(paths).toContain("/offline");
 	expect(paths).toContain("/site.css");
 	expect(paths).not.toContain("/og.png");
-	// Every precached path is a file the build serves.
+	// Every precached path is a file the build serves, so install can't fail on a 404.
 	for (const path of paths) expect(path).toMatch(/^\/[\w./-]+$/);
+	const built = join(import.meta.dirname, "..", "build", "public");
+	for (const path of paths.filter((p) => p !== "/offline")) expect(existsSync(join(built, path)), path).toBe(true);
+});
+
+test("the manifest names Kixel Quest and every icon it lists is built; unused theme files are not", () => {
+	const built = join(import.meta.dirname, "..", "build", "public");
+	const manifest = JSON.parse(readFileSync(join(built, "manifest.webmanifest"), "utf8"));
+	expect(manifest.name).toBe("Kixel Quest");
+	expect(manifest.icons.length).toBeGreaterThan(0);
+	for (const icon of manifest.icons) expect(existsSync(join(built, icon.src)), icon.src).toBe(true);
+	expect(manifest.icons.some((i: { purpose: string }) => i.purpose === "maskable")).toBe(true);
+	expect(existsSync(join(built, "theme", "theme.css"))).toBe(true);
+	for (const gone of ["theme/moq-dev-wordmark.svg", "theme/logo.svg", "brand/README.md", "brand/og.svg"])
+		expect(existsSync(join(built, gone)), gone).toBe(false);
 });

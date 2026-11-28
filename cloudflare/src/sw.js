@@ -14,19 +14,18 @@ const ASSETS = [
 	"/site.css",
 	"/app.js",
 	"/theme/theme.css",
-	"/theme/logo.svg",
-	"/theme/moq-dev-wordmark.svg",
-	"/theme/route.svg",
-	"/theme/icon-192.png",
-	"/theme/icon-512.png",
-	"/theme/icon-180.png",
+	"/brand/logo.svg",
+	"/brand/route.svg",
+	"/brand/icon-192.png",
+	"/brand/icon-512.png",
+	"/brand/icon-180.png",
 	"/manifest.webmanifest",
 	"/fonts/atkinson-hyperlegible-next-latin-wght-normal.woff2",
 	"/fonts/atkinson-hyperlegible-next-latin-wght-italic.woff2",
 	"/fonts/atkinson-hyperlegible-mono-latin-wght-normal.woff2",
 	OFFLINE,
 ];
-// Not /og.png: only link previews fetch it, never a page, and at 120 KB it was
+// Not /og.png: only link previews fetch it, never a page, and at about 50 KB it was
 // nearly half of what install downloaded before the worker could take control.
 
 self.addEventListener("install", (event) =>
