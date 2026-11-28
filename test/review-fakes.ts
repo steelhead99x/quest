@@ -47,8 +47,8 @@ try {
 } catch {}
 `;
 
-/** The classifier's reply: FAKE_RISK, or medium. */
-const RISK_REPLY = `JSON.stringify(process.env.FAKE_RISK ? JSON.parse(process.env.FAKE_RISK) : { tier: "medium", reason: "It changes what the library returns." })`;
+/** The classifier's reply: FAKE_RISK, or low (a one-seat rung on DEFAULT_SIZE M). */
+const RISK_REPLY = `JSON.stringify(process.env.FAKE_RISK ? JSON.parse(process.env.FAKE_RISK) : { tier: "low", reason: "It changes what the library returns." })`;
 
 /**
  * Records one call as its own file in FAKE_LOG, a directory, renamed into place

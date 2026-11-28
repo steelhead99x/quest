@@ -1,7 +1,7 @@
 // `quest run`: the tasks a repository's quest.toml declares, picked for a tier and a change, each through
 // `quest gate` and, for a Nix task, in the repository's dev shell, with every task whose `after` tasks passed
-// running at once.
-import { type ChildProcess, spawn } from "node:child_process";
+// running at once, and a task whose inputs this host already saw pass taking that pass instead of running.
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import {
@@ -30,6 +30,20 @@ import {
 import { git } from "./git";
 import { GROUP, cancelled, follow, interrupts, requested } from "./interrupt";
 import { programCommand, requireProgram } from "./program";
+import {
+	type CargoCrate,
+	type CargoWorkspace,
+	DIRTY,
+	type TaskResult,
+	type TreeFile,
+	cargoWorkspace,
+	devShell,
+	digest,
+	inputFiles,
+	taskCache,
+	treeFiles,
+	workspaceManifest,
+} from "./task-cache";
 
 /** What `quest run` was asked for. */
 export interface RunOptions {
@@ -49,6 +63,8 @@ export interface RunOptions {
 	query: boolean;
 	/** The directory to copy each task's JUnit XML and metrics into, or undefined. */
 	report: string | undefined;
+	/** Take and record passes in this user's task cache; false runs every task and records nothing. */
+	cache: boolean;
 }
 
 /** Where `quest run` writes, what it runs with, and its clock. */
@@ -94,12 +110,19 @@ function parseRoot(read: (path: string) => RootFile): { manifest: Manifest | nul
 	return parsed.ok ? { manifest: parsed.manifest, problems: [] } : { manifest: null, problems: parsed.problems };
 }
 
-/** The working tree's manifest, failing with every problem it has. */
-function readManifest(top: string): Manifest {
+/** The working tree's manifest, or null when there is none, failing with every problem it has. */
+export function rootManifest(top: string): Manifest | null {
 	const parsed = parseRoot(workingTree(top));
-	if (parsed === null) throw new Error(`no ${MANIFEST_FILE} at ${top}`);
+	if (parsed === null) return null;
 	if (parsed.manifest === null) throw new Error(parsed.problems.join("\n"));
 	return parsed.manifest;
+}
+
+/** The working tree's manifest, failing when there is none or with every problem it has. */
+function readManifest(top: string): Manifest {
+	const manifest = rootManifest(top);
+	if (manifest === null) throw new Error(`no ${MANIFEST_FILE} at ${top}`);
+	return manifest;
 }
 
 /**
@@ -115,13 +138,180 @@ function flakeProblem(read: (path: string) => RootFile, tasks: ManifestTask[]): 
 	return `${MANIFEST_FILE}: ${nix.join(", ")} run in the Nix dev shell, but ${missing}; set nix = false on a task that runs without Nix`;
 }
 
-/** What `quest check` and `quest merge` report about a repository's quest.toml, if it has one, read with `read`. */
+/** The Nix binary cache Kixel Quest serves, which a repository opting in with quest.toml substitutes from. */
+export const NIX_CACHE = "https://nix.kixel.quest";
+
+/** A Nix token: a name, a string's literal text (interpolations left out), a path, or one punctuation character. */
+type NixToken = { kind: "name" | "string" | "path" | "punct"; text: string };
+
+/**
+ * A path literal at the start of the text, such as `./in/default.nix`, `~/x`, or `<nixpkgs>`, or the part of an
+ * interpolated one, such as `./profiles/${name}-in`, before its first `${`.
+ */
+const NIX_PATH = /^(?:<[\w.+/-]+>|(?:~|[\w.+-]*)(?:\/[\w.+-]+)+\/?|(?:~|[\w.+-]*)(?:\/[\w.+-]+)*\/(?=\$\{))/;
+
+/** The tokens of Nix source outside comments; an interpolation's code yields none. */
+function nixTokens(source: string): NixToken[] {
+	const tokens: NixToken[] = [];
+	let i = 0;
+	/** Code up to the `}` that closes an interpolation, or the end; `emit` is false inside one. */
+	const code = (emit: boolean, interpolation: boolean): void => {
+		let depth = 0;
+		while (i < source.length) {
+			const c = source[i]!;
+			if (/\s/.test(c)) i++;
+			else if (c === "#") i = source.indexOf("\n", i) < 0 ? source.length : source.indexOf("\n", i);
+			else if (source.startsWith("/*", i))
+				i = source.indexOf("*/", i + 2) < 0 ? source.length : source.indexOf("*/", i + 2) + 2;
+			else if (c === '"' || source.startsWith("''", i)) {
+				const text = string(c === '"' ? '"' : "''");
+				if (emit) tokens.push({ kind: "string", text });
+			} else if (NIX_PATH.test(source.slice(i, i + 4096))) {
+				const start = i;
+				i += NIX_PATH.exec(source.slice(i, i + 4096))![0].length;
+				// An interpolated path runs on through each `${...}` and the path characters after it.
+				while (source[start] !== "<" && source.startsWith("${", i)) {
+					i += 2;
+					code(false, true);
+					i += /^[\w.+/-]*/.exec(source.slice(i, i + 4096))![0].length;
+				}
+				if (emit) tokens.push({ kind: "path", text: source.slice(start, i) });
+			} else if (/[A-Za-z_]/.test(c)) {
+				const name = /^[A-Za-z_][\w'-]*/.exec(source.slice(i))![0];
+				i += name.length;
+				if (emit) tokens.push({ kind: "name", text: name });
+			} else {
+				i++;
+				if (c === "{") depth++;
+				else if (c === "}" && interpolation && depth-- === 0) return;
+				if (emit) tokens.push({ kind: "punct", text: c });
+			}
+		}
+	};
+	/** A string from its opening quote, returning its literal text. */
+	const string = (quote: '"' | "''"): string => {
+		i += quote.length;
+		let text = "";
+		while (i < source.length) {
+			if (quote === '"' && source[i] === "\\") {
+				text += source[i + 1] ?? "";
+				i += 2;
+			} else if (quote === "''" && /^''['$\\]/.test(source.slice(i, i + 3))) {
+				text += source[i + 2];
+				i += 3;
+			} else if (source.startsWith(quote, i)) {
+				i += quote.length;
+				return text;
+			} else if (source.startsWith("${", i)) {
+				i += 2;
+				code(false, true);
+			} else text += source[i++];
+		}
+		return text;
+	};
+	code(true, false);
+	return tokens;
+}
+
+/**
+ * The substituters flake.nix's `nixConfig` lists under `substituters` and `extra-substituters`, as a block or dotted
+ * keys and as lists or space-separated strings. Nix reads `nixConfig` only at the top of the file's attribute set, so
+ * one anywhere else counts for nothing.
+ */
+function substituters(flake: string): string[] {
+	const tokens = nixTokens(flake);
+	let p = 0;
+	const at = (text: string) => tokens[p]?.kind === "punct" && tokens[p]!.text === text;
+	/**
+	 * Skip a binding's value through its `;`, over every bracket, `let` ... `in`, and each `with` or `assert` and the
+	 * `;` that ends it at its own depth.
+	 */
+	const skip = () => {
+		const pending: number[] = [];
+		for (let depth = 0; p < tokens.length; p++) {
+			const { kind, text } = tokens[p]!;
+			if (kind === "name") {
+				if (text === "let") depth++;
+				else if (text === "in") depth--;
+				else if (text === "with" || text === "assert") pending.push(depth);
+			} else if (kind === "punct") {
+				if ("{[(".includes(text)) depth++;
+				else if ("}])".includes(text)) depth--;
+				else if (text === ";" && pending.at(-1) === depth) pending.pop();
+				else if (text === ";" && depth === 0) break;
+			}
+		}
+		p++;
+	};
+	/** A binding's attribute path through its `=`, or null for anything else, such as `inherit`. */
+	const path = (): string[] | null => {
+		const names: string[] = [];
+		while (tokens[p]?.kind === "name" || tokens[p]?.kind === "string") {
+			names.push(tokens[p++]!.text);
+			if (!at(".")) break;
+			p++;
+		}
+		if (names.length === 0 || names[0] === "inherit" || !at("=")) return null;
+		p++;
+		return names;
+	};
+	const found: string[] = [];
+	/** A setting's value, if it is a substituter list, then the rest of its binding. */
+	const setting = (key: string | undefined) => {
+		if (key === "substituters" || key === "extra-substituters") {
+			if (tokens[p]?.kind === "string") found.push(...tokens[p]!.text.split(/\s+/));
+			else if (at("[")) {
+				for (p++; p < tokens.length && !at("]"); p++)
+					if (tokens[p]!.kind === "string") found.push(tokens[p]!.text);
+				p++;
+			}
+		}
+		skip();
+	};
+	if (!at("{")) return found;
+	p++;
+	while (p < tokens.length && !at("}")) {
+		const names = path();
+		if (names === null) skip();
+		else if (names[0] !== "nixConfig") skip();
+		else if (names.length > 1) setting(names[1]);
+		else if (!at("{")) skip();
+		else {
+			p++;
+			while (p < tokens.length && !at("}")) {
+				const inner = path();
+				if (inner === null) skip();
+				else setting(inner[0]);
+			}
+			p++;
+			skip();
+		}
+	}
+	return found;
+}
+
+/** Why `flake` does not substitute from Kixel Quest's cache, or null when its `nixConfig` lists it. */
+function cacheProblem(flake: string): string | null {
+	if (substituters(flake).some((url) => url.replace(/\/$/, "") === NIX_CACHE)) return null;
+	return `${MANIFEST_FILE}: the repository opts into Kixel Quest, so flake.nix's nixConfig must list ${NIX_CACHE} in extra-substituters`;
+}
+
+/**
+ * What `quest check` and `quest merge` report about a repository's quest.toml, if it has one, read with `read`. A
+ * quest.toml opts the repository into Kixel Quest, which needs Nix: a regular root flake.nix substituting from its
+ * cache, even when every task sets `nix = false`.
+ */
 export function manifestProblems(read: (path: string) => RootFile): string[] {
 	const parsed = parseRoot(read);
 	if (parsed === null) return [];
 	if (parsed.manifest === null) return parsed.problems;
-	const problem = flakeProblem(read, parsed.manifest.tasks);
-	return problem === null ? [] : [problem];
+	const flake = read("flake.nix");
+	if (flake?.kind !== "file") {
+		const missing = flake === null ? "there is no flake.nix" : "flake.nix is a symlink, not a regular file";
+		return [`${MANIFEST_FILE}: the repository opts into Kixel Quest, which needs Nix, but ${missing} at its root`];
+	}
+	const cache = cacheProblem(flake.text);
+	return cache === null ? [] : [cache];
 }
 
 /**
@@ -130,8 +320,14 @@ export function manifestProblems(read: (path: string) => RootFile): string[] {
  */
 export const DEV_SHELL = "QUEST_DEV_SHELL";
 
+/**
+ * The variable a `quest.lib.mkFlake` dev shell sets to its toolchain's identity, which `quest run` compares with the
+ * identity of the shell `nix develop` enters now, since `QUEST_DEV_SHELL` is checked only as the shell is entered.
+ */
+export const DEV_SHELL_ID = "QUEST_DEV_SHELL_ID";
+
 /** Whether `env` is a dev shell entered for the repository at `top`. */
-function inDevShell(env: NodeJS.ProcessEnv, top: string): boolean {
+export function inDevShell(env: NodeJS.ProcessEnv, top: string): boolean {
 	const shell = env[DEV_SHELL];
 	if (!shell) return false;
 	try {
@@ -207,17 +403,116 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 	// Every program is found before any task starts, so a missing one fails the run rather than one task.
 	const problem = flakeProblem(workingTree(top), tasks);
 	if (problem !== null) throw new Error(problem);
-	// This repository's dev shell, already entered, runs Nix tasks directly with no evaluation.
-	const enter = tasks.some((task) => task.nix) && !inDevShell(io.env, top);
+	const caching = options.cache && tasks.some((task) => task.cache);
+	// The cache fingerprints the flake's dev shell with Nix even from inside a dev shell.
+	const fingerprint = caching && tasks.some((task) => task.nix);
+	const nix = fingerprint ? requireProgram("nix", io.env) : null;
+	const shell = nix === null ? null : devShell(nix, top, io.env);
+	// This repository's dev shell, already entered, runs Nix tasks directly. While the cache is in use, the entered
+	// shell may predate an edit to the flake, which `QUEST_DEV_SHELL`, checked as the shell was entered, cannot tell:
+	// every Nix task, a cached one's prerequisites included, runs in the shell the digests name, so the entered shell
+	// must carry the identity of the one `nix develop` enters now.
+	const direct =
+		inDevShell(io.env, top) &&
+		(shell === null || (shell.identity !== null && shell.identity === io.env[DEV_SHELL_ID]));
+	const develop = (task: ManifestTask) => task.nix && !direct;
 	const programs = {
 		quest: requireProgram("quest", io.env),
 		bash: requireProgram("bash", io.env),
-		nix: enter ? requireProgram("nix", io.env) : null,
+		nix: nix ?? (tasks.some(develop) ? requireProgram("nix", io.env) : null),
 	};
 	// Sets the environment of a task run outside `nix develop`, whose dev shell has its own `env`. It runs by name,
 	// since a multi-call coreutils, which its resolved path can be, picks the tool by the name it runs as.
-	if (tasks.some((task) => Object.keys(task.environment).length > 0 && !(task.nix && enter)))
-		requireProgram("env", io.env);
+	if (tasks.some((task) => Object.keys(task.environment).length > 0 && !develop(task))) requireProgram("env", io.env);
+
+	// A Cargo task runs once per crate, in the dev shell's Cargo for a Nix task. Every feature is on, so each crate's
+	// closure holds the optional dependencies a task's own feature flags may build.
+	let workspace: CargoWorkspace | null = null;
+	const cargo = tasks.find((task) => task.cargo);
+	if (cargo !== undefined) {
+		const metadata = ["cargo", "metadata", "--locked", "--all-features", "--format-version", "1"];
+		const argv = develop(cargo)
+			? [programs.nix!, "develop", top, "--command", ...metadata]
+			: [requireProgram("cargo", io.env), ...metadata.slice(1)];
+		const result = spawnSync(argv[0]!, argv.slice(1), {
+			cwd: top,
+			env: io.env,
+			encoding: "utf8",
+			maxBuffer: 1 << 30,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		if (result.error) throw result.error;
+		if (result.status !== 0) throw new Error(`cargo metadata --locked failed:\n${result.stderr.trim()}`);
+		// A dev shell's hook may print before Cargo's one line of JSON.
+		workspace = cargoWorkspace(result.stdout.trim().split("\n").pop()!, top);
+	}
+	const units = tasks.flatMap<Unit>((task) =>
+		task.cargo
+			? workspace!.crates.map((crate) => ({ task, crate, name: `${task.name}:${crate.name}`, digest: null }))
+			: [{ task, crate: null, name: task.name, digest: null }],
+	);
+
+	const cache = caching ? taskCache(io.env) : null;
+	const hits = new Map<Unit, TaskResult>();
+	/** The digest of everything `unit` reads in `files`, or why no digest can name it, while the run uses the cache. */
+	let digestOf: ((unit: Unit, files: TreeFile[]) => { digest: string } | { uncached: string }) | null = null;
+	if (cache !== null) {
+		const cargoManifest = workspace === null ? null : readFileSync(join(top, "Cargo.toml"), "utf8");
+		digestOf = (unit, files) => {
+			const { task, crate } = unit;
+			const read = inputFiles(
+				task,
+				files,
+				manifest.repo.invalidateAll,
+				crate === null ? null : { crate, workspace: workspace! },
+			);
+			// Tasks come after those they run after, whose digests each covers, since it may read what they wrote.
+			const before = units.filter((each) => task.after.includes(each.task.name));
+			const after = before.map((each) => each.digest);
+			if (read.some((file) => file.oid === DIRTY))
+				return { uncached: "it reads a submodule with uncommitted changes" };
+			if (crate !== null && crate.unlisted.length > 0)
+				return {
+					uncached: `cargo metadata lists no crate at ${crate.unlisted.join(", ")}, a path dependency it may build`,
+				};
+			const uncachedBefore = before.find((each) => each.digest === null);
+			if (uncachedBefore !== undefined)
+				return { uncached: `it runs after ${uncachedBefore.name}, whose inputs no digest names` };
+			const key = digest({
+				// Raised whenever the digest's material changes meaning, so no earlier pass matches.
+				version: 2,
+				system: `${process.arch}-${process.platform}`,
+				shell: task.nix ? shell!.derivation : null,
+				run: task.run,
+				environment: Object.entries(task.environment).sort(),
+				junit: task.junit,
+				metrics: task.metrics,
+				crate:
+					crate === null
+						? null
+						: {
+								name: crate.name,
+								packages: crate.packages,
+								manifest: workspaceManifest(cargoManifest!, crate.names),
+							},
+				files: read.map((file) => [file.path, file.mode, file.oid]),
+				after,
+			});
+			return { digest: key };
+		};
+		const files = treeFiles(top);
+		for (const unit of units) {
+			const key = digestOf(unit, files);
+			unit.digest = "digest" in key ? key.digest : null;
+			if (!unit.task.cache) continue;
+			if ("uncached" in key) {
+				io.stderr(`quest: ${unit.name} is not cached, since ${key.uncached}\n`);
+				continue;
+			}
+			const hit = await cache.get(key.digest);
+			if (hit !== undefined) hits.set(unit, hit);
+		}
+	}
 	// A directory this run creates, so no other run's or earlier run's report passes for this one's, and nothing
 	// else is touched; creating it is atomic, so two runs cannot share it.
 	const report = options.report === undefined ? null : resolve(options.report);
@@ -248,7 +543,7 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 	const detached = process.platform !== "win32";
 	if (detached) env[GROUP] = "1";
 
-	const width = Math.max(...tasks.map((task) => task.name.length));
+	const width = Math.max(...units.map((unit) => unit.name.length));
 	const command = (task: ManifestTask): string[] => {
 		// The environment applies inside the dev shell, so the gate and Nix keep the caller's PATH, and before the
 		// task's Bash starts, so it reads a BASH_ENV the task sets. `env` sets it, since a launcher Bash would run an
@@ -256,13 +551,16 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 		const script = ["-eo", "pipefail", "-c", task.run];
 		const variables = Object.entries(task.environment).map(([name, value]) => `${name}=${value}`);
 		const launch = variables.length === 0 ? [] : ["env", ...variables];
-		if (task.nix && programs.nix !== null)
-			return [programs.nix, "develop", top, "--command", ...launch, "bash", ...script];
+		if (develop(task)) return [programs.nix!, "develop", top, "--command", ...launch, "bash", ...script];
 		return [...launch, programs.bash, ...script];
 	};
 
-	const outcomes = new Map<string, Outcome>();
-	const running = new Map<string, ChildProcess>();
+	const outcomes = new Map<Unit, Outcome>();
+	const running = new Map<Unit, ChildProcess>();
+	/** How each unit that passed or ran got its outcome, for the summary: a cached pass, or its run's seconds. */
+	const results = new Map<Unit, "hit" | string>();
+	const writes: Promise<void>[] = [];
+	let writeFailure: unknown;
 	let stopping = false;
 	const cancel = interrupts();
 	/** Signal every task: each gate's whole process group, or on Windows end the gate, whose job ends the rest. */
@@ -294,49 +592,89 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 	try {
 		await new Promise<void>((done) => {
 			const schedule = () => {
-				for (const task of tasks) {
-					if (outcomes.has(task.name) || running.has(task.name)) continue;
-					const before = task.after.map((name) => outcomes.get(name));
-					const blocker = task.after.find((name) => {
-						const outcome = outcomes.get(name);
+				for (const [index, unit] of units.entries()) {
+					if (outcomes.has(unit) || running.has(unit)) continue;
+					const { task } = unit;
+					const before = units.filter((each) => task.after.includes(each.task.name));
+					const blocker = before.find((each) => {
+						const outcome = outcomes.get(each);
 						return outcome !== undefined && outcome !== "passed";
 					});
+					// A task's crates run one at a time, since they share its reports and Cargo's build lock.
+					const previous = units[index - 1]?.task === task ? units[index - 1] : undefined;
 					if (blocker !== undefined) {
-						outcomes.set(task.name, "skipped");
-						io.stderr(`quest: ${task.name} skipped, since ${blocker} did not pass\n`);
-					} else if (!stopping && before.every((outcome) => outcome === "passed")) start(task);
+						outcomes.set(unit, "skipped");
+						io.stderr(`quest: ${unit.name} skipped, since ${blocker.task.name} did not pass\n`);
+					} else if (
+						!stopping &&
+						before.every((each) => outcomes.get(each) === "passed") &&
+						(previous === undefined || outcomes.has(previous))
+					) {
+						const hit = hits.get(unit);
+						if (hit === undefined) start(unit);
+						else replay(unit, hit);
+					}
 				}
 				if (running.size === 0) done();
 			};
-			/** Record how `task` ended, which `schedule` then acts on. */
-			const finish = (task: ManifestTask, outcome: Outcome, line: string) => {
-				outcomes.set(task.name, outcome);
-				io.stderr(`quest: ${task.name} ${outcome}${line}\n`);
+			/** Record how `unit` ended, which `schedule` then acts on. */
+			const finish = (unit: Unit, outcome: Outcome, line: string) => {
+				outcomes.set(unit, outcome);
+				io.stderr(`quest: ${unit.name} ${outcome}${line}\n`);
 				if (outcome === "failed" && options.failFast && !stopping) {
 					stopping = true;
 					signalAll("SIGTERM");
 				}
 			};
-			const start = (task: ManifestTask) => {
+			/**
+			 * Pass `unit` on a recorded pass of the same inputs, writing the reports it recorded where the task declares
+			 * them, so no earlier run's report stands in for them, and under --report.
+			 */
+			const replay = (unit: Unit, hit: TaskResult) => {
+				const destination = reportDir(report, unit);
+				try {
+					for (const { path, name } of declared(unit.task)) {
+						const file = join(top, path);
+						rmSync(file, { force: true });
+						const recorded = hit.reports.find((each) => each.name === name);
+						if (recorded === undefined) continue;
+						mkdirSync(dirname(file), { recursive: true });
+						writeFileSync(file, Buffer.from(recorded.base64, "base64"));
+					}
+					if (destination !== null) {
+						mkdirSync(destination, { recursive: true });
+						for (const { name, base64 } of hit.reports)
+							writeFileSync(join(destination, name), Buffer.from(base64, "base64"));
+					}
+				} catch (error) {
+					finish(unit, "failed", `: cannot copy its cached reports: ${(error as Error).message}`);
+					return;
+				}
+				outcomes.set(unit, "passed");
+				results.set(unit, "hit");
+				io.stderr(`quest: ${unit.name} passed, cached (hit)\n`);
+			};
+			const start = (unit: Unit) => {
+				const { task } = unit;
 				const outputs = declared(task);
 				try {
 					for (const { path } of outputs) rmSync(join(top, path), { force: true });
 				} catch (error) {
-					finish(task, "failed", `: cannot remove an earlier report: ${(error as Error).message}`);
+					finish(unit, "failed", `: cannot remove an earlier report: ${(error as Error).message}`);
 					return;
 				}
 				const started = io.now();
 				const argv = programCommand(programs.quest, ["gate", ...command(task)], io.env);
-				io.stderr(`quest: ${task.name} started\n`);
+				io.stderr(`quest: ${unit.name} started\n`);
 				const child = spawn(argv.file, argv.args, {
 					cwd: top,
-					env,
+					env: unit.crate === null ? env : { ...env, QUEST_CRATE: unit.crate.name },
 					stdio: ["ignore", "pipe", "pipe"],
 					detached,
 					windowsVerbatimArguments: argv.windowsVerbatimArguments,
 				});
-				running.set(task.name, child);
-				const prefix = `${task.name.padEnd(width)} | `;
+				running.set(unit, child);
+				const prefix = `${unit.name.padEnd(width)} | `;
 				const lines = [prefixed(prefix, child.stdout!, io.stdout), prefixed(prefix, child.stderr!, io.stderr)];
 				let failure: string | null = null;
 				child.on("error", (error) => {
@@ -344,19 +682,59 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 				});
 				child.on("close", (code, signal) => {
 					for (const flush of lines) flush();
-					running.delete(task.name);
-					const seconds = ((io.now() - started) / 1000).toFixed(1);
+					running.delete(unit);
+					const seconds = (io.now() - started) / 1000;
+					results.set(unit, `${seconds.toFixed(1)}s`);
 					const status = failure ?? (code === 0 ? null : `exit ${code ?? signal}`);
 					let problems: string[];
+					let reports: TaskResult["reports"] = [];
 					try {
-						problems = collect(top, task, outputs, status === null, report);
+						problems = collect(top, outputs, status === null, reportDir(report, unit));
+						if (status === null && problems.length === 0)
+							reports = outputs.map(({ path, name }) => ({
+								name,
+								base64: readFileSync(join(top, path)).toString("base64"),
+							}));
 					} catch (error) {
 						problems = [`cannot collect its reports: ${(error as Error).message}`];
 					}
-					if (status === null && problems.length === 0) finish(task, "passed", ` in ${seconds}s`);
-					else {
+					if (status === null && problems.length === 0) {
+						finish(unit, "passed", ` in ${seconds.toFixed(1)}s`);
+						// A pass counts for the inputs the digest named only while nothing changed them as the task ran,
+						// such as an edit saved meanwhile.
+						const record = cache !== null && task.cache && unit.digest !== null;
+						// Caught here, since a throw from this handler would end the run while other tasks still run.
+						let changed: string | null = null;
+						if (record)
+							try {
+								const key = digestOf!(unit, treeFiles(top));
+								if (!("digest" in key) || key.digest !== unit.digest)
+									changed = "its inputs changed while it ran";
+							} catch (error) {
+								changed = `its inputs could not be read again: ${(error as Error).message}`;
+							}
+						if (changed !== null) io.stderr(`quest: ${unit.name} is not cached, since ${changed}\n`);
+						else if (record)
+							// Caught at once, so a failed write fails the run once its tasks finish, not the process.
+							writes.push(
+								cache!
+									.set(unit.digest!, {
+										task: task.name,
+										crate: unit.crate?.name ?? null,
+										seconds,
+										reports,
+									})
+									.catch((error: unknown) => {
+										writeFailure ??= error;
+									}),
+							);
+					} else {
 						const why = [...(status === null ? [] : [status]), ...problems].join("; ");
-						finish(task, stopping && status !== null ? "cancelled" : "failed", ` in ${seconds}s: ${why}`);
+						finish(
+							unit,
+							stopping && status !== null ? "cancelled" : "failed",
+							` in ${seconds.toFixed(1)}s: ${why}`,
+						);
 					}
 					schedule();
 				});
@@ -369,13 +747,28 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 		cancel.close();
 	}
 
+	await Promise.all(writes);
+	if (writeFailure !== undefined)
+		throw new Error(
+			`cannot record a pass in the task cache: ${writeFailure instanceof Error ? writeFailure.message : String(writeFailure)}`,
+		);
+
 	const counts = new Map<Outcome, number>();
-	for (const task of tasks) {
-		const outcome = outcomes.get(task.name) ?? "skipped";
+	for (const unit of units) {
+		const outcome = outcomes.get(unit) ?? "skipped";
 		counts.set(outcome, (counts.get(outcome) ?? 0) + 1);
+		const result = results.get(unit);
+		if (result === "hit") io.stderr(`quest: cached (hit) ${unit.name}\n`);
+		else if (result !== undefined)
+			io.stderr(`quest: ran ${unit.name} (${result}${outcome === "passed" ? "" : `, ${outcome}`})\n`);
 	}
+	const cached = [...results.values()].filter((result) => result === "hit").length;
 	io.stderr(
-		`quest: ${OUTCOMES.flatMap((each) => (counts.has(each) ? [`${counts.get(each)} ${each}`] : [])).join(", ")}\n`,
+		`quest: ${OUTCOMES.flatMap((each) =>
+			counts.has(each)
+				? [`${counts.get(each)} ${each}${each === "passed" && cached > 0 ? ` (${cached} cached)` : ""}`]
+				: [],
+		).join(", ")}\n`,
 	);
 	if (cancel.signal.aborted) return cancelled(cancel.signal);
 	return counts.has("failed") || counts.has("cancelled") ? 1 : 0;
@@ -383,6 +776,22 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 
 const OUTCOMES = ["passed", "failed", "cancelled", "skipped"] as const;
 type Outcome = (typeof OUTCOMES)[number];
+
+/** One run of a task: the task itself, or one crate of a Cargo task. */
+interface Unit {
+	task: ManifestTask;
+	crate: CargoCrate | null;
+	/** The task's name, then `:` and the crate's for one crate. */
+	name: string;
+	/** The digest of everything it reads, when the run uses the cache. */
+	digest: string | null;
+}
+
+/** Where `--report` copies `unit`'s reports: `<dir>/<task>`, then `/<crate>` for one crate's. */
+function reportDir(report: string | null, unit: Unit): string | null {
+	if (report === null) return null;
+	return unit.crate === null ? join(report, unit.task.name) : join(report, unit.task.name, unit.crate.name);
+}
 
 /** The reports `task` declares, each with the name `--report` gives its copy. */
 function declared(task: ManifestTask): { path: string; name: string }[] {
@@ -398,10 +807,9 @@ function declared(task: ManifestTask): { path: string; name: string }[] {
  */
 function collect(
 	top: string,
-	task: ManifestTask,
 	outputs: { path: string; name: string }[],
 	passed: boolean,
-	report: string | null,
+	destination: string | null,
 ): string[] {
 	const problems: string[] = [];
 	for (const { path, name } of outputs) {
@@ -420,9 +828,9 @@ function collect(
 			if (typeof metrics !== "object" || metrics === null || Array.isArray(metrics))
 				problems.push(`${path} is not a JSON object`);
 		}
-		if (report !== null) {
-			mkdirSync(join(report, task.name), { recursive: true });
-			copyFileSync(file, join(report, task.name, name));
+		if (destination !== null) {
+			mkdirSync(destination, { recursive: true });
+			copyFileSync(file, join(destination, name));
 		}
 	}
 	return problems;

@@ -370,7 +370,7 @@ export async function recordRounds(
 function runOutcome(reviewed: Reviewed): RunOutcome {
 	if (!passed(reviewed)) return "findings open";
 	if (reviewed.accepted !== undefined) return "findings accepted";
-	return reviewed.rounds.length === 0 ? "passed with no local reviewer" : "passed";
+	return "passed";
 }
 
 /** A run as Kixel Quest stores it, for PR `number` of `repository` into `base`, its head diffed from `mergeBase`. */

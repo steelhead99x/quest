@@ -2,6 +2,7 @@
 // repository, bound to the head's diff from its merge base. The land gate reads the review from them alone; `quest
 // status` still counts a PR body's `## Review` record, which `quest review` once wrote, only where one attests it.
 import {
+	BaseMerges,
 	type PullRequest,
 	type RecordedRisk,
 	REVIEW_MARK,
@@ -15,6 +16,7 @@ import {
 	riskFileId,
 } from "../core";
 import { GitHubDeadline, type GitHubReader, type ObjectValue, array, object, repositoryPath, string } from "./client";
+import { history } from "./history";
 
 /** The commit status context `quest review` sets on each head it records. */
 export const REVIEW_CONTEXT = "quest review";
@@ -112,11 +114,23 @@ export async function statusReview(
 		}
 	};
 	let diff: Promise<string | null> | undefined;
+	// As the land gate counts it (`unreviewedHigh`): a head that only merged the base cleanly since the reviewed commit
+	// keeps that review, though its diff text changed. A failed read of those merges counts as no carry.
+	const merges = new BaseMerges(history(github, pr), sha);
+	const reached = async (oid: string) => {
+		try {
+			return await merges.reaches(oid);
+		} catch (error) {
+			if (error instanceof GitHubDeadline || !(error instanceof Error)) throw error;
+			return false;
+		}
+	};
 	for (const each of await reviewStatuses(github, pr)) {
 		if (each.oid !== sha) {
 			diff ??= diffOf(sha);
 			const own = await diff;
-			if (own === null || (await diffOf(each.oid)) !== own) continue;
+			const same = own !== null && (await diffOf(each.oid)) === own;
+			if (!same && !(await reached(each.oid))) continue;
 		}
 		const bound = await boundStatus(github, pr, each.oid, each.status);
 		if (typeof bound === "string") continue;
@@ -155,10 +169,11 @@ interface ReviewStatus {
 
 /**
  * Why `sha`, the head of `pr` about to land, must wait for a new `quest review` round, or null when it may land.
- * The newest `quest review` status a writer set on a commit of the PR whose diff is the head's decides it: the head
- * lands whatever its tier when that status passed, classified against the base's current risk file, so a round that
- * failed outweighs an earlier pass of the same diff, and any push after the last review that changes the diff, whoever
- * made it, and any change to the base's risk file since, waits for a new one. Otherwise it waits when it is high: when
+ * The newest `quest review` status a writer set on a commit of the PR whose diff is the head's, or that the head only
+ * cleanly merged the base since, decides it: the head lands whatever its tier when that status passed, classified
+ * against the base's current risk file, so a round that failed outweighs an earlier pass of the same diff, and any
+ * push after the last review that changes the diff other than a clean merge of the base, whoever made it, and any
+ * change to the base's risk file since, waits for a new one. Otherwise it waits when it is high: when
  * a `quest review` status on any of the PR's commits rates it high, or when its diff from its merge base with the base
  * touches a path the base's risk file holds high.
  */
@@ -171,11 +186,24 @@ export async function unreviewedHigh(
 	const risk = await baseRisk(github, pr);
 	const statuses = await reviewStatuses(github, pr);
 	let diff: Promise<string | null> | undefined;
+	const merges = new BaseMerges(history(github, pr), head);
+	// Why reading the head's merges of the base failed, which leaves a review they would carry uncounted.
+	let unread: string | undefined;
+	const reached = async (oid: string) => {
+		try {
+			return await merges.reaches(oid);
+		} catch (error) {
+			if (error instanceof GitHubDeadline || !(error instanceof Error)) throw error;
+			unread ??= error.message;
+			return false;
+		}
+	};
 	for (const each of statuses) {
 		if (each.oid !== head) {
 			diff ??= baseDiff(github, pr, head);
 			const own = await diff;
-			if (own === null || (await baseDiff(github, pr, each.oid)) !== own) continue;
+			const same = own !== null && (await baseDiff(github, pr, each.oid)) === own;
+			if (!same && !(await reached(each.oid))) continue;
 		}
 		// Only a writer's status, bound to the diff it reviewed, says anything about the head.
 		const bound = await boundStatus(github, pr, each.oid, each.status);
@@ -184,7 +212,9 @@ export async function unreviewedHigh(
 		break;
 	}
 	const high = statusHigh(statuses) ?? (await pathHigh(github, pr, head, risk?.text ?? null));
-	return high === null ? null : `${sha} is high, since ${high}, and no quest review status covers it`;
+	if (high === null) return null;
+	const why = unread === undefined ? "" : ` (reading its merges of the base failed: ${unread})`;
+	return `${sha} is high, since ${high}, and no quest review status covers it${why}`;
 }
 
 /**

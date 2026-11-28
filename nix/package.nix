@@ -97,6 +97,9 @@ stdenvNoCC.mkDerivation {
 
   nativeBuildInputs = [ bun ];
 
+  # The tarball of a package bun.lock pins, by its lock key, such as the formatter's Prettier.
+  passthru = { inherit tarball; };
+
   configurePhase = ''
     runHook preConfigure
     ${lib.concatMapStrings unpack closure}

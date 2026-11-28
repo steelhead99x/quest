@@ -1,5 +1,6 @@
 // Agent admission: a coordinator starts or resumes an agent only while the host's memory has room
-// for it, and on macOS, whose gate reads no memory, while its gate would admit work at once. It only delays the next start: agents already running are never paused or stopped.
+// for it, and on macOS and Windows, where memory alone cannot bound agents, while its gate would admit
+// work at once. It only delays the next start: agents already running are never paused or stopped.
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 
@@ -14,8 +15,11 @@ import {
 	hostLimits,
 	memoryRoom,
 	processStart,
+	owner,
 	room,
+	sliceUser,
 	type Waiting,
+	usableMemory,
 } from "./gate";
 
 /**
@@ -31,7 +35,7 @@ export interface AdmissionDependencies {
 	limits: Limits;
 	/** The gate's ledger and the host's load and memory. */
 	gate: Host;
-	/** Whether agents also wait for load and the gate's queue: on macOS, where the gate reads no memory. */
+	/** Whether agents also wait for load and the gate's queue: off Linux, where memory alone does not bound them. */
 	load: boolean;
 	/** The agents' ledger; only its clock, ledger, liveness, and sleep are used. */
 	agents: Host;
@@ -95,13 +99,27 @@ export async function admit(deps: AdmissionDependencies, signal: AbortSignal, he
 /** The agents' ledger of this host, beside the gate's. */
 const agentsDirectory = (gate: string) => join(dirname(dirname(gate)), `agents-v${LEDGER_VERSION}`, basename(gate));
 
-/** The admission `quest agent` runs with: the host's own limits and ledgers. */
-export function processAdmission(notice: (text: string) => void): AdmissionDependencies {
+/**
+ * How agents are admitted on a platform: only Linux bounds them by memory alone. macOS's gate reads
+ * no memory and Windows reports no load, so both keep `room`'s count of pending agents and queued
+ * commands against the CPUs. Where the gate runs commands in the user's `background.slice` (see
+ * `sliceUser`), agents read its memory cap with that `uid`, as the gate does.
+ */
+export function admissionMode(platform: NodeJS.Platform, uid: number | undefined): { load: boolean; uid?: number } {
+	return platform === "linux" ? { load: false, uid } : { load: true };
+}
+
+/**
+ * The admission `quest agent` runs with: the host's own limits and ledgers. `env` is the agent's
+ * environment, which decides whether its builds run in the gate's scope or inside an admitted command.
+ */
+export function processAdmission(env: NodeJS.ProcessEnv, notice: (text: string) => void): AdmissionDependencies {
 	const gate = claimDirectory();
+	const { load, uid } = admissionMode(process.platform, sliceUser(owner(env).unit));
 	return {
-		limits: hostLimits(),
-		gate: fileHost(gate),
-		load: process.platform === "darwin",
+		limits: hostLimits(undefined, usableMemory(uid)),
+		gate: fileHost(gate, Date.now, uid),
+		load,
 		agents: fileHost(agentsDirectory(gate)),
 		notice,
 	};

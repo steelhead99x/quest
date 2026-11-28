@@ -28,7 +28,7 @@ Pass `--exclude-model` or `--size` only for a PR whose body cannot hold the reco
 Where the repository's root instructions name other reviewers, pass them with `--harness`, `--model`, and `--effort`, which runs that reviewer alone.
 Each round posts to Kixel Quest, which needs `quest login` on the host, and, on GitHub, sets the head's `quest review` commit status; it leaves the PR body alone. When it printed `record skipped`, run it again once the branch has its PR, since `quest status` counts only a round `quest review` posted, and only a maintainer's: a contributor's own round prints `status skipped`. At `status refused`, or a post Kixel Quest refused, fix what it names, such as pushing the head, and review it again.
 
-`quest review` sets the head's risk tier before any reviewer runs, from who a mistake in the change would reach: a low head gets no local reviewer, only its classification posted, a medium one gets its size's reviewer, and a high one gets a second reviewer from the other vendor beside it.
+`quest review` sets the head's risk tier before any reviewer runs, from who a mistake in the change would reach, then seats reviewers from its `(size + risk)` rung: every low head runs a local reviewer, rungs 0–2 (`XS low/medium/high`, `S low/medium`, `M low`) run one reviewer, and rungs 3–6 (`S high`, `M medium`, `L low` and up) run both Sol and Opus beside each other.
 When the user overrides the tier, pass it with `--override <tier> --reason <their reason>`.
 
 Each round ends with a `next` line: follow it until a round of the head reports no finding you have not refuted; never block on the score.
@@ -42,8 +42,8 @@ At a `next decide` line, which prints once a reviewer's third round still report
 Report what remains, a line per finding with the fix its reviewer recommends, and recommend one of: fix them as recommended, accept them, or drop the PR. The user decides; an agent that cannot prompt hands the PR back with that choice as a `## Waiting` decision.
 Take up a reviewer's recommended approach only on the user's pick. Record it in a PR comment that starts with `Design change:`, and review it with `quest review --new`, which starts new sessions and keeps what the branch already settled.
 
-`quest review` passes a round from a reviewer that is out of quota, logged out, or not installed to the size's next eligible one, and records the skip.
-Once it exits 3, every eligible reviewer is out, an outage rather than a skip: stop reviewing, keep the PR a draft, hand it back, and report the outage.
+On a one-seat rung, `quest review` passes a round from a reviewer that is out of quota, logged out, or not installed to the rung's next eligible one, and records the skip; on a two-seat rung, both seats are required, so either one being unavailable fails as an outage.
+Once it exits 3, a required reviewer or every eligible reviewer is out, an outage rather than a skip: stop reviewing, keep the PR a draft, hand it back, and report the outage.
 Its `## Waiting` item names each reviewer, its error, and the check, such as `Codex: out of quota until 2026-11-03 15:00 UTC; check that quest review runs`, with the reset time `quest review` prints; a logged-out or missing reviewer waits on `Maintainer (PC):`, with the login command `quest review` prints, since the login runs on the reviewer's host.
 Once the reset passes or the login is restored, the item has cleared: whoever finds it runs `/quest-review` on the PR.
 

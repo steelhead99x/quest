@@ -2405,7 +2405,7 @@ function queueSetup(
 	const scopes: boolean[] = [];
 	let latest: boolean | undefined;
 	/** Called as the queue asks for a push or merge token, before it gets one. */
-	const hooks: { token?: (workflows: boolean) => void } = {};
+	const hooks: { token?: (workflows: boolean) => void; pause?: () => void } = {};
 	/** One pass at `minutes` after the first, as the daemon runs it, and GitHub's view after it. */
 	const pass = async (minutes = 0, fix?: FixContext) => {
 		const forged = await forge.deps({ checks: "write", actions: "write" });
@@ -2413,7 +2413,10 @@ function queueSetup(
 			...forged,
 			now: () => now + minutes * 60_000,
 			warn: (message) => void warnings.push(message),
-			sleep: async (delay) => void pauses.push(delay),
+			sleep: async (delay) => {
+				pauses.push(delay);
+				hooks.pause?.();
+			},
 			fetch: (async (input, init) => {
 				if (/\/pulls\/\d+\/merge$/.test(String(input)) && init?.method === "PUT" && latest !== undefined)
 					scopes.push(latest);
@@ -2938,6 +2941,53 @@ describe.skipIf(process.platform === "win32")("the watcher's own queue", () => {
 		expect(forge.comment(1)).toBeUndefined();
 	});
 
+	// A maintainer disarms the PR during a retry's backoff while the commit stays the head, so the pinned
+	// merge would still succeed.
+	test.each([
+		["a stale head after the gate's push", 409, "Head branch was modified", true],
+		["a stale conflict report on the pin", 405, "Pull Request has merge conflicts", true],
+		["a 405 while GitHub recomputes", 405, "Pull Request is not mergeable", true],
+		["a base that moved", 409, "Base branch was modified", false],
+	] as const)(
+		"a pick withdrawn during the backoff of %s merges nothing more",
+		async (_, status, message, prepared) => {
+			const context = setup();
+			const { forge, pass, pauses, hooks } = context;
+			const pull = prepared ? await behind(context) : forge.pull("Plain", { "plain.txt": "yes" });
+			if (!prepared) {
+				await pass();
+				report(forge, 1, "SUCCESS");
+			}
+			const tested = pull.head;
+			pull.mergeRefusals = [{ status, message }];
+			hooks.pause = () => {
+				pull.landing = false;
+				delete pull.autoMerge;
+			};
+			expect(await pass()).toEqual(["refused 1"]);
+			expect(pauses).toEqual([500]);
+			expect(forge.merges).toHaveLength(1);
+			expect(pull.merged).toBeFalsy();
+			// The queue check stays on the head the pick was tested at, which a prepared push moved on from.
+			const check = forge.repo
+				.checkRuns!.filter((run) => run.name === QUEUE_CHECK && run.head_sha === tested)
+				.at(-1)!;
+			expect(`${check.conclusion} ${String(check.output.title)}`).toBe("neutral Left the queue");
+			expect(forge.comment(1)).toBeUndefined();
+		},
+	);
+
+	test("a pick re-armed during the backoff is another pick, and merges nothing more", async () => {
+		const context = setup();
+		const { forge, pass, hooks } = context;
+		const pull = await behind(context);
+		pull.mergeRefusals = [{ status: 409, message: "Head branch was modified" }];
+		hooks.pause = () => void (pull.autoMerge = { ...pull.autoMerge!, enabledAt: "2026-10-26T00:00:59Z" });
+		expect(await pass()).toEqual(["refused 1"]);
+		expect(forge.merges).toHaveLength(1);
+		expect(pull.merged).toBeFalsy();
+	});
+
 	// moq-dev/moq#7407: GitHub still showed the pin after the queue's base-merge push and refused the
 	// merge as conflicting, since that pin conflicts with the base.
 	test("a prepared head's 405 conflict on the stale pin is retried rather than ejected as head_moved", async () => {
@@ -2948,8 +2998,8 @@ describe.skipIf(process.platform === "win32")("the watcher's own queue", () => {
 		pull.mergeRefusals = [{ status: 405, message: "Pull Request has merge conflicts" }];
 		const seen: (string | undefined)[] = [];
 		forge.beforeMerge = () => void seen.push(pull.head);
-		// The first token is the base-merge push; GitHub misses it for the merge and the re-read.
-		hooks.token = () => void ((hooks.token = undefined), (forge.lag = 2));
+		// The first token is the base-merge push; GitHub misses it for the merge, the re-read, and the pick's re-check.
+		hooks.token = () => void ((hooks.token = undefined), (forge.lag = 3));
 		expect(await pass()).toEqual(["landed 1"]);
 		expect(seen[1]).toBe(pin);
 		expect(pauses).toEqual([500]);

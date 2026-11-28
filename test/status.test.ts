@@ -5,7 +5,8 @@ import { GitHubReader } from "../src/github/client";
 import { main } from "../src/cli/main";
 import { statusLines } from "../src/cli/status";
 import { pullRequestStatus, requiredOf } from "../src/github/status";
-import { attestation } from "../src/github/review-trust";
+import { attestation, reviewTarget } from "../src/github/review-trust";
+import { commit, git, gitRoutes, repository } from "./git-history";
 import {
 	A,
 	baseTree,
@@ -876,6 +877,68 @@ describe("the review record", () => {
 
 	test("names no review for a section `quest review` never wrote, such as a skip naming the head", async () => {
 		expect(await line(`## Review\n\nSkipped as trivial at ${A}.`)).toBe("review-record -");
+	});
+
+	test("carries across clean merges of the base, whose diff text changed, read from GitHub's commits", async () => {
+		const lines = (edits: Record<number, string>) =>
+			Array.from({ length: 20 }, (_, i) => `${edits[i + 1] ?? i + 1}\n`).join("");
+		const dir = repository();
+		commit(dir, { "a.txt": lines({}) });
+		git(dir, "switch", "-q", "-c", "pr");
+		const reviewed = commit(dir, { "a.txt": lines({ 5: "ours" }) });
+		const merge = () => {
+			git(dir, "switch", "-q", "main");
+			commit(dir, { "a.txt": git(dir, "show", "HEAD:a.txt").replace(/^(\d+)$/m, "$1 theirs") + "\n" });
+			git(dir, "switch", "-q", "pr");
+			git(dir, "merge", "-q", "--no-edit", "main");
+			return git(dir, "rev-parse", "HEAD");
+		};
+		const from = git(dir, "merge-base", "main", reviewed);
+		const passed = reviewStatus("SUCCESS", `Risk low, risk file ${RISK_ID}: passed`, reviewed);
+		const statuses = { [reviewed]: { ...passed, targetUrl: reviewTarget(pr, from, reviewed) } };
+		const routes = gitRoutes(dir);
+		const read = async (head: string, large = false, body = `${RECORD}- Head: ${reviewed}${RISK}`) => {
+			const warnings: string[] = [];
+			// A diff too large for GitHub to send.
+			const refused = (init?: RequestInit) =>
+				large && new Headers(init?.headers).get("Accept") === "application/vnd.github.diff";
+			const fixture = setup([pull({ head, body, checks: null, reviews: page([]), threads: page([]) })], {
+				statuses,
+				warnings,
+				git: (url, init) =>
+					refused(init) ? Response.json({ message: "too large" }, { status: 406 }) : routes(url, init),
+			});
+			const lines = statusLines(await pullRequestStatus(pr, fixture.deps));
+			return { record: lines.find((l) => l.startsWith("review-record ")), warnings };
+		};
+		const once = merge();
+		expect(git(dir, "diff", `main...${once}`)).not.toBe(git(dir, "diff", `main...${reviewed}`));
+		expect(await read(once)).toEqual({
+			record: `review-record diff-identical ${reviewed} local-review`,
+			warnings: [],
+		});
+		expect(await read(once, true)).toEqual({
+			record: `review-record diff-identical ${reviewed} local-review`,
+			warnings: [],
+		});
+		// As on a fork PR, whose review only its status records: the status carries across the clean merge too.
+		expect(await read(once, false, "Fixes it.")).toEqual({
+			record: `review-record diff-identical ${reviewed} local-review`,
+			warnings: [],
+		});
+		const twice = merge();
+		expect(await read(twice)).toEqual({
+			record: `review-record diff-identical ${reviewed} local-review`,
+			warnings: [],
+		});
+		const pushed = commit(dir, { "b.txt": "b\n" });
+		expect((await read(pushed)).record).toBe(`review-record stale ${reviewed} local-review`);
+		expect(await read(pushed, true)).toEqual({
+			record: `review-record unknown ${reviewed} local-review`,
+			warnings: [
+				`cannot compare ${pushed} with the base (HTTP 406), so whether the review of ${reviewed} carries is unknown`,
+			],
+		});
 	});
 });
 

@@ -23,7 +23,3 @@ Implementation notes:
 - Version reusable workflow calls cleanly by tag/SHA so downstream repos opt in explicitly and never load unreviewed `@main` workflow code with write permissions.
 
 Tests: `actionlint` and `zizmor --offline` pass on all shipped actions and workflows; verify a downstream test workflow calling `setup-nix` and `platform.yml` runs `quest run --tier nightly` and uploads `kixel-metrics`.
-
-## Required
-
-- [quest.lib.mkFlake](/quest/m0/ci/nix-lib.md) - establishes the `nix.kixel.quest` `nixConfig` trusted by `setup-nix`

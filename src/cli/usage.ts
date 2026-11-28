@@ -182,7 +182,7 @@ export interface ReviewerRow {
 	model: string;
 	effort: string;
 	shadow: boolean;
-	/** The second reviewer a high-risk head gets, whose findings show what the second review catches. */
+	/** The second reviewer a two-seat rung gets, whose findings show what the second review catches. */
 	second: boolean;
 	/** PRs whose record tallies this reviewer, each branch counted once, and its findings across every round. */
 	reviewed: number;

@@ -1,12 +1,13 @@
-// The line diff and three-way merge `git merge-file --diff3` runs, ported from
-// git's xdiff (xprepare.c, xdiffi.c, xmerge.c) so the core merges a file
+// The line diffs and three-way merge git runs, ported from git's xdiff
+// (xprepare.c, xdiffi.c, xhistogram.c, xmerge.c) so the core merges a file
 // exactly as git does without spawning it: the merge driver and a merge queue
 // that cannot run git then agree byte for byte.
 //
-// Only the paths `merge-file --diff3` takes are ported: the Myers diff with its
-// default heuristics, no whitespace or indent options, and the merge at
-// XDL_MERGE_EAGER, the most a diff3-style merge refines. Names follow xdiff's
-// so the two can be read side by side.
+// Two diffs are ported: the Myers diff `git merge-file` runs, and the histogram
+// diff `git merge` and GitHub's merges run through merge-ort by default, each
+// with xdiff's default heuristics and no whitespace or indent options. The
+// merge is at XDL_MERGE_EAGER, the most a diff3-style merge refines. Names
+// follow xdiff's so the two can be read side by side.
 
 /** One run of changed lines: `chg1` lines at `i1` in the old file became `chg2` lines at `i2` in the new one. */
 export interface Change {
@@ -85,12 +86,15 @@ class File {
 	}
 }
 
-/** xdl_prepare_env and xdl_optimize_ctxs: classify lines, trim common ends, and discard lines Myers need not see. */
-function prepare(a: string[], b: string[]): [File, File] {
+/** A line diff: Myers, as `git merge-file` runs it, or histogram, as merge-ort does. */
+export type Algorithm = "myers" | "histogram";
+
+/** xdl_prepare_env: each line's class, equal lines sharing one, numbered as they first appear in `a`, then `b`. */
+function classify(a: string[], b: string[]): { x1: File; x2: File; len1: number[]; len2: number[] } {
 	const classes = new Map<string, number>();
 	const len1: number[] = [];
 	const len2: number[] = [];
-	const classify = (lines: string[], counts: number[]) =>
+	const ids = (lines: string[], counts: number[]) =>
 		Int32Array.from(lines, (line) => {
 			let id = classes.get(line);
 			if (id === undefined) {
@@ -102,8 +106,12 @@ function prepare(a: string[], b: string[]): [File, File] {
 			counts[id]++;
 			return id;
 		});
-	const x1 = new File(classify(a, len1));
-	const x2 = new File(classify(b, len2));
+	return { x1: new File(ids(a, len1)), x2: new File(ids(b, len2)), len1, len2 };
+}
+
+/** xdl_prepare_env and xdl_optimize_ctxs for Myers: classify lines, trim common ends, and discard lines Myers need not see. */
+function prepare(a: string[], b: string[]): [File, File] {
+	const { x1, x2, len1, len2 } = classify(a, b);
 
 	// xdl_trim_ends
 	const lim = Math.min(x1.nrec, x2.nrec);
@@ -406,8 +414,12 @@ function groupSlideUp(x: File, g: Group): boolean {
 	return false;
 }
 
-/** xdl_change_compact without the indent heuristic: slide each group of changes down, then back up to meet one in the other file. */
-function compact(x: File, xo: File): void {
+/**
+ * xdl_change_compact without the indent heuristic: slide each group of changes down, then back up to meet one in the
+ * other file. A histogram diff then diffs a group that moved again with Myers, since merging groups may have lined up
+ * equal lines.
+ */
+function compact(x: File, xo: File, algorithm: Algorithm): void {
 	const g = groupInit(x);
 	const go = groupInit(xo);
 	const sync = (moved: boolean) => {
@@ -415,6 +427,7 @@ function compact(x: File, xo: File): void {
 	};
 	for (;;) {
 		if (g.end !== g.start) {
+			const orig = { ...g };
 			let groupsize: number;
 			let earliestEnd: number;
 			let endMatchingOther: number;
@@ -436,21 +449,29 @@ function compact(x: File, xo: File): void {
 					sync(groupPrevious(xo, go));
 				}
 			}
+			if (go.end !== go.start && algorithm === "histogram" && (g.start !== orig.start || g.end !== orig.end))
+				fallBack(x, xo, g.start + 1, g.end - g.start, go.start + 1, go.end - go.start);
 		}
 		if (!groupNext(x, g)) break;
 		sync(groupNext(xo, go));
 	}
 }
 
-/** The changes from `a` to `b`, in order, as `git merge-file` finds them. */
-export function diff(a: string[], b: string[]): Change[] {
+/** The Myers diff of `a` and `b`, before compaction, as xdl_do_diff leaves it. */
+function myers(a: string[], b: string[]): [File, File] {
 	const [x1, x2] = prepare(a, b);
 	const ndiags = x1.nreff + x2.nreff + 3;
 	const kv = { f: new Float64Array(ndiags), b: new Float64Array(ndiags), off: x2.nreff + 1 };
 	const mxcost = Math.max(bogosqrt(ndiags), XDL_MAX_COST_MIN);
 	compare(x1, 0, x1.nreff, x2, 0, x2.nreff, kv, false, mxcost);
-	compact(x1, x2);
-	compact(x2, x1);
+	return [x1, x2];
+}
+
+/** The changes from `a` to `b`, in order, as git's `algorithm` finds them. */
+export function diff(a: string[], b: string[], algorithm: Algorithm = "myers"): Change[] {
+	const [x1, x2] = algorithm === "myers" ? myers(a, b) : histogram(a, b);
+	compact(x1, x2, algorithm);
+	compact(x2, x1, algorithm);
 
 	// xdl_build_script, walking back from the end.
 	const out: Change[] = [];
@@ -464,6 +485,150 @@ export function diff(a: string[], b: string[]): Change[] {
 		}
 	}
 	return out.reverse();
+}
+
+/** Git's histogram diff gave up on a pair of files, so git cannot merge them by lines. */
+export class HistogramFailure extends Error {}
+
+/** xdl_fall_back_diff: Myers over lines `line1` and `line2` on, 1-based, `count1` and `count2` long, uncompacted. */
+function fallBack(x1: File, x2: File, line1: number, count1: number, line2: number, count2: number): void {
+	// Each line's class stands for its text: equal exactly when the lines are.
+	const lines = (x: File, line: number, count: number) =>
+		Array.from(x.ha.subarray(line - 1, line - 1 + count), (id) => `${id}`);
+	const [s1, s2] = myers(lines(x1, line1, count1), lines(x2, line2, count2));
+	for (let i = 0; i < count1; i++) x1.set(line1 - 1 + i, s1.rchg(i));
+	for (let i = 0; i < count2; i++) x2.set(line2 - 1 + i, s2.rchg(i));
+}
+
+/** xhistogram.c's limit on distinct lines sharing a hash bucket, and on how often a line it anchors on occurs. */
+const MAX_CHAIN_LENGTH = 64;
+
+/** A class's occurrences in the range: its first line, 1-based, and how many there are. */
+interface Occurrence {
+	ptr: number;
+	cnt: number;
+}
+
+/** xdl_do_histogram_diff: the histogram diff of `a` and `b` over every line, with no ends trimmed. */
+function histogram(a: string[], b: string[]): [File, File] {
+	const { x1, x2 } = classify(a, b);
+	histogramDiff(x1, x2, 1, x1.nrec, 1, x2.nrec);
+	return [x1, x2];
+}
+
+/** histogram_diff over lines `line1` and `line2` on, 1-based, `count1` and `count2` long. */
+function histogramDiff(x1: File, x2: File, line1: number, count1: number, line2: number, count2: number): void {
+	const all = () => {
+		for (let i = 0; i < count1; i++) x1.set(line1 - 1 + i, 1);
+		for (let i = 0; i < count2; i++) x2.set(line2 - 1 + i, 1);
+	};
+	for (;;) {
+		if (count1 <= 0 && count2 <= 0) return;
+		if (count1 === 0 || count2 === 0) return all();
+		const lcs = findLcs(x1, x2, line1, count1, line2, count2);
+		if (lcs === null) return fallBack(x1, x2, line1, count1, line2, count2);
+		if (lcs.begin1 === 0 && lcs.begin2 === 0) return all();
+		histogramDiff(x1, x2, line1, lcs.begin1 - line1, line2, lcs.begin2 - line2);
+		// The rest after the common run, as git's tail call.
+		count1 = line1 + count1 - 1 - lcs.end1;
+		line1 = lcs.end1 + 1;
+		count2 = line2 + count2 - 1 - lcs.end2;
+		line2 = lcs.end2 + 1;
+	}
+}
+
+/**
+ * find_lcs: the longest common run anchored on the rarest lines the ranges share, all zero when they share none, or
+ * null when every shared line occurs too often to anchor on, so Myers diffs the ranges instead.
+ */
+function findLcs(
+	x1: File,
+	x2: File,
+	line1: number,
+	count1: number,
+	line2: number,
+	count2: number,
+): { begin1: number; end1: number; begin2: number; end2: number } | null {
+	const end1 = line1 + count1 - 1;
+	const end2 = line2 + count2 - 1;
+	// xdl_hashbits and XDL_HASHLONG, so lines share buckets as in git, which gives up on a full bucket.
+	let bits = 0;
+	for (let val = 1; val < count1 && bits < 32; val *= 2) bits++;
+	bits ||= 1;
+	const mask = 2 ** bits - 1;
+	const hash = (id: number) => (id + Math.floor(id / 2 ** bits)) & mask;
+	const buckets: Occurrence[][] = Array.from({ length: 2 ** bits }, () => []);
+	const lineMap: Occurrence[] = new Array(count1);
+	// Each line's next occurrence of its class, 0 for none.
+	const nextPtrs = new Int32Array(count1);
+	const cmp = (l1: number, l2: number) => x1.ha[l1 - 1] === x2.ha[l2 - 1];
+
+	// scanA, from the last line up, so each class's chain starts at its first line.
+	for (let ptr = end1; ptr >= line1; ptr--) {
+		const bucket = buckets[hash(x1.ha[ptr - 1]!)]!;
+		const rec = bucket.find((each) => x1.ha[each.ptr - 1] === x1.ha[ptr - 1]);
+		if (rec !== undefined) {
+			nextPtrs[ptr - line1] = rec.ptr;
+			rec.ptr = ptr;
+			rec.cnt++;
+			lineMap[ptr - line1] = rec;
+			continue;
+		}
+		if (bucket.length === MAX_CHAIN_LENGTH)
+			throw new HistogramFailure("a hash bucket holds too many distinct lines");
+		const created = { ptr, cnt: 1 };
+		// Git's chains list the newest class first.
+		bucket.unshift(created);
+		lineMap[ptr - line1] = created;
+	}
+
+	const lcs = { begin1: 0, end1: 0, begin2: 0, end2: 0 };
+	let cnt = MAX_CHAIN_LENGTH + 1;
+	let hasCommon = false;
+	const occurrences = (ptr: number) => lineMap[ptr - line1]!.cnt;
+	for (let bPtr = line2; bPtr <= end2;) {
+		// try_lcs
+		let bNext = bPtr + 1;
+		for (const rec of buckets[hash(x2.ha[bPtr - 1]!)]!) {
+			if (rec.cnt > cnt) {
+				if (!hasCommon) hasCommon = cmp(rec.ptr, bPtr);
+				continue;
+			}
+			let as = rec.ptr;
+			if (!cmp(as, bPtr)) continue;
+			hasCommon = true;
+			for (;;) {
+				let np = nextPtrs[as - line1]!;
+				let bs = bPtr;
+				let ae = as;
+				let be = bs;
+				let rc = rec.cnt;
+				while (line1 < as && line2 < bs && cmp(as - 1, bs - 1)) {
+					as--;
+					bs--;
+					if (1 < rc) rc = Math.min(rc, occurrences(as));
+				}
+				while (ae < end1 && be < end2 && cmp(ae + 1, be + 1)) {
+					ae++;
+					be++;
+					if (1 < rc) rc = Math.min(rc, occurrences(ae));
+				}
+				if (bNext <= be) bNext = be + 1;
+				if (lcs.end1 - lcs.begin1 < ae - as || rc < cnt) {
+					lcs.begin1 = as;
+					lcs.begin2 = bs;
+					lcs.end1 = ae;
+					lcs.end2 = be;
+					cnt = rc;
+				}
+				while (np !== 0 && np <= ae) np = nextPtrs[np - line1]!;
+				if (np === 0) break;
+				as = np;
+			}
+		}
+		bPtr = bNext;
+	}
+	return hasCommon && MAX_CHAIN_LENGTH < cnt ? null : lcs;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { type AdmissionDependencies, PENDING_MS, admit } from "../src/cli/admission";
+import { type AdmissionDependencies, PENDING_MS, admissionMode, admit } from "../src/cli/admission";
 import { type Admission, type Host, RECENT_MS, SETTLE_MS, fileHost, processStart } from "../src/cli/gate";
 import { tempDir } from "./fixture";
 
@@ -93,12 +93,27 @@ test("agents start whatever the load and the gate's queue, while memory has room
 	expect([await atOnce(), await atOnce()]).toEqual([true, false]);
 });
 
+test("only Linux bounds agents by memory alone, reading the user's background slice as the gate does", () => {
+	expect(admissionMode("linux", 1000)).toEqual({ load: false, uid: 1000 });
+	// macOS and Windows keep `room`, whose CPU count bounds pending agents and queued commands; neither has a slice.
+	expect(admissionMode("darwin", 501)).toEqual({ load: true });
+	expect(admissionMode("win32", undefined)).toEqual({ load: true });
+});
+
 test("on macOS, agents fill the load's headroom as the gate's callers would", async () => {
 	const { state, notices, atOnce } = host(true);
 	state.load = 5;
 	// Load 5 plus 0, 1, and 2 agents not yet building stays under 8 CPUs; a fourth would not.
 	expect([await atOnce(), await atOnce(), await atOnce(), await atOnce()]).toEqual([true, true, true, false]);
 	expect(notices).toEqual(["waiting for CPU load to fall before starting an agent"]);
+});
+
+test("on Windows, which reports no load, pending agents still count against the CPUs", async () => {
+	const { state, atOnce } = host(true);
+	state.load = 0;
+	const admitted: boolean[] = [];
+	for (let agent = 0; agent < 9; agent++) admitted.push(await atOnce());
+	expect(admitted).toEqual([...Array(8).fill(true), false]);
 });
 
 test("on macOS, a queued or running gated command holds agents back as it would another command", async () => {

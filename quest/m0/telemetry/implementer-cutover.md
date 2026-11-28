@@ -2,7 +2,7 @@
 
 ## Goal
 
-The skills stop writing `Implementer:` lines, and whatever read them (iterating on the writer's model, keeping a reviewer no weaker than the writer's model, an armed PR's iterates keeping their cohort and advisor after a resize) reads the writer from Kixel Quest's `writers` read instead.
+The skills stop writing `Implementer:` lines, and whatever read them (iterating on the writer's model, keeping a reviewer no weaker than the writer's model, an armed PR's iterates keeping their cohort and advisor after a resize) reads the writer from Kixel Quest's `writers` read instead, typed as `Writer` in `src/core/forge.ts`.
 `## Models` keeps its `Size:` line, which starting and reviewing need.
 
 ## Plan
@@ -21,4 +21,3 @@ Tests: an iterate routes to the writer Kixel Quest reports; an armed PR's iterat
 ## Required
 
 - [Sessions](/quest/m0/telemetry/sessions.md) - records that carry the routing decision, cohort and advisor included
-- [Writers call](/quest/m0/telemetry/writers-call.md) - the typed read of each PR's writers

@@ -155,6 +155,8 @@ export function setup(
 		mergeBase?: number;
 		/** Each login's permission on the repository, or the status GitHub refuses it with; by default `maintainer` is an admin. */
 		permissions?: Record<string, string | number>;
+		/** A real repository answering commit, tree, blob, and comparison requests first. */
+		git?: (url: URL, init?: RequestInit) => Response | undefined;
 	} = {},
 ) {
 	const queries: Record<string, unknown>[] = [];
@@ -175,6 +177,12 @@ export function setup(
 		warn: (message) => options.warnings?.push(message),
 		fetch: async (url, init) => {
 			const path = new URL(String(url));
+			const routed = options.git?.(path, init);
+			if (routed) return routed;
+			// Without a repository, every commit is an ordinary one, merging nothing.
+			const read = /^\/repos\/example\/project\/git\/commits\/(\w+)$/.exec(path.pathname);
+			if (read)
+				return Response.json({ sha: read[1], tree: { sha: "0".repeat(40) }, parents: [{ sha: MERGE_BASE }] });
 			if (path.pathname === "/repos/fork/project/activity") {
 				activityRequests.push(`${path.pathname}${path.search}`);
 				const page = activityPages.shift();
