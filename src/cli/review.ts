@@ -2559,6 +2559,23 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 			// A deferral an earlier unposted acceptance left goes once, as this one's.
 			return [...carried.filter((left) => !deferred.some((each) => sameFinding(each, left))), ...deferred];
 		};
+		const unsent = () => {
+			const deferred = last.flatMap((round) => {
+				const posted = sessions.find((session) => session.last === round)?.posted;
+				return posted === undefined
+					? []
+					: round.findings.map((_, i) => ({
+							...posted,
+							harness: round.reviewer,
+							session: round.session,
+							round: round.round,
+							finding: i + 1,
+							outcome: "deferred" as const,
+							reason: options.accept!,
+						}));
+			});
+			return [...carried.filter((left) => !deferred.some((each) => sameFinding(each, left))), ...deferred];
+		};
 		return {
 			rounds: last.map((round) => ({ ...round, usage: [], unchanged: true })),
 			tallies,
@@ -2570,22 +2587,11 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 			sized,
 			accepted: options.accept,
 			outcomes,
-			// Run once the acceptance is attested, which is after its post. An acceptance attested on a PR Kixel Quest
-			// does not serve posts nothing, so the branch keeps what the post would have carried to the PRs it does
-			// serve, for the next post: the outcomes left before, and the deferrals of findings posted elsewhere.
+			// Run once the acceptance is attested, which is after its post. An acceptance attested where nothing was
+			// posted keeps, for the next post, every outcome left before and the deferral of each accepted finding whose
+			// round was posted, on the PR it was posted on, which may be the one attested if it was served then.
 			remember: (unposted) =>
-				save(
-					statePath,
-					state(
-						sessions,
-						tallies,
-						risk,
-						kept,
-						unposted === undefined
-							? []
-							: outcomes(unposted).filter((outcome) => !samePull(outcome, unposted)),
-					),
-				),
+				save(statePath, state(sessions, tallies, risk, kept, unposted === undefined ? [] : unsent())),
 		};
 	}
 	if (!named && !settling && risk.tier === "low") {

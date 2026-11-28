@@ -123,6 +123,8 @@ async function openPull(
 			fork: boolean;
 			/** The PR's body as it is now. */
 			body(): Promise<string>;
+			/** The merge base GitHub finds for `head` with the PR's base, as the land gate binds the status to; null when it cannot compare them. */
+			mergeBase(head: string): Promise<string | null>;
 			/** Set the `quest review` status on `head`, for its diff from the merge base `from`, or say why not. */
 			attest(status: {
 				head: string;
@@ -198,6 +200,15 @@ async function openPull(
 							await github.client.request(`${repositoryPath(repository)}/pulls/${pull.number}`)
 						).json(),
 					).body as string | null) ?? ""),
+		mergeBase: async (sha) => {
+			if (github === null) return null;
+			const response = await github.client.request(
+				`${repositoryPath(repository)}/compare/${encodeURIComponent(base)}...${sha}?per_page=1`,
+				{ allow: [404, 422] },
+			);
+			if (!response.ok) return null;
+			return String(object(object(await response.json()).merge_base_commit).sha);
+		},
 		// The status goes on the person's own token, which the land gate counts only when it can push. Another forge
 		// has no commit statuses here, and counts only a writer's post.
 		attest: async ({ head: sha, from, state, description }) => {
@@ -298,24 +309,39 @@ export async function recordRounds(
 				outcome,
 			),
 		});
+	// The fork's base is the remote's configured name, which a rewritten fetch URL, such as a mirror, may not serve, so
+	// the merge base this checkout reviewed from must be the one the fork's land gate binds the status to.
+	if (pull.fork) {
+		const theirs = await pull.mergeBase(reviewed.head);
+		if (theirs !== null && theirs !== mergeBase)
+			return {
+				url: pull.url,
+				status: {
+					refused: `GitHub's merge base of ${reviewed.head} with ${pull.repository}'s ${pull.base} is ${theirs}, but this checkout reviewed it from ${mergeBase}; fetch ${pull.base} from ${pull.repository} itself, then review it again`,
+				},
+			};
+	}
+	const at = { repository: pull.repository, number: pull.number };
+	// With nothing to post, the run's status is set once, as it ends.
+	if (unposted !== null) {
+		const post = { post: { skipped: unposted, at } };
+		const status = await attest(outcome === "findings open" ? "failure" : "success");
+		return status === null ? { url: pull.url, ...post } : { url: pull.url, status, ...post };
+	}
 	const status = await attest("failure");
 	// An acceptance no status records has not happened, so nothing posts it.
 	if (status !== null && reviewed.accepted !== undefined) return { url: pull.url, status };
-	const at = { repository: pull.repository, number: pull.number };
-	if (unposted === null) {
-		await postReviews(url, token, deps.fetch, {
-			runs: [reviewRun(reviewed, { ...at, base: pull.base, mergeBase })],
-			outcomes: reviewed.outcomes(at),
-		});
-		reviewed.posted?.(at);
-	}
-	const post = unposted === null ? {} : { post: { skipped: unposted, at } };
+	await postReviews(url, token, deps.fetch, {
+		runs: [reviewRun(reviewed, { ...at, base: pull.base, mergeBase })],
+		outcomes: reviewed.outcomes(at),
+	});
+	reviewed.posted?.(at);
 	// A status the token could not set before would fail the same way again.
 	if (status === null && outcome !== "findings open") {
 		const passed = await attest("success");
-		if (passed !== null) return { url: pull.url, status: passed, ...post };
+		if (passed !== null) return { url: pull.url, status: passed };
 	}
-	return status === null ? { url: pull.url, ...post } : { url: pull.url, status, ...post };
+	return status === null ? { url: pull.url } : { url: pull.url, status };
 }
 
 /** How a run left its head, as its status and post name it. */

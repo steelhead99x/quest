@@ -848,7 +848,7 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 					// `quest review` posts its runs to Kixel Quest alone, so GitHub holds no review newer than a body record.
 					if (forge instanceof GitHubForge)
 						warn(
-							"read from GitHub, which holds no review quest review posted to Kixel Quest: review-record, risk, and class show only a PR body's ## Review record an earlier quest wrote",
+							"read from GitHub, which holds no review quest review posted to Kixel Quest: review-record, risk, and class show a PR body's ## Review record an earlier quest wrote, else what the head's quest review commit statuses attest",
 						);
 					return forge.status(pr);
 				})

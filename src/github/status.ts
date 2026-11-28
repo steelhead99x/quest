@@ -192,19 +192,21 @@ export async function pullRequestStatus(
 		localReview: trusted.localReview,
 	};
 	status.risk = risk(recorded, head, status.reviewRecord);
-	// With no record in the body, a writer's passing status on the head still attests its review by itself, as on a fork
-	// PR Kixel Quest does not serve, which the land gate counts the same way.
-	if (status.reviewRecord === null && recorded === null && first!.state === "OPEN") {
+	// With no record that covers the head, the `quest review` statuses still attest its review by themselves, as on a
+	// fork PR Kixel Quest does not serve, picked as the land gate picks them; a current one outranks a stale record.
+	const covered = status.reviewRecord?.state === "current" || status.reviewRecord?.state === "diff-identical";
+	if (!covered && first!.state === "OPEN") {
 		const attested = await statusReview(github, { ...pr, base: baseRef }, head, baseRiskFile(first!));
 		if (attested !== null) {
-			status.reviewRecord = { state: "current", head, localReview: attested.localReview };
+			status.reviewRecord = { state: attested.state, head: attested.head, localReview: attested.localReview };
 			const tier = attested.tier as Tier;
 			status.risk = {
 				tier,
-				reason: `the ${REVIEW_CONTEXT} status on the head attests it`,
+				reason: `the ${REVIEW_CONTEXT} status on ${attested.head} attests it`,
+				// The status names only the tier that holds, so the classifier's own is taken to be it.
 				classified: tier,
 				class: attested.class,
-				state: "current",
+				state: attested.state,
 			};
 		}
 	}

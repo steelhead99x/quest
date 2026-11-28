@@ -1378,6 +1378,9 @@ function onGitHub(
 	statuses: { sha: string; state: string; context: string; description: string; target_url: string }[];
 	/** The repository each of `statuses` was set in. */
 	attestedIn: string[];
+	forkMergeBase: string | undefined;
+	/** The repositories Kixel Quest serves. */
+	served: string[];
 	posts: ReviewUpload[];
 } {
 	const upstreamPulls = pulls;
@@ -1389,6 +1392,8 @@ function onGitHub(
 		statuses: [] as { sha: string; state: string; context: string; description: string; target_url: string }[],
 		attestedIn: [] as string[],
 		posts: [] as ReviewUpload[],
+		forkMergeBase: undefined as string | undefined,
+		served: [`${fork ? "upstream" : "acme"}/widget`],
 	});
 	const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 	const info = (login: string, parent: string | null) => ({
@@ -1407,7 +1412,7 @@ function onGitHub(
 		if (url.origin === KIXEL) {
 			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret");
 			// It serves the repository, whose reads QUEST_FORGE keeps on GitHub.
-			if (url.pathname === "/forge") return json({ login: "agent", repositories: [`${owner}/widget`] });
+			if (url.pathname === "/forge") return json({ login: "agent", repositories: writes.served });
 			if (url.pathname === "/reviews" && init?.method === "POST") {
 				const upload = parseReviews(JSON.parse(String(init.body)));
 				writes.posts.push(upload);
@@ -1448,6 +1453,15 @@ function onGitHub(
 			holding.find((p) => p.number === Number(patched[1]))!.body = body;
 			return json({});
 		}
+		// GitHub's merge base for a fork PR's head, by default the checkout's own; `forkMergeBase` stands in for a fork
+		// whose base moved past what the checkout fetched.
+		const compared = /^\/repos\/acme\/widget\/compare\/main\.\.\.([0-9a-f]{40})$/.exec(url.pathname);
+		if (compared && fork)
+			return json({
+				merge_base_commit: {
+					sha: writes.forkMergeBase ?? git(repo, "merge-base", "origin/main", compared[1]!),
+				},
+			});
 		const attested = /^\/repos\/(acme|upstream)\/widget\/statuses\/([0-9a-f]{40})$/.exec(url.pathname);
 		if (attested && (attested[1] === owner || fork) && init?.method === "POST") {
 			writes.statuses.push({ sha: attested[2]!, ...JSON.parse(String(init.body)) });
@@ -2628,11 +2642,22 @@ fakes(
 			);
 			expect(writes.posts).toEqual([]);
 			const head = git(s.repo, "rev-parse", "HEAD");
+			// With nothing to post, the status is set once, as the run ends.
 			expect(writes.statuses.map(({ sha, state }) => ({ sha, state }))).toEqual([
-				{ sha: head, state: "failure" },
 				{ sha: head, state: "success" },
 			]);
-			expect(writes.attestedIn).toEqual(["acme/widget", "acme/widget"]);
+			expect(writes.attestedIn).toEqual(["acme/widget"]);
+
+			// A fetch that reads another base than the fork's, as through a mirror behind it, sets no status GitHub's
+			// merge base would not bind.
+			writes.forkMergeBase = "e".repeat(40);
+			const mirrored = await quest("--root", s.repo, "review");
+			expect(mirrored.code).toBe(1);
+			expect(mirrored.stdout).toContain(
+				`; status refused: GitHub's merge base of ${head} with acme/widget's main is ${"e".repeat(40)}, but this checkout reviewed it from `,
+			);
+			expect(writes.statuses).toHaveLength(1);
+			writes.forkMergeBase = undefined;
 			expect(writes.statuses[0]!.target_url).toMatch(/^https:\/\/github\.com\/acme\/widget\/compare\//);
 
 			// A remote that fetches upstream and pushes to the fork reads upstream's base, which the fork's PR may not
@@ -2652,7 +2677,7 @@ fakes(
 			expect(split.stdout).toContain(
 				"record skipped: no open PR from feature into main in upstream/widget; for a PR into acme/widget, pass a base on a remote that fetches from it\n",
 			);
-			expect(writes.attestedIn).toHaveLength(2);
+			expect(writes.attestedIn).toHaveLength(1);
 		} finally {
 			vi.unstubAllGlobals();
 		}
@@ -3215,6 +3240,31 @@ fakes(
 		}
 	},
 );
+
+fakes("an acceptance on a fork PR Kixel Quest no longer serves keeps its deferrals for that PR", async () => {
+	const s = setup();
+	const own: FakePull[] = [{ number: 5, body: "" }];
+	const writes = onGitHub(s.repo, [], true, own);
+	writes.served.push("acme/widget");
+	try {
+		const first = await quest("--root", s.repo, "review");
+		expect(first.code, first.stderr).toBe(0);
+		expect(first.stdout).toContain("record https://github.com/acme/widget/pull/5\n");
+		expect(writes.posts).toHaveLength(1);
+		writes.served.pop();
+		const accepted = await quest("--root", s.repo, "review", "--accept", "Fine.");
+		expect(accepted.code, accepted.stderr).toBe(0);
+		expect(accepted.stdout).toContain("; post skipped: ");
+		const saved = JSON.parse(readFileSync(sessionFile(join(s.repo, ".git"), "feature"), "utf8")) as {
+			pending?: unknown[];
+		};
+		expect(saved.pending).toEqual([
+			expect.objectContaining({ repository: "acme/widget", number: 5, finding: 1, outcome: "deferred" }),
+		]);
+	} finally {
+		vi.unstubAllGlobals();
+	}
+});
 
 fakes(
 	"the outcomes a failed post settled reach Kixel Quest with the round's repeat, on the PR that holds them",

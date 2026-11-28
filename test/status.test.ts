@@ -1012,12 +1012,14 @@ describe("whose review record counts", () => {
 
 	test("reads the status of the last full SHA, so a land fixer's head or a hand-written line needs its own", async () => {
 		const open = `Fixes it.\n\n## Review\n\nmechanical fix by codex: merged (head ${A})\n\n${REVIEW_MARK}\n\n- Head: ${B.slice(0, 12)}, named in full once no reviewer reports a finding${RISK}`;
-		expect(await read(open, { statuses: { [B]: passed(B) } })).toMatchObject({
+		// B's status covers another diff than the head's, so it attests nothing by itself either.
+		const diffs = { [A]: "new", [B]: "old" };
+		expect(await read(open, { statuses: { [B]: passed(B) }, diffs })).toMatchObject({
 			record: "review-record -",
 			warnings: untrusted(`${A} has no quest review status`),
 		});
 		const added = record(B, `${RISK}\n- Low findings fixed at ${C}`);
-		expect((await read(added, { statuses: { [B]: passed(B) } })).warnings).toEqual(
+		expect((await read(added, { statuses: { [B]: passed(B) }, diffs })).warnings).toEqual(
 			untrusted(`${C} has no quest review status`),
 		);
 	});
@@ -1037,7 +1039,7 @@ describe("whose review record counts", () => {
 
 	test("reads no status for a section that names no full SHA, only the head's own", async () => {
 		const skipped = await read("## Review\n\nSkipped.", { statuses: {} });
-		expect(skipped.fixture.statusQueries).toEqual([A]);
+		expect(skipped.fixture.statusQueries).toEqual([]);
 		expect(skipped.fixture.permissionRequests).toEqual([]);
 		expect(skipped.record).toBe("review-record -");
 	});
@@ -1046,11 +1048,30 @@ describe("whose review record counts", () => {
 		// As on a fork PR Kixel Quest does not serve, whose review only its status records.
 		expect(await read("Fixes it.", { statuses: { [A]: passed(A) } })).toMatchObject({
 			record: `review-record current ${A} local-review`,
-			risk: "risk low current low the quest review status on the head attests it",
+			risk: `risk low current low the quest review status on ${A} attests it`,
 			warnings: [],
 		});
 		const high = reviewStatus("SUCCESS", `Risk high, class test, risk file ${RISK_ID}: passed`, A);
 		expect((await read("Fixes it.", { statuses: { [A]: high } })).risk).toMatch(/^risk high current high /);
+		// A passing status on an earlier commit of the same diff carries, as the land gate carries it, unless a newer
+		// round of that diff failed.
+		const earlier = { [B]: passed(B) };
+		expect(await read("Fixes it.", { statuses: earlier, diffs: { [A]: "same", [B]: "same" } })).toMatchObject({
+			record: `review-record diff-identical ${B} local-review`,
+		});
+		const failedSince = {
+			[B]: passed(B),
+			[A]: reviewStatus("FAILURE", `Risk low, risk file ${RISK_ID}: findings open`, A),
+		};
+		expect((await read("Fixes it.", { statuses: failedSince, diffs: { [A]: "same", [B]: "same" } })).record).toBe(
+			"review-record -",
+		);
+		// A current status outranks a body record of another diff.
+		const stale = `## Review\n\n${REVIEW_MARK}\n\n- Head: ${B}${RISK}`;
+		expect(
+			(await read(stale, { statuses: { [B]: passed(B), [A]: passed(A) }, diffs: { [A]: "new", [B]: "old" } }))
+				.record,
+		).toBe(`review-record current ${A} local-review`);
 		// The same checks as the land gate's: a failing status, a reader's, or one against another risk file counts for nothing.
 		for (const status of [
 			reviewStatus("FAILURE", `Risk low, risk file ${RISK_ID}: findings open`, A),
