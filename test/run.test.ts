@@ -1,18 +1,27 @@
 // quest run: picking tasks from a change, running them in their order through the gate and the Nix dev shell,
 // and collecting their reports.
-import { execFileSync, spawnSync } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { hostname } from "node:os";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
+import { tryLock } from "../src/cli/file-lock";
 import { main } from "../src/cli/main";
 import { REFERENCE_LINE } from "../src/core";
 import { type RunOptions, nativeOs, run } from "../src/cli/run";
 import { initRepository, tempDir } from "./fixture";
+
+// Report claims must work on filesystems without hard links, such as SMB and FUSE mounts, which refuse a link.
+vi.mock("node:fs", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:fs")>()),
+	linkSync: () => {
+		throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });
+	},
+}));
 
 // The stubs are shell scripts.
 const posix = process.platform !== "win32";
@@ -53,11 +62,12 @@ function stubs(): { bin: string; log: string } {
 	return { bin, log };
 }
 
+const entry = fileURLToPath(new URL("../src/cli/bin.ts", import.meta.url));
+const config = fileURLToPath(new URL("../bunfig.toml", import.meta.url));
+
 /** A PATH directory whose `quest` runs this checkout's CLI, for the real gate. */
 function realQuest(): string {
 	const bin = tempDir();
-	const entry = fileURLToPath(new URL("../src/cli/bin.ts", import.meta.url));
-	const config = fileURLToPath(new URL("../bunfig.toml", import.meta.url));
 	writeFileSync(
 		join(bin, "quest"),
 		`#!/bin/sh\nexec ${quote(process.execPath)} --config=${quote(config)} ${quote(entry)} "$@"\n`,
@@ -415,38 +425,81 @@ test.runIf(posix)("refuses to run another operating system's tasks, which --quer
 	expect(JSON.parse(query.stdout).include).toEqual([expect.objectContaining({ task: "port", os: other })]);
 });
 
-test.runIf(posix)("a second run in the same checkout cannot take over a running task's reports", async () => {
-	// Each run writes its own name to the shared report path, then takes a while to finish.
-	const dir = repository({ "quest.toml": task("unit", 'echo "$RUN" > unit.xml; sleep 1', 'junit = "unit.xml"') });
-	const first = join(tempDir(), "first");
-	const a = runIn(dir, { all: true, report: first }, { RUN: "a" });
-	await new Promise((done) => setTimeout(done, 300));
+/** A process that holds the lock on `file` until it is killed, once it holds it. */
+async function holder(file: string): Promise<ChildProcess> {
+	const lock = JSON.stringify(fileURLToPath(new URL("../src/cli/file-lock.ts", import.meta.url)));
+	const script = `if (!require(${lock}).tryLock(${JSON.stringify(file)})) process.exit(3); console.log("held"); setInterval(() => {}, 1 << 30);`;
+	const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+	await new Promise<void>((done, fail) => {
+		child.stdout!.once("data", () => done());
+		child.once("exit", (code) => fail(new Error(`the holder exited with ${code}`)));
+	});
+	return child;
+}
+
+async function kill(child: ChildProcess): Promise<void> {
+	const exited = new Promise((done) => child.once("exit", done));
+	child.kill("SIGKILL");
+	await exited;
+}
+
+test("a file lock refuses while its holder lives, and frees once the holder is killed", async () => {
+	const file = join(tempDir(), "lock");
+	const other = await holder(file);
+	expect(tryLock(file)).toBeNull();
+	await kill(other);
+	const lock = tryLock(file);
+	expect(lock).not.toBeNull();
+	// The lock belongs to the open file, so even its own process cannot take it twice.
+	expect(tryLock(file)).toBeNull();
+	lock!.release();
+	tryLock(file)!.release();
+});
+
+test.runIf(posix)("a run refuses a report path another process claims, until that process is gone", async () => {
+	const dir = repository({ "quest.toml": task("unit", "echo ok > Unit.xml", 'junit = "Unit.xml"') });
+	const claims = join(dir, ".git", "quest-run-reports");
+	mkdirSync(claims, { recursive: true });
+	// Paths compare without case.
+	const other = await holder(join(claims, createHash("sha256").update("unit.xml").digest("hex").slice(0, 32)));
 	const refused = join(tempDir(), "refused");
-	await expect(runIn(dir, { all: true, report: refused }, { RUN: "b" })).rejects.toThrow(
-		"another quest run in this checkout is writing unit.xml",
+	await expect(runIn(dir, { all: true, report: refused })).rejects.toThrow(
+		"another quest run in this checkout, or a task one started that still runs, is writing Unit.xml; wait for it " +
+			"to finish, or stop the processes holding ",
 	);
 	// A refused run creates no --report directory, so the same one can be named again.
 	expect(existsSync(refused)).toBe(false);
-	expect((await a).code).toBe(0);
-	expect(readFileSync(join(first, "unit", "junit.xml"), "utf8")).toBe("a\n");
-	// Once the first run ends, the next one may write the report.
-	expect((await runIn(dir, { all: true }, { RUN: "b" })).code).toBe(0);
-	expect(readFileSync(join(dir, "unit.xml"), "utf8")).toBe("b\n");
+	// A killed holder leaves nothing to clean up, whatever host it ran on or whichever process reuses its ID.
+	await kill(other);
+	expect((await runIn(dir, { all: true, report: refused })).code).toBe(0);
+	expect(readFileSync(join(refused, "unit", "junit.xml"), "utf8")).toBe("ok\n");
 });
 
-test.runIf(posix)("a claim left by a run that died is taken over", async () => {
-	const dir = repository({ "quest.toml": task("unit", "echo ok > Unit.xml", 'junit = "Unit.xml"') });
-	// The claim of a process that has exited, as a killed run leaves it; paths compare without case.
-	const dead = spawnSync("true").pid!;
-	const claims = join(dir, ".git", "quest-run-reports");
-	mkdirSync(claims, { recursive: true });
-	const claim = join(claims, createHash("sha256").update("unit.xml").digest("hex").slice(0, 32));
-	writeFileSync(claim, `${hostname()} ${dead}`);
-	const out = await runIn(dir, { all: true });
-	expect(out.code, out.stderr).toBe(0);
-	// The run releases its claims when it ends.
-	expect(execFileSync("ls", ["-A", claims], { encoding: "utf8" })).toBe("");
-	// A claim from another host sharing the checkout can't be checked, so it counts as live.
-	writeFileSync(claim, `elsewhere.example ${dead}`);
-	await expect(runIn(dir, { all: true })).rejects.toThrow(`(process ${dead} on elsewhere.example)`);
+test.runIf(posix)("a task an earlier run started keeps its reports claimed after that run is killed", async () => {
+	const fifo = join(tempDir(), "fifo");
+	execFileSync("mkfifo", [fifo]);
+	// The stub gate execs the task, so its Bash holds the claim on descriptor 3; it closes it before saying so, which
+	// tells the test the claim is free without a sleep.
+	const script = 'echo "$RUN" > unit.xml; echo started; cat "$FIFO" > /dev/null; exec 3>&-; echo done > "$FIFO"';
+	const dir = repository({ "quest.toml": task("unit", script, 'junit = "unit.xml"') });
+	const { bin } = stubs();
+	const launcher = spawn(process.execPath, [`--config=${config}`, entry, "run", "--all"], {
+		cwd: dir,
+		env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RUN: "a", FIFO: fifo },
+		stdio: ["ignore", "pipe", "inherit"],
+	});
+	await new Promise<void>((done) =>
+		launcher.stdout!.on("data", (chunk) => String(chunk).includes("started") && done()),
+	);
+	// The task runs on in a process group of its own, as a force-stopped run leaves it.
+	await kill(launcher);
+	await expect(runIn(dir, { all: true }, { RUN: "b" })).rejects.toThrow("is writing unit.xml");
+	await writeFile(fifo, "");
+	expect(await readFile(fifo, "utf8")).toBe("done\n");
+	// The retry's task reads and writes a plain file instead, so it does not wait.
+	const plain = join(tempDir(), "plain");
+	writeFileSync(plain, "");
+	const retry = await runIn(dir, { all: true }, { RUN: "b", FIFO: plain });
+	expect(retry.code, retry.stderr).toBe(0);
+	expect(readFileSync(join(dir, "unit.xml"), "utf8")).toBe("b\n");
 });

@@ -3,19 +3,7 @@
 // running at once.
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { hostname } from "node:os";
-import {
-	copyFileSync,
-	existsSync,
-	lstatSync,
-	mkdirSync,
-	readFileSync,
-	realpathSync,
-	renameSync,
-	rmSync,
-	writeFileSync,
-	linkSync,
-} from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import {
@@ -27,6 +15,7 @@ import {
 	parseQuestManifest,
 	pickTasks,
 } from "../core";
+import { tryLock } from "./file-lock";
 import { git } from "./git";
 import { GROUP, cancelled, follow, interrupts, requested } from "./interrupt";
 import { programCommand, requireProgram } from "./program";
@@ -222,9 +211,9 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 	// else is touched; creating it is atomic, so two runs cannot share it.
 	const report = options.report === undefined ? null : resolve(options.report);
 	// Another run in this checkout would delete or overwrite the same report files mid-task, so its reports would
-	// pass for this run's; this run holds the report paths of the tasks it picked until they end. It claims them
-	// before creating --report's directory, so a refused run leaves nothing behind.
-	const release = holdReports(
+	// pass for this run's; this run, and each task writing a report, holds that report's path until they end. It
+	// claims them before creating --report's directory, so a refused run leaves nothing behind.
+	const { locks, release } = holdReports(
 		top,
 		tasks.flatMap((task) => declared(task).map((output) => output.path)),
 	);
@@ -328,10 +317,13 @@ export async function run(options: RunOptions, io: RunIO): Promise<number> {
 				const started = io.now();
 				const argv = programCommand(programs.quest, ["gate", ...command(task)], io.env);
 				io.stderr(`quest: ${task.name} started\n`);
+				// The gate inherits its reports' locks, so a gate this run started, which outlives a killed run in a
+				// process group of its own, keeps a retry from taking its reports until it and its command end.
+				const inherited = outputs.flatMap(({ path }) => locks.get(path.toLowerCase()) ?? []);
 				const child = spawn(argv.file, argv.args, {
 					cwd: top,
 					env,
-					stdio: ["ignore", "pipe", "pipe"],
+					stdio: ["ignore", "pipe", "pipe", ...inherited],
 					detached,
 					windowsVerbatimArguments: argv.windowsVerbatimArguments,
 				});
@@ -444,89 +436,36 @@ function prefixed(prefix: string, stream: NodeJS.ReadableStream, write: (text: s
 }
 
 /**
- * Claim `paths`, each a report path from the repository root, for this process until the returned function releases
- * them. A claim is a file under the checkout's git directory naming its host and process, linked into place whole so
- * no run reads it half-written; a claim from this host whose process has exited is stale and taken over, and one
- * from another host sharing the checkout counts as live. Paths compare without case, as macOS and Windows checkouts
- * name files.
+ * Claim `paths`, each a report path from the repository root, until the returned function releases them, returning
+ * the descriptors that hold each path's claim, by lowercased path, for the tasks that write it to inherit. A claim is
+ * an OS lock on a file under the checkout's git directory, which the kernel drops once its last holder exits, so a
+ * killed run leaves none behind. The files stay, since a run could lock one that another had already deleted and
+ * replaced. Paths compare without case, as macOS and Windows checkouts name files.
  */
-function holdReports(top: string, paths: string[]): () => void {
+function holdReports(top: string, paths: string[]): { locks: Map<string, number>; release: () => void } {
 	const dir = resolve(top, git(top, ["rev-parse", "--git-path", "quest-run-reports"]));
 	mkdirSync(dir, { recursive: true });
-	const me = `${hostname()} ${process.pid}`;
-	const held: string[] = [];
+	const held: (() => void)[] = [];
+	const locks = new Map<string, number>();
 	const release = () => {
-		for (const file of held.splice(0))
-			try {
-				if (readFileSync(file, "utf8") === me) rmSync(file, { force: true });
-			} catch {
-				// Already gone.
-			}
+		for (const unlock of held.splice(0)) unlock();
 	};
-	const mine = join(dir, `.${process.pid}-${Date.now()}`);
-	writeFileSync(mine, me);
 	try {
 		for (const path of [...new Set(paths.map((path) => path.toLowerCase()))].sort()) {
 			const file = join(dir, createHash("sha256").update(path).digest("hex").slice(0, 32));
-			const busy = (owner: string) =>
-				new Error(
-					`another quest run in this checkout is writing ${paths.find((each) => each.toLowerCase() === path)} ` +
-						`(process ${owner.split(" ").reverse().join(" on ")}); wait for it to finish, or delete ${file} if it is gone`,
+			const lock = tryLock(file);
+			if (lock === null)
+				throw new Error(
+					`another quest run in this checkout, or a task one started that still runs, is writing ` +
+						`${paths.find((each) => each.toLowerCase() === path)}; wait for it to finish, or stop the ` +
+						`processes holding ${file} open`,
 				);
-			for (let attempt = 0; ; attempt++) {
-				try {
-					linkSync(mine, file);
-					held.push(file);
-					break;
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 2) throw error;
-				}
-				let seen: string;
-				try {
-					seen = readFileSync(file, "utf8");
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-					throw error;
-				}
-				const [host, pid] = seen.split(" ");
-				if (host !== hostname() || alive(Number(pid))) throw busy(seen);
-				// Take the stale claim over by moving it aside, which only one run can do, and keep that only if what
-				// moved is the dead claim read above: another run may have taken it over and claimed it since.
-				const aside = `${file}.${process.pid}`;
-				try {
-					renameSync(file, aside);
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-					throw error;
-				}
-				const moved = readFileSync(aside, "utf8");
-				if (moved !== seen) {
-					try {
-						linkSync(aside, file);
-					} finally {
-						rmSync(aside, { force: true });
-					}
-					throw busy(moved);
-				}
-				rmSync(aside, { force: true });
-			}
+			held.push(lock.release);
+			if (lock.fd !== null) locks.set(path, lock.fd);
 		}
 	} catch (error) {
 		release();
 		throw error;
-	} finally {
-		rmSync(mine, { force: true });
 	}
-	return release;
-}
-
-/** Whether process `pid` still runs; EPERM means it runs as another user. */
-function alive(pid: number): boolean {
-	if (!Number.isInteger(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
+	return { locks, release };
 }
