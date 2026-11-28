@@ -8,7 +8,16 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { Android } from "../device/android.ts";
-import { type Baseline, baseline, baselineName, compare, type DeviceReport, markdown, run } from "../device/bench.ts";
+import {
+	type Baseline,
+	baseline,
+	baselineName,
+	compare,
+	type DeviceReport,
+	type Failure,
+	markdown,
+	run,
+} from "../device/bench.ts";
 import type { Driver } from "../device/driver.ts";
 import { Ipad } from "../device/ipad.ts";
 import { shell } from "../device/shell.ts";
@@ -64,23 +73,28 @@ for (const kind of devices) {
 	}
 }
 
-const failed = [];
+const failed: Failure[] = [];
+const unbaselined: { model: string; path: string }[] = [];
 const uncompared: string[] = [];
 const recorded: string[] = [];
 for (const report of reports) {
 	const file = join(BASELINES, baselineName(report.device));
 	if (values.record) {
 		mkdirSync(BASELINES, { recursive: true });
-		const was = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Baseline) : undefined;
+		// Only a page without warm timings needs the earlier baseline, so a damaged file doesn't block a full recording.
+		const needs = report.pages.some((p) => Object.keys(p.warm).length === 0);
+		const was = needs && existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Baseline) : undefined;
 		writeFileSync(file, JSON.stringify(baseline(report, new Date().toISOString(), was), null, "\t") + "\n");
 		console.error(`Recorded ${file}`);
 		recorded.push(report.device.model);
 	} else if (existsSync(file)) {
-		failed.push(...compare(JSON.parse(readFileSync(file, "utf8")) as Baseline, report));
+		const found = compare(JSON.parse(readFileSync(file, "utf8")) as Baseline, report);
+		failed.push(...found.regressions);
+		unbaselined.push(...found.unbaselined.map((path) => ({ model: report.device.model, path })));
 	} else {
 		console.error(`No baseline for ${report.device.model} at ${file}; run with --record to make one.`);
 		uncompared.push(report.device.model);
 	}
 }
-process.stdout.write(markdown(reports, failed, uncompared, recorded));
+process.stdout.write(markdown(reports, { failed, unbaselined, uncompared, recorded }));
 if (failed.length) process.exit(1);

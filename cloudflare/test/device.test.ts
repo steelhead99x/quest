@@ -203,7 +203,7 @@ describe("bench", () => {
 		expect(driver.calls.filter((call) => call.startsWith("warm"))).toHaveLength(3);
 		expect(report.pages[0]!.warm.load?.runs).toBe(3);
 		expect(report.pages[0]!.uncontrolled).toBe(1);
-		expect(markdown([report], [])).toContain("- `/`: 1 of 4 warm loads skipped, as no service worker took control");
+		expect(markdown([report])).toContain("- `/`: 1 of 4 warm loads skipped, as no service worker took control");
 		// Too few warm loads to estimate spread keep the cold results, flagged, and neither compare nor record warm ones.
 		const few = await run(fake(device(), [load({ load: 900 })], [true, false, true]), {
 			urls: ["https://q.dev/"],
@@ -212,11 +212,18 @@ describe("bench", () => {
 		});
 		expect(few.pages[0]!.cold.load?.median).toBe(900);
 		expect(few.pages[0]!.warm).toEqual({});
-		expect(markdown([few], [])).toContain("| 900 / 900 ms | n/a |");
-		expect(markdown([few], [])).toContain("too few remain to summarize");
+		expect(markdown([few])).toContain("| 900 / 900 ms | n/a |");
+		expect(markdown([few])).toContain("too few remain to summarize");
 		const base = baseline(report, "2026-11-25T00:00:00Z");
-		expect(compare(base, few).map((f) => `${f.phase} ${f.regression.metric}`)).toEqual(["cold load"]);
+		expect(compare(base, few).regressions.map((f) => `${f.phase} ${f.regression.metric}`)).toEqual(["cold load"]);
 		expect(baseline(few, "2026-11-26T00:00:00Z", base).pages["/"]!.warm).toEqual(base.pages["/"]!.warm);
+		// A first recording with too few warm loads stores none, and a later full run says its warm loads went unchecked.
+		const empty = baseline(few, "2026-11-26T00:00:00Z");
+		const later = compare(empty, report);
+		expect(later).toEqual({ regressions: [], unbaselined: ["/"] });
+		const prompt = markdown([report], { unbaselined: [{ model: "SM-A166B", path: "/" }] });
+		expect(prompt).toContain("`/` on SM-A166B: the stored baseline has no warm timings");
+		expect(prompt).toContain("run with --record");
 		const otherBrowser = { ...few, device: { ...few.device, browser: "Chrome/143.0" } };
 		expect(baseline(otherBrowser, "2026-11-26T00:00:00Z", base).pages["/"]!.warm).toEqual({});
 	});
@@ -268,9 +275,9 @@ describe("bench", () => {
 			runs: 3,
 			save: null,
 		});
-		const found = compare(base, slower);
+		const found = compare(base, slower).regressions;
 		expect(found.map((f) => `${f.phase} ${f.regression.metric}`)).toEqual(["cold load", "warm load"]);
-		expect(markdown([slower], found)).toContain("`/` cold load: 300 to 900 (allowed +30)");
+		expect(markdown([slower], { failed: found })).toContain("`/` cold load: 300 to 900 (allowed +30)");
 		const other = await run(fake(device({ browser: "Chrome/143.0" }), [load()]), {
 			urls: ["https://q.dev/"],
 			runs: 3,
@@ -288,20 +295,20 @@ describe("bench", () => {
 				save: null,
 			},
 		);
-		const md = markdown([report], []);
+		const md = markdown([report]);
 		expect(md).toContain(
 			"| `/` | first paint 200 / 200 ms | 300 / 300 ms | 300 / 300 ms | 12 / 12 ms | 20000 | yes | yes | agree |",
 		);
 		expect(md).toContain("- Not measured: text size: by hand");
 		expect(md).toContain("No regressions");
-		expect(markdown([report], [], [report.device.model])).toContain("No baseline comparison was run.");
+		expect(markdown([report], { uncompared: [report.device.model] })).toContain("No baseline comparison was run.");
 		// With two devices and one baseline, the report names the one that wasn't compared.
 		const other = { ...report, device: { ...report.device, model: "iPad Air" } };
-		const partly = markdown([report, other], [], ["iPad Air"]);
+		const partly = markdown([report, other], { uncompared: ["iPad Air"] });
 		expect(partly).toContain("Not compared, with no stored baseline: iPad Air.");
 		expect(partly).toContain("No regressions in the baselines compared.");
 		// --record compares nothing, and says the baseline now exists.
-		const recorded = markdown([report], [], [], [report.device.model]);
+		const recorded = markdown([report], { recorded: [report.device.model] });
 		expect(recorded).toContain(`Recorded a baseline for ${report.device.model}`);
 		expect(recorded).not.toContain("no stored baseline");
 		expect(recorded).toContain("No baseline comparison was run.");
@@ -310,7 +317,7 @@ describe("bench", () => {
 			...p,
 			installable: { ...p.installable, offline: "notice" as const },
 		}));
-		const notice = markdown([{ ...report, pages }], []);
+		const notice = markdown([{ ...report, pages }]);
 		expect(notice).toContain("| yes | notice only | agree |");
 	});
 

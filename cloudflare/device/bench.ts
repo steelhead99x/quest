@@ -159,24 +159,37 @@ export function baseline(report: DeviceReport, recorded: string, was?: Baseline)
 	};
 }
 
+/** A metric of one page that grew past its baseline. */
+export interface Failure {
+	path: string;
+	phase: string;
+	regression: Regression;
+}
+
+/** What comparing a device's run with its baseline found. */
+export interface Comparison {
+	regressions: Failure[];
+	/** Pages whose stored baseline has no warm timings, so their warm loads went unchecked. */
+	unbaselined: string[];
+}
+
 /** Each page's regressions against the baseline, refusing one from a different browser or OS. */
-export function compare(
-	base: Baseline,
-	report: DeviceReport,
-): { path: string; phase: string; regression: Regression }[] {
+export function compare(base: Baseline, report: DeviceReport): Comparison {
 	if (base.device.os !== report.device.os || base.device.browser !== report.device.browser)
 		throw new Error(
 			`the baseline was recorded on ${base.device.os}, ${base.device.browser}; this device runs ${report.device.os}, ${report.device.browser}. Record a new baseline.`,
 		);
-	const out: { path: string; phase: string; regression: Regression }[] = [];
+	const out: Comparison = { regressions: [], unbaselined: [] };
 	for (const page of report.pages) {
 		const was = base.pages[page.path];
 		if (!was) continue;
+		// A baseline recorded with too few warm loads has none, which would otherwise pass unremarked.
+		if (Object.keys(was.warm).length === 0) out.unbaselined.push(page.path);
 		for (const phase of ["cold", "warm"] as const) {
 			// An undersampled warm phase, which the report flags, has nothing to compare.
 			if (phase === "warm" && Object.keys(page.warm).length === 0) continue;
 			for (const regression of regressions(was[phase], page[phase], FLOORS))
-				out.push({ path: page.path, phase, regression });
+				out.regressions.push({ path: page.path, phase, regression });
 		}
 	}
 	return out;
@@ -185,11 +198,20 @@ export function compare(
 /** The report as Markdown for a PR's `## Validation`. */
 export function markdown(
 	reports: DeviceReport[],
-	failed: { path: string; phase: string; regression: Regression }[],
-	/** The models with no stored baseline, which nothing was compared with. */
-	uncompared: string[] = [],
-	/** The models whose baseline this run recorded (`--record`), which it didn't compare. */
-	recorded: string[] = [],
+	{
+		failed = [],
+		unbaselined = [],
+		uncompared = [],
+		recorded = [],
+	}: {
+		failed?: Failure[];
+		/** Pages compared with a baseline that has no warm timings, by device model. */
+		unbaselined?: { model: string; path: string }[];
+		/** The models with no stored baseline, which nothing was compared with. */
+		uncompared?: string[];
+		/** The models whose baseline this run recorded (`--record`), which it didn't compare. */
+		recorded?: string[];
+	} = {},
 ) {
 	const lines: string[] = [];
 	const ms = (s: Summary | undefined) => (s ? `${Math.round(s.median)} / ${Math.round(s.p95)} ms` : "n/a");
@@ -229,6 +251,11 @@ export function markdown(
 		lines.push("No baseline comparison was run.");
 		return lines.join("\n") + "\n";
 	}
+	for (const { model, path } of unbaselined)
+		lines.push(
+			`\`${path}\` on ${model}: the stored baseline has no warm timings, so its warm loads were not compared; run with --record once a service worker controls at least three warm loads.`,
+			"",
+		);
 	if (failed.length) {
 		lines.push("Regressions against the stored baseline:", "");
 		for (const { path, phase, regression: r } of failed)

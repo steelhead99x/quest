@@ -20,7 +20,8 @@ service worker to control the page; when none takes control within ten
 seconds, that warm load is skipped and the report counts it. A page left
 with fewer than three warm loads reports its cold results only, and is
 neither compared nor recorded warm (`--record` keeps its earlier warm
-baseline). For each it reports the median and 95th percentile of first
+baseline); a page whose stored baseline has no warm timings says so and asks
+for a new `--record`. For each it reports the median and 95th percentile of first
 contentful paint, load, the Worker's own time from `Server-Timing`, and
 bytes transferred, whether it installs to the home screen and opens
 offline, and light and dark screenshots. The page's own Navigation Timing
