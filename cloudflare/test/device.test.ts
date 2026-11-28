@@ -42,9 +42,10 @@ const device = (overrides: Partial<DeviceInfo> = {}): DeviceInfo => ({
 });
 
 /** A driver whose loads come from a list, so every run is deterministic. */
-function fake(info: DeviceInfo, loads: Load[]): Driver & { calls: string[] } {
+function fake(info: DeviceInfo, loads: Load[], controls: boolean[] = [true]): Driver & { calls: string[] } {
 	const calls: string[] = [];
 	let i = 0;
+	let c = 0;
 	return {
 		calls,
 		info: async () => info,
@@ -52,6 +53,10 @@ function fake(info: DeviceInfo, loads: Load[]): Driver & { calls: string[] } {
 			calls.push(`${cold ? "cold" : "warm"} ${url}`);
 			const l = loads[i++ % loads.length]!;
 			return { ...l, url: l.url || url };
+		},
+		controlled: async () => {
+			calls.push("controlled");
+			return controls[c++ % controls.length]!;
 		},
 		installable: async () => ({ manifest: true, serviceWorker: true, offline: "page" as const, errors: [] }),
 		screenshot: async (_, dark) => new Uint8Array([dark ? 1 : 0]),
@@ -179,8 +184,8 @@ describe("bench", () => {
 			save: async (name) => (saved.push(name), name),
 		});
 		expect(driver.calls).toEqual([
-			...Array(3).fill(["cold https://q.dev/", "warm https://q.dev/"]).flat(),
-			...Array(3).fill(["cold https://q.dev/repos/x", "warm https://q.dev/repos/x"]).flat(),
+			...Array(3).fill(["cold https://q.dev/", "controlled", "warm https://q.dev/"]).flat(),
+			...Array(3).fill(["cold https://q.dev/repos/x", "controlled", "warm https://q.dev/repos/x"]).flat(),
 		]);
 		expect(saved).toEqual([
 			"android-sm-a166b-root-light.png",
@@ -190,6 +195,37 @@ describe("bench", () => {
 		]);
 		expect(report.pages.map((p) => p.path)).toEqual(["/", "/repos/x"]);
 		expect(report.pages[0]!.cold.load).toEqual({ median: 300, p95: 300, spread: 0, runs: 3 });
+	});
+
+	test("skips a warm load the service worker never took control of", async () => {
+		const driver = fake(device(), [load()], [true, false, true, true]);
+		const report = await run(driver, { urls: ["https://q.dev/"], runs: 4, save: null });
+		expect(driver.calls.filter((call) => call.startsWith("warm"))).toHaveLength(3);
+		expect(report.pages[0]!.warm.load?.runs).toBe(3);
+		expect(report.pages[0]!.uncontrolled).toBe(1);
+		expect(markdown([report])).toContain("- `/`: 1 of 4 warm loads skipped, as no service worker took control");
+		// Too few warm loads to estimate spread keep the cold results, flagged, and neither compare nor record warm ones.
+		const few = await run(fake(device(), [load({ load: 900 })], [true, false, true]), {
+			urls: ["https://q.dev/"],
+			runs: 3,
+			save: null,
+		});
+		expect(few.pages[0]!.cold.load?.median).toBe(900);
+		expect(few.pages[0]!.warm).toEqual({});
+		expect(markdown([few])).toContain("| 900 / 900 ms | n/a |");
+		expect(markdown([few])).toContain("too few remain to summarize");
+		const base = baseline(report, "2026-11-25T00:00:00Z");
+		expect(compare(base, few).regressions.map((f) => `${f.phase} ${f.regression.metric}`)).toEqual(["cold load"]);
+		expect(baseline(few, "2026-11-26T00:00:00Z", base).pages["/"]!.warm).toEqual(base.pages["/"]!.warm);
+		// A first recording with too few warm loads stores none, and a later full run says its warm loads went unchecked.
+		const empty = baseline(few, "2026-11-26T00:00:00Z");
+		const later = compare(empty, report);
+		expect(later).toEqual({ regressions: [], unbaselined: ["/"] });
+		const prompt = markdown([report], { unbaselined: [{ model: "SM-A166B", path: "/" }] });
+		expect(prompt).toContain("`/` on SM-A166B: the stored baseline has no warm timings");
+		expect(prompt).toContain("rerun --record with every URL the stored baseline covers");
+		const otherBrowser = { ...few, device: { ...few.device, browser: "Chrome/143.0" } };
+		expect(baseline(otherBrowser, "2026-11-26T00:00:00Z", base).pages["/"]!.warm).toEqual({});
 	});
 
 	test.each([
@@ -239,9 +275,9 @@ describe("bench", () => {
 			runs: 3,
 			save: null,
 		});
-		const found = compare(base, slower);
+		const found = compare(base, slower).regressions;
 		expect(found.map((f) => `${f.phase} ${f.regression.metric}`)).toEqual(["cold load", "warm load"]);
-		expect(markdown([slower], found)).toContain("`/` cold load: 300 to 900 (allowed +30)");
+		expect(markdown([slower], { failed: found })).toContain("`/` cold load: 300 to 900 (allowed +30)");
 		const other = await run(fake(device({ browser: "Chrome/143.0" }), [load()]), {
 			urls: ["https://q.dev/"],
 			runs: 3,
@@ -259,20 +295,20 @@ describe("bench", () => {
 				save: null,
 			},
 		);
-		const md = markdown([report], []);
+		const md = markdown([report]);
 		expect(md).toContain(
 			"| `/` | first paint 200 / 200 ms | 300 / 300 ms | 300 / 300 ms | 12 / 12 ms | 20000 | yes | yes | agree |",
 		);
 		expect(md).toContain("- Not measured: text size: by hand");
 		expect(md).toContain("No regressions");
-		expect(markdown([report], [], [report.device.model])).toContain("No baseline comparison was run.");
+		expect(markdown([report], { uncompared: [report.device.model] })).toContain("No baseline comparison was run.");
 		// With two devices and one baseline, the report names the one that wasn't compared.
 		const other = { ...report, device: { ...report.device, model: "iPad Air" } };
-		const partly = markdown([report, other], [], ["iPad Air"]);
+		const partly = markdown([report, other], { uncompared: ["iPad Air"] });
 		expect(partly).toContain("Not compared, with no stored baseline: iPad Air.");
 		expect(partly).toContain("No regressions in the baselines compared.");
 		// --record compares nothing, and says the baseline now exists.
-		const recorded = markdown([report], [], [], [report.device.model]);
+		const recorded = markdown([report], { recorded: [report.device.model] });
 		expect(recorded).toContain(`Recorded a baseline for ${report.device.model}`);
 		expect(recorded).not.toContain("no stored baseline");
 		expect(recorded).toContain("No baseline comparison was run.");
@@ -281,7 +317,7 @@ describe("bench", () => {
 			...p,
 			installable: { ...p.installable, offline: "notice" as const },
 		}));
-		const notice = markdown([{ ...report, pages }], []);
+		const notice = markdown([{ ...report, pages }]);
 		expect(notice).toContain("| yes | notice only | agree |");
 	});
 

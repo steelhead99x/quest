@@ -62,6 +62,8 @@ export interface Driver {
 	info(): Promise<DeviceInfo>;
 	/** Load `url`; `cold` clears the browser's cache and the site's storage first. */
 	load(url: string, cold: boolean): Promise<Load>;
+	/** Whether a service worker controls the page now shown, waiting for it as CONTROLLED_SCRIPT does. */
+	controlled(): Promise<boolean>;
 	installable(url: string): Promise<Installable>;
 	/** A PNG of the page in the given colour scheme. */
 	screenshot(url: string, dark: boolean): Promise<Uint8Array>;

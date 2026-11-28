@@ -153,6 +153,10 @@ export class Android implements Driver {
 		return this.navigate(page, url);
 	}
 
+	async controlled(): Promise<boolean> {
+		return (await this.evaluate(await this.connect(), CONTROLLED_SCRIPT, true)) === true;
+	}
+
 	async installable(url: string): Promise<Installable> {
 		const page = await this.connect();
 		await this.navigate(page, url);

@@ -2,7 +2,7 @@ import { type Context as HonoContext, Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { authorizeUrl, type Config, exchange, type Refreshed, refreshed, revoke } from "./auth.ts";
 import { CALLBACK } from "./github/app.ts";
-import { type Fetch, GitHub, GitHubError, Malformed, Spent } from "./github/client.ts";
+import { type Fetch, GitHub, GitHubError, Malformed, Oversized, Spent, Unreachable } from "./github/client.ts";
 import { repositories } from "./github/repos.ts";
 import { load, NotFound, type Tree } from "./board/load.ts";
 import { board, lookup } from "./board/model.ts";
@@ -200,7 +200,14 @@ export function app(deps: Deps): App {
 		const b = await boardFor(c, deps);
 		if (b instanceof Response) return b;
 		const prefix = `/repos/${c.req.param("owner")}/${c.req.param("name")}/`;
-		const page = decodeURIComponent(new URL(c.req.url).pathname.slice(prefix.length));
+		let page: string;
+		try {
+			page = decodeURIComponent(new URL(c.req.url).pathname.slice(prefix.length));
+		} catch (error) {
+			// A stray `%`, such as in `100%-done`, names no quest.
+			if (error instanceof URIError) return page404(c);
+			throw error;
+		}
 		const doc = lookup(b, page);
 		if (!doc) return page404(c);
 		const path = new URL(c.req.url).pathname;
@@ -224,8 +231,22 @@ export function app(deps: Deps): App {
 				);
 			} catch (error) {
 				// The App may not be installed where the PR lives; the quest still shows, with its CI on GitHub.
-				if (!(error instanceof GitHubError) || error.status === 401) throw error;
-				ci = <CiElsewhere repository={repository} link={`${pull.url}/checks`} />;
+				// Any other failure the board's panel can show, it shows here too.
+				ci =
+					error instanceof GitHubError &&
+					(error.status === 404 || (error.status === 403 && !rateLimited(error))) ? (
+						<CiElsewhere repository={repository} link={`${pull.url}/checks`} />
+					) : (
+						<RunList
+							title="CI"
+							runs={[]}
+							more={false}
+							error={ciFailure(error)}
+							repository={repository}
+							next={path}
+							link={`${pull.url}/checks`}
+						/>
+					);
 			}
 		}
 		return c.html(
@@ -364,12 +385,18 @@ export function app(deps: Deps): App {
 function ciFailure(error: unknown): string {
 	if (error instanceof Spent) return `Listing the workflow runs too: ${error.message}.`;
 	if (error instanceof Malformed) return `GitHub's list of workflow runs was unreadable: ${error.message}.`;
+	if (error instanceof Unreachable) return "GitHub didn't answer for the workflow runs; try again shortly.";
+	if (error instanceof Oversized) return `GitHub's list of workflow runs was too large to read: ${error.message}.`;
 	if (!(error instanceof GitHubError) || error.status === 401) throw error;
-	if (error.status === 403 && /rate limit/i.test(error.message))
-		return "GitHub is rate-limiting requests for the workflow runs; try again shortly.";
+	if (rateLimited(error)) return "GitHub is rate-limiting requests for the workflow runs; try again shortly.";
 	return error.status === 403 || error.status === 404
 		? `GitHub refused this repository's workflow runs (${error.status}).`
 		: `GitHub couldn't list this repository's workflow runs (${error.status}).`;
+}
+
+/** A 429, or a 403 that is GitHub's rate limit, primary or secondary, rather than a refusal. */
+function rateLimited(error: GitHubError): boolean {
+	return error.status === 429 || (error.status === 403 && /rate limit/i.test(error.message));
 }
 
 function user(s: Session | null): User | null {
