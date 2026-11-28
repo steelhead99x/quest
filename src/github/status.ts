@@ -29,12 +29,13 @@ import {
 	recordedRisk,
 	reviewSection,
 	riskFileId,
+	type Tier,
 } from "../core";
 import { readHoldStatus } from "./hold";
 import { readSignals, requiredPosters } from "./signals";
 import { login } from "./online-review";
 import { duplicateQuests } from "./duplicates";
-import { trustedReview } from "./review-trust";
+import { REVIEW_CONTEXT, statusReview, trustedReview } from "./review-trust";
 
 /**
  * One query covers the PR; each connection pages by its own cursor, and a
@@ -191,6 +192,22 @@ export async function pullRequestStatus(
 		localReview: trusted.localReview,
 	};
 	status.risk = risk(recorded, head, status.reviewRecord);
+	// With no record in the body, a writer's passing status on the head still attests its review by itself, as on a fork
+	// PR Kixel Quest does not serve, which the land gate counts the same way.
+	if (status.reviewRecord === null && recorded === null && first!.state === "OPEN") {
+		const attested = await statusReview(github, { ...pr, base: baseRef }, head, baseRiskFile(first!));
+		if (attested !== null) {
+			status.reviewRecord = { state: "current", head, localReview: attested.localReview };
+			const tier = attested.tier as Tier;
+			status.risk = {
+				tier,
+				reason: `the ${REVIEW_CONTEXT} status on the head attests it`,
+				classified: tier,
+				class: attested.class,
+				state: "current",
+			};
+		}
+	}
 	if (status.autoMerge !== null) status.autoMerge.head = await enabledHead(github, first!, deps.warn);
 	const signaled = (await readSignals(github, pr, [pr.number])).get(pr.number)!;
 	if (signaled.head !== first!.headRefOid)

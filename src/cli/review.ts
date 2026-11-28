@@ -507,8 +507,11 @@ export interface Reviewed {
 	 * its rounds to; and those a failed post left for a later one.
 	 */
 	outcomes: (at: PostedOn) => FindingOutcome[];
-	/** Keeps the accepted findings among those the branch settled; for the caller to run once the acceptance is attested. */
-	remember?: () => void;
+	/**
+	 * Keeps the accepted findings among those the branch settled; for the caller to run once the acceptance is attested.
+	 * `unposted` names the PR it was attested on when nothing was posted there, so the outcomes are kept for a later post.
+	 */
+	remember?: (unposted?: PostedOn) => void;
 	/** Marks the run's rounds as posted on PR `at`, so the next run settles their findings there; for the caller to run once they are. */
 	posted?: (at: PostedOn) => void;
 }
@@ -520,6 +523,14 @@ export interface PostedOn {
 }
 
 const samePull = (a: PostedOn, b: PostedOn) => a.repository === b.repository && a.number === b.number;
+
+/** Whether two outcomes settle the same finding of the same posted round. */
+const sameFinding = (a: FindingOutcome, b: FindingOutcome) =>
+	samePull(a, b) &&
+	a.harness === b.harness &&
+	a.session === b.session &&
+	a.round === b.round &&
+	a.finding === b.finding;
 
 /**
  * A branch's review sessions, one per reviewer, kept in the clone's common Git directory so every worktree
@@ -2529,9 +2540,8 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 		// Kixel Quest stores no outcome of an accepted finding, so it keeps one left to later work: on the PR this run
 		// posts the rounds to, which holds them even when an earlier post failed, and on a since-replaced PR that
 		// holds them too.
-		const outcomes = (at: PostedOn) => [
-			...carried,
-			...last.flatMap((round) => {
+		const outcomes = (at: PostedOn) => {
+			const deferred = last.flatMap((round) => {
 				const posted = sessions.find((session) => session.last === round)?.posted;
 				const prs = posted === undefined || samePull(posted, at) ? [at] : [at, posted];
 				return prs.flatMap((pr) =>
@@ -2545,8 +2555,10 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 						reason: options.accept!,
 					})),
 				);
-			}),
-		];
+			});
+			// A deferral an earlier unposted acceptance left goes once, as this one's.
+			return [...carried.filter((left) => !deferred.some((each) => sameFinding(each, left))), ...deferred];
+		};
 		return {
 			rounds: last.map((round) => ({ ...round, usage: [], unchanged: true })),
 			tallies,
@@ -2558,8 +2570,22 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 			sized,
 			accepted: options.accept,
 			outcomes,
-			// Run once the acceptance is attested, which is after its post.
-			remember: () => save(statePath, state(sessions, tallies, risk, kept)),
+			// Run once the acceptance is attested, which is after its post. An acceptance attested on a PR Kixel Quest
+			// does not serve posts nothing, so the branch keeps what the post would have carried to the PRs it does
+			// serve, for the next post: the outcomes left before, and the deferrals of findings posted elsewhere.
+			remember: (unposted) =>
+				save(
+					statePath,
+					state(
+						sessions,
+						tallies,
+						risk,
+						kept,
+						unposted === undefined
+							? []
+							: outcomes(unposted).filter((outcome) => !samePull(outcome, unposted)),
+					),
+				),
 		};
 	}
 	if (!named && !settling && risk.tier === "low") {
@@ -2665,7 +2691,10 @@ export async function review(options: ReviewOptions, deps: ReviewDependencies): 
 		past,
 		done.map((each) => each.round),
 	);
-	const outcomes = [...carried, ...done.flatMap((each, i) => settledOutcomes(seats[i]!, each.round))];
+	const settled = done.flatMap((each, i) => settledOutcomes(seats[i]!, each.round));
+	// A finding this run settles again, as one an unposted acceptance deferred and a round since fixed, takes the newer
+	// outcome alone, since a post settles each finding once.
+	const outcomes = [...carried.filter((left) => !settled.some((each) => sameFinding(each, left))), ...settled];
 	// Until a post carries them, the branch keeps the outcomes, for the next run to post.
 	const store = (at: PostedOn | null) =>
 		save(

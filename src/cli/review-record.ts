@@ -21,7 +21,7 @@ import { object, repositoryPath } from "../github/client";
 import { REVIEW_CONTEXT, attestation, reviewTarget } from "../github/review-trust";
 import { git } from "./git";
 import { contains } from "./land";
-import { requireRemote } from "./github";
+import { remoteRepository, requireRemote } from "./github";
 import { type ForgeDependencies, KixelQuest } from "./forge";
 import { kixelUrl, requireToken } from "./tokens";
 import { type PullModels, type Reviewed, type Round, SEVERITIES, type Tally, parseBase } from "./review";
@@ -87,7 +87,14 @@ export const passed = ({ rounds, tallies, accepted }: Pick<Reviewed, "rounds" | 
  * Where a run's record went: the PR it was posted for, and why its status was not set, skipped for a token that cannot
  * push, whose status would count for nothing, else refused; or why nothing was posted.
  */
-export type Recorded = { url: string; status?: Unattested; post?: { skipped: string } } | { skipped: string };
+export type Recorded =
+	| {
+			url: string;
+			status?: Unattested;
+			/** Why nothing was posted, and the PR the run would have been posted on, as Kixel Quest names it. */
+			post?: { skipped: string; at: { repository: string; number: number } };
+	  }
+	| { skipped: string };
 
 /** Why `quest review` set no status on the head it recorded. */
 type Unattested = { skipped: string } | { refused: string };
@@ -147,7 +154,10 @@ async function openPull(
 	// PR from the branch into the same base takes the record, as `quest merge` on that fork reads it.
 	let fork = false;
 	const github = up.github;
-	if (pull === undefined && held.length === 0 && github !== null && !same(head, repository)) {
+	// The base must be the fork's own branch, which the remote fetches only when it fetches from the fork itself.
+	const fetched = remoteRepository(requireRemote(top, remote)).repository;
+	const fetchesHead = fetched !== null && same(fetched, head);
+	if (pull === undefined && held.length === 0 && github !== null && !same(head, repository) && fetchesHead) {
 		pull = pullsFrom((await (await deps.forge(head)).pulls(head)).value, branch).find(
 			(each) => each.base === base && each.head?.toLowerCase() === name,
 		);
@@ -160,7 +170,13 @@ async function openPull(
 		return {
 			skipped:
 				candidates.length === 0
-					? `no open PR from ${branch} into ${base}${github !== null && !same(head, repository) ? ` in ${repository.owner}/${repository.repo} or ${head.owner}/${head.repo}` : ""}`
+					? `no open PR from ${branch} into ${base}${
+							github === null || same(head, repository)
+								? ""
+								: fetchesHead
+									? ` in ${repository.owner}/${repository.repo} or ${head.owner}/${head.repo}`
+									: ` in ${repository.owner}/${repository.repo}; for a PR into ${head.owner}/${head.repo}, pass a base on a remote that fetches from it`
+						}`
 					: held.length === 0
 						? `no open PR from ${branch} into ${base} from ${head.owner} or with a head this checkout holds: ${candidates.map((each) => each.url).join(", ")}`
 						: `several open PRs from ${branch} into ${base} with heads this checkout holds, none from ${head.owner}: ${held.map((each) => each.url).join(", ")}`,
@@ -293,7 +309,7 @@ export async function recordRounds(
 		});
 		reviewed.posted?.(at);
 	}
-	const post = unposted === null ? {} : { post: { skipped: unposted } };
+	const post = unposted === null ? {} : { post: { skipped: unposted, at } };
 	// A status the token could not set before would fail the same way again.
 	if (status === null && outcome !== "findings open") {
 		const passed = await attest("success");

@@ -1035,10 +1035,32 @@ describe("whose review record counts", () => {
 		}
 	});
 
-	test("reads no status for a section that names no full SHA", async () => {
-		const skipped = await read("## Review\n\nSkipped.");
-		expect(skipped.fixture.statusQueries).toEqual([]);
+	test("reads no status for a section that names no full SHA, only the head's own", async () => {
+		const skipped = await read("## Review\n\nSkipped.", { statuses: {} });
+		expect(skipped.fixture.statusQueries).toEqual([A]);
 		expect(skipped.fixture.permissionRequests).toEqual([]);
+		expect(skipped.record).toBe("review-record -");
+	});
+
+	test("counts a writer's passing status on the head by itself when the body holds no record", async () => {
+		// As on a fork PR Kixel Quest does not serve, whose review only its status records.
+		expect(await read("Fixes it.", { statuses: { [A]: passed(A) } })).toMatchObject({
+			record: `review-record current ${A} local-review`,
+			risk: "risk low current low the quest review status on the head attests it",
+			warnings: [],
+		});
+		const high = reviewStatus("SUCCESS", `Risk high, class test, risk file ${RISK_ID}: passed`, A);
+		expect((await read("Fixes it.", { statuses: { [A]: high } })).risk).toMatch(/^risk high current high /);
+		// The same checks as the land gate's: a failing status, a reader's, or one against another risk file counts for nothing.
+		for (const status of [
+			reviewStatus("FAILURE", `Risk low, risk file ${RISK_ID}: findings open`, A),
+			passed(A, "reader"),
+			reviewStatus("SUCCESS", `Risk low, risk file ${"0".repeat(12)}: passed`, A),
+		])
+			expect(await read("Fixes it.", { statuses: { [A]: status } })).toMatchObject({
+				record: "review-record -",
+				risk: "risk -",
+			});
 	});
 });
 
@@ -1065,7 +1087,13 @@ describe("the risk tier", () => {
 			},
 		});
 		// A record with an open finding names its head by 12 characters, and no full SHA, so no status attests its risk.
-		expect((await risk(record(A.slice(0, 12)))).line).toBe("risk -");
+		expect(
+			(
+				await risk(record(A.slice(0, 12)), {
+					statuses: { [A]: reviewStatus("FAILURE", `Risk high, risk file ${RISK_ID}: findings open`, A) },
+				})
+			).line,
+		).toBe("risk -");
 	});
 
 	test("carries to a later head as the review record does", async () => {

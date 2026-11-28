@@ -2634,6 +2634,25 @@ fakes(
 			]);
 			expect(writes.attestedIn).toEqual(["acme/widget", "acme/widget"]);
 			expect(writes.statuses[0]!.target_url).toMatch(/^https:\/\/github\.com\/acme\/widget\/compare\//);
+
+			// A remote that fetches upstream and pushes to the fork reads upstream's base, which the fork's PR may not
+			// share, so it records nothing there and names the remote to use instead.
+			const local = /^url\.(.+)\.insteadof /.exec(
+				git(s.repo, "config", "--get-regexp", "^url\\..*\\.insteadof$"),
+			)![1]!;
+			git(s.repo, "config", "--unset-all", `url.${local}.insteadOf`);
+			git(s.repo, "config", "--add", `url.${local}.insteadOf`, "https://github.com/upstream/widget.git");
+			git(s.repo, "config", "--add", `url.${local}.pushInsteadOf`, "https://github.com/acme/widget.git");
+			git(s.repo, "remote", "set-url", "origin", "https://github.com/upstream/widget.git");
+			git(s.repo, "remote", "set-url", "--push", "origin", "https://github.com/acme/widget.git");
+			write(s.repo, "src/lib.ts", "export const x = 9;\n");
+			git(s.repo, "commit", "-qam", "another constant");
+			const split = await quest("--root", s.repo, "review");
+			expect(split.code, split.stderr).toBe(0);
+			expect(split.stdout).toContain(
+				"record skipped: no open PR from feature into main in upstream/widget; for a PR into acme/widget, pass a base on a remote that fetches from it\n",
+			);
+			expect(writes.attestedIn).toHaveLength(2);
 		} finally {
 			vi.unstubAllGlobals();
 		}
@@ -3142,6 +3161,60 @@ fakes("a post Kixel Quest refuses fails the command after printing the round", a
 		vi.unstubAllGlobals();
 	}
 });
+
+fakes(
+	"an acceptance on a fork's unposted PR keeps the deferrals of findings posted upstream for a later post",
+	async () => {
+		const s = setup();
+		const upstream: FakePull[] = [{ number: 7, body: "" }];
+		const own: FakePull[] = [];
+		const writes = onGitHub(s.repo, upstream, true, own);
+		try {
+			const first = await quest("--root", s.repo, "review");
+			expect(first.code, first.stderr).toBe(0);
+			expect(first.stdout).toContain("record https://github.com/upstream/widget/pull/7\n");
+			expect(writes.posts).toHaveLength(1);
+			// The work moves to a PR in the fork, which Kixel Quest does not serve.
+			upstream.length = 0;
+			own.push({ number: 5, body: "" });
+			const accepted = await quest("--root", s.repo, "review", "--accept", "Fine.");
+			expect(accepted.code, accepted.stderr).toBe(0);
+			expect(accepted.stdout).toContain(
+				`record https://github.com/acme/widget/pull/5; post skipped: ${KIXEL} does not serve acme/widget\n`,
+			);
+			expect(writes.posts).toHaveLength(1);
+			expect(writes.statuses.at(-1)).toMatchObject({ state: "success" });
+			// The branch keeps the deferral the acceptance could not send, for the PR that holds the finding.
+			const saved = JSON.parse(readFileSync(sessionFile(join(s.repo, ".git"), "feature"), "utf8")) as {
+				pending?: unknown[];
+			};
+			expect(saved.pending).toEqual([
+				expect.objectContaining({
+					repository: "upstream/widget",
+					number: 7,
+					finding: 1,
+					outcome: "deferred",
+					reason: "Fine.",
+				}),
+			]);
+			// Back on the upstream PR, a round that fixes the finding sends its newer outcome alone.
+			own.length = 0;
+			upstream.push({ number: 7, body: "" });
+			write(s.repo, "src/lib.ts", "export const x = 4;\n");
+			git(s.repo, "commit", "-qam", "fix");
+			vi.stubEnv("FAKE_REPLY", JSON.stringify({ score: 10, rationale: "Lands as is.", findings: [] }));
+			write(s.repo, ".tmp/responses.md", "1. Fixed at src/lib.ts:1.\n");
+			const next = await quest("--root", s.repo, "review", "--responses", join(s.repo, ".tmp", "responses.md"));
+			expect(next.code, next.stderr).toBe(0);
+			expect(writes.posts).toHaveLength(2);
+			expect(writes.posts[1]!.outcomes).toMatchObject([
+				{ repository: "upstream/widget", number: 7, finding: 1, outcome: "fixed" },
+			]);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	},
+);
 
 fakes(
 	"the outcomes a failed post settled reach Kixel Quest with the round's repeat, on the PR that holds them",

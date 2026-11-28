@@ -2164,7 +2164,12 @@ export function main(argv: string[], out: Output): number | Promise<number> {
 						// An acceptance is the status alone, so one no status records has not happened.
 						const accepting = reviewed.accepted !== undefined;
 						const attested = failure === undefined && record !== undefined && "url" in record && !status;
-						if (accepting && attested) reviewed.remember?.();
+						if (accepting && attested)
+							reviewed.remember?.(
+								record !== undefined && "url" in record && record.post !== undefined
+									? record.post.at
+									: undefined,
+							);
 						const next = !accepting
 							? own && nextStep(rounds).startsWith("next done")
 								? `next stop: nothing was recorded, so ${OWN_REVIEW}`

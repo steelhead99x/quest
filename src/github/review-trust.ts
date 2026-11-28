@@ -82,6 +82,31 @@ export async function trustedReview(
 	return { body: "", head: null, localReview: false };
 }
 
+/**
+ * The review a writer's passing `quest review` status on `head` attests by itself, with no `## Review` record in the
+ * body, as for a fork PR Kixel Quest does not serve, classified against `riskFile`, the base's current risk file blob;
+ * or null when no such status covers the head. The same checks as the land gate's decide it.
+ */
+export async function statusReview(
+	github: GitHubReader,
+	pr: PullRequest & { base: string },
+	head: string,
+	riskFile: string | null,
+): Promise<{ tier: string; class: string | null; localReview: boolean } | null> {
+	const data = await github.graphql(STATUS_QUERY, { owner: pr.owner, repo: pr.repo, sha: head });
+	const commit = object(data.repository).object;
+	const rollup = commit == null ? null : object(commit).status;
+	const status = rollup == null ? null : object(rollup).context;
+	if (status == null) return null;
+	const attested = await attestedStatus(github, pr, head, object(status));
+	if (typeof attested === "string" || attested.riskFile !== riskFileId(riskFile)) return null;
+	return {
+		tier: attested.tier,
+		class: attested.class,
+		localReview: attested.outcome !== "passed with no local reviewer",
+	};
+}
+
 /** The most files GitHub's compare API lists. */
 const FILE_LIMIT = 300;
 
