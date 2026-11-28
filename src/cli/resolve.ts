@@ -18,13 +18,21 @@ const MARKER_SIZE = 7;
  * fallback that leaves conflicts says why on stderr, naming the file (`%P`),
  * since those markers may be link-list edits `quest resolve` would have
  * merged. Git keeps a placeholder it does not know, such as printf's `%s`.
+ * Git before 2.44 does not know the label placeholders `%X`, `%S`, and `%Y`
+ * either, and passes them through as written: the driver then labels the
+ * sides ours, base, and theirs, as `quest resolve` does by default. Spelling
+ * `%""X` keeps git from substituting the comparison's own placeholder.
  */
 export const DRIVER =
+	"quest_ours=%X; quest_base=%S; quest_theirs=%Y; " +
+	'[ "$quest_ours" = "%""X" ] && quest_ours=ours; ' +
+	'[ "$quest_base" = "%""S" ] && quest_base=base; ' +
+	'[ "$quest_theirs" = "%""Y" ] && quest_theirs=theirs; ' +
 	"if quest help resolve >/dev/null 2>&1; " +
-	"then quest resolve %A %O %B --marker-size=%L --ours-label=%X --base-label=%S --theirs-label=%Y; " +
+	'then quest resolve %A %O %B --marker-size=%L --ours-label="$quest_ours" --base-label="$quest_base" --theirs-label="$quest_theirs"; ' +
 	'quest_merge_status=$?; if [ "$quest_merge_status" -le 1 ]; then exit "$quest_merge_status"; fi; ' +
 	"quest_merge_reason='quest resolve failed'; else quest_merge_reason='no quest resolve on PATH'; fi; " +
-	"git merge-file --marker-size=%L -L %X -L %S -L %Y %A %O %B && exit 0; quest_merge_status=$?; " +
+	'git merge-file --marker-size=%L -L "$quest_ours" -L "$quest_base" -L "$quest_theirs" %A %O %B && exit 0; quest_merge_status=$?; ' +
 	"printf 'quest: %s, so link lists in %s were not auto-resolved\\n' \"$quest_merge_reason\" %P >&2; " +
 	'exit "$quest_merge_status"';
 
@@ -41,6 +49,14 @@ export const OLD_DRIVERS: readonly string[] = [
 		"then quest resolve %A %O %B --marker-size=%L --ours-label=%X --base-label=%S --theirs-label=%Y; " +
 		'quest_merge_status=$?; if [ "$quest_merge_status" -le 1 ]; then exit "$quest_merge_status"; fi; fi; ' +
 		"git merge-file --marker-size=%L -L %X -L %S -L %Y %A %O %B",
+	// git before 2.44 left %X, %S, and %Y unsubstituted in its labels
+	"if quest help resolve >/dev/null 2>&1; " +
+		"then quest resolve %A %O %B --marker-size=%L --ours-label=%X --base-label=%S --theirs-label=%Y; " +
+		'quest_merge_status=$?; if [ "$quest_merge_status" -le 1 ]; then exit "$quest_merge_status"; fi; ' +
+		"quest_merge_reason='quest resolve failed'; else quest_merge_reason='no quest resolve on PATH'; fi; " +
+		"git merge-file --marker-size=%L -L %X -L %S -L %Y %A %O %B && exit 0; quest_merge_status=$?; " +
+		"printf 'quest: %s, so link lists in %s were not auto-resolved\\n' \"$quest_merge_reason\" %P >&2; " +
+		'exit "$quest_merge_status"',
 ];
 
 export interface ResolveOptions {

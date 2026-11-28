@@ -311,6 +311,16 @@ function diverged(prose = false): string {
 	return dir;
 }
 
+/** Whether this git substitutes the merge driver's label placeholders, which it does from 2.44. */
+const gitLabels = (() => {
+	const [major, minor] = (
+		execFileSync("git", ["version"], { encoding: "utf8" }).match(/(\d+)\.(\d+)/) ?? ["", "0", "0"]
+	)
+		.slice(1)
+		.map(Number);
+	return major > 2 || (major === 2 && minor >= 44);
+})();
+
 /** Merge `main` into the branch with `path` as PATH. */
 function mergeMain(dir: string, path: string, branch = "main") {
 	return spawnSync("git", ["-C", dir, "merge", "-q", "--no-edit", branch], {
@@ -349,14 +359,41 @@ describe.skipIf(process.platform === "win32")("the merge driver", () => {
 		}
 		const merged = mergeMain(dir, tools);
 		expect(merged.status).toBe(1);
-		expect(readFileSync(join(dir, "quest/README.md"), "utf8")).toContain("<<<<<<< HEAD\n");
+		const fallback = readFileSync(join(dir, "quest/README.md"), "utf8");
+		expect(fallback).toContain(gitLabels ? "<<<<<<< HEAD\n" : "<<<<<<< ours\n");
+		expect(fallback).not.toMatch(/%[XSY]/);
 		expect(merged.stderr).toContain(
 			"quest: no quest resolve on PATH, so link lists in quest/README.md were not auto-resolved\n",
 		);
 	});
 
 	for (const mode of ["quest", "missing", "older"] as const) {
-		test(`matches native diff3 labels and custom marker size with ${mode} quest`, () => {
+		test("the driver keeps labels git substitutes, and names unsubstituted ones", () => {
+			const prefix = DRIVER.slice(0, DRIVER.indexOf("if quest help"));
+			const labels = (substitute: boolean) => {
+				// Git shell-quotes each value it substitutes, as sq_quote does.
+				const quote = (v: string) => `'${v.replaceAll("'", "'\\''")}'`;
+				const script = substitute
+					? prefix
+							.replace("%X", quote("HEAD"))
+							.replace("%S", quote("%S"))
+							.replace("%Y", quote("their'branch"))
+					: prefix;
+				return execFileSync(
+					"sh",
+					["-c", `${script} printf '%s|%s|%s' "$quest_ours" "$quest_base" "$quest_theirs"`],
+					{
+						encoding: "utf8",
+					},
+				);
+			};
+			expect(labels(false)).toBe("ours|base|theirs");
+			// A real label that happens to read %S is still git's: only the placeholder itself is replaced.
+			expect(labels(true)).toBe("HEAD|base|their'branch");
+		});
+
+		// Git before 2.44 gives a driver no labels to match.
+		test.skipIf(!gitLabels)(`matches native diff3 labels and custom marker size with ${mode} quest`, () => {
 			const dir = diverged(true);
 			init(dir);
 			writeFileSync(join(dir, ".gitattributes"), "quest/** merge=quest conflict-marker-size=13\n");
