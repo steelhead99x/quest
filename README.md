@@ -1968,8 +1968,12 @@ outcome for its findings; the outcomes a failed post carried are kept for
 the branch, and its next post sends them, after `--new` too. Kixel Quest counts a run toward merging only when its poster
 can push, so a contributor's own runs are recorded but a maintainer's review
 decides, and `quest status` reads the review from there; the PR body is left
-as written. With no such PR, or a remote off GitHub and Kixel Quest, it posts
-nothing and prints `record skipped: <why>`. A post Kixel Quest refuses, or a
+as written. A fork whose upstream keeps the quest tree records on its
+upstream's PR, or, with none there, on the fork's own open PR from the branch
+into the same base, which posts only where Kixel Quest serves the fork; else it
+prints `; post skipped: <why>` after the record's URL and the status alone
+records the run. With no such PR, or a remote off GitHub and Kixel Quest, it
+posts nothing and prints `record skipped: <why>`. A post Kixel Quest refuses, or a
 status GitHub refuses, fails the command after the round's report, with exit
 status 1, a status printing `; status refused: <why>`. It exits 0 once the
 round finishes, whatever it found, 2 for invalid arguments or a checkout that
