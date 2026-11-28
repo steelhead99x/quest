@@ -223,7 +223,7 @@ describe("bench", () => {
 		expect(later).toEqual({ regressions: [], unbaselined: ["/"] });
 		const prompt = markdown([report], { unbaselined: [{ model: "SM-A166B", path: "/" }] });
 		expect(prompt).toContain("`/` on SM-A166B: the stored baseline has no warm timings");
-		expect(prompt).toContain("run with --record");
+		expect(prompt).toContain("rerun --record with every URL the stored baseline covers");
 		const otherBrowser = { ...few, device: { ...few.device, browser: "Chrome/143.0" } };
 		expect(baseline(otherBrowser, "2026-11-26T00:00:00Z", base).pages["/"]!.warm).toEqual({});
 	});

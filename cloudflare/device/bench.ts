@@ -253,7 +253,7 @@ export function markdown(
 	}
 	for (const { model, path } of unbaselined)
 		lines.push(
-			`\`${path}\` on ${model}: the stored baseline has no warm timings, so its warm loads were not compared; run with --record once a service worker controls at least three warm loads.`,
+			`\`${path}\` on ${model}: the stored baseline has no warm timings, so its warm loads were not compared; rerun --record with every URL the stored baseline covers, since a recording replaces the device's whole baseline, once a service worker controls at least three warm loads.`,
 			"",
 		);
 	if (failed.length) {

@@ -2,7 +2,7 @@ import { type Context as HonoContext, Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { authorizeUrl, type Config, exchange, type Refreshed, refreshed, revoke } from "./auth.ts";
 import { CALLBACK } from "./github/app.ts";
-import { type Fetch, GitHub, GitHubError, Malformed, Spent, Unreachable } from "./github/client.ts";
+import { type Fetch, GitHub, GitHubError, Malformed, Oversized, Spent, Unreachable } from "./github/client.ts";
 import { repositories } from "./github/repos.ts";
 import { load, NotFound, type Tree } from "./board/load.ts";
 import { board, lookup } from "./board/model.ts";
@@ -386,6 +386,7 @@ function ciFailure(error: unknown): string {
 	if (error instanceof Spent) return `Listing the workflow runs too: ${error.message}.`;
 	if (error instanceof Malformed) return `GitHub's list of workflow runs was unreadable: ${error.message}.`;
 	if (error instanceof Unreachable) return "GitHub didn't answer for the workflow runs; try again shortly.";
+	if (error instanceof Oversized) return `GitHub's list of workflow runs was too large to read: ${error.message}.`;
 	if (!(error instanceof GitHubError) || error.status === 401) throw error;
 	if (rateLimited(error)) return "GitHub is rate-limiting requests for the workflow runs; try again shortly.";
 	return error.status === 403 || error.status === 404
@@ -393,9 +394,9 @@ function ciFailure(error: unknown): string {
 		: `GitHub couldn't list this repository's workflow runs (${error.status}).`;
 }
 
-/** A 403 that is GitHub's rate limit, primary or secondary, rather than a refusal. */
+/** A 429, or a 403 that is GitHub's rate limit, primary or secondary, rather than a refusal. */
 function rateLimited(error: GitHubError): boolean {
-	return error.status === 403 && /rate limit/i.test(error.message);
+	return error.status === 429 || (error.status === 403 && /rate limit/i.test(error.message));
 }
 
 function user(s: Session | null): User | null {

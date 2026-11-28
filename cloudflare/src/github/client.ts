@@ -17,6 +17,9 @@ export class Spent extends Error {
 /** GitHub answered with something other than the JSON the request lists. */
 export class Malformed extends Error {}
 
+/** GitHub's answer was larger than the byte budget a caller reads. */
+export class Oversized extends Error {}
+
 /** GitHub never answered: the request failed at the network layer. */
 export class Unreachable extends Error {}
 
@@ -121,7 +124,7 @@ export class GitHub {
 /** A response's body as text, refusing one larger than MAX_RESPONSE. */
 export async function bounded(response: Response, max = MAX_RESPONSE): Promise<string> {
 	const declared = Number(response.headers.get("content-length"));
-	if (declared > max) throw new Error(`a GitHub response of ${declared} bytes exceeds ${max}`);
+	if (declared > max) throw new Oversized(`a GitHub response of ${declared} bytes exceeds ${max}`);
 	if (!response.body) return "";
 	const reader = response.body.getReader();
 	const chunks: Uint8Array[] = [];
@@ -136,7 +139,7 @@ export async function bounded(response: Response, max = MAX_RESPONSE): Promise<s
 		size += value.byteLength;
 		if (size > max) {
 			await reader.cancel();
-			throw new Error(`a GitHub response exceeded ${max} bytes`);
+			throw new Oversized(`a GitHub response exceeded ${max} bytes`);
 		}
 		chunks.push(value);
 	}

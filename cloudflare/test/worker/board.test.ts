@@ -402,6 +402,12 @@ describe("CI", () => {
 			() => json({ message: "API rate limit exceeded for user" }, 403),
 			"GitHub is rate-limiting requests",
 		],
+		["a 429", () => json({ message: "slow down" }, 429), "GitHub is rate-limiting requests"],
+		[
+			"an answer over the byte budget",
+			() => new Response("{}", { status: 200, headers: { "content-length": String(64 * 1024 * 1024) } }),
+			"too large to read",
+		],
 	])("a quest page and the board stay up on %s from Actions, saying so in the CI panel", async (_, answer, says) => {
 		const h = harness({ ...routes(), [RUNS]: answer });
 		for (const page of ["/repos/moq-dev/quest/quest/m0/d", "/repos/moq-dev/quest"]) {
