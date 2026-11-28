@@ -1,9 +1,9 @@
 import type { Child } from "hono/jsx";
 
 // The site shell: every HTML page the Worker serves renders inside Layout.
-// Quest's markers, sizes, and mark follow design/theme.md (/theme/theme.css); the
-// surfaces, ink, and accent are moq-dev's, and the type is Atkinson Hyperlegible
-// (src/site.css), served from /fonts.
+// Kixel Quest: Kixel's graphite and amber, its mark (brand/README.md), and Quest's
+// markers and size colours from design/theme.md (/theme/theme.css). The type is
+// Atkinson Hyperlegible (src/site.css), served from /fonts.
 
 export const repo = "https://github.com/moq-dev/quest";
 
@@ -30,7 +30,7 @@ export type Page = {
 
 /** The page shell. */
 export function Layout(props: Page & { children: Child }) {
-	const title = props.title ? `${props.title} · Quest` : "Quest · Find your next quest";
+	const title = props.title ? `${props.title} · Kixel Quest` : "Kixel Quest · Find your next quest";
 	return (
 		<html lang="en" data-offline-notice={props.offlineNotice ? "" : undefined}>
 			<head>
@@ -38,10 +38,10 @@ export function Layout(props: Page & { children: Child }) {
 				<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 				<title>{title}</title>
 				<meta name="description" content={props.description} />
-				<meta name="theme-color" content="#0f172a" />
-				<link rel="icon" href="/theme/logo.svg" type="image/svg+xml" />
+				<meta name="theme-color" content="#07090d" />
+				<link rel="icon" href="/brand/logo.svg" type="image/svg+xml" />
 				<link rel="manifest" href="/manifest.webmanifest" />
-				<link rel="apple-touch-icon" href="/theme/icon-180.png" />
+				<link rel="apple-touch-icon" href="/brand/icon-180.png" />
 				{/* The text face draws the first screen, so fetch it before the stylesheet asks. */}
 				<link
 					rel="preload"
@@ -64,7 +64,7 @@ export function Layout(props: Page & { children: Child }) {
 						<meta property="og:image:height" content="640" />
 						<meta
 							property="og:image:alt"
-							content="Find your next quest. An amber route branches across a slate contour map."
+							content="Kixel Quest. Find your next quest. A shared quest log for you and your coding agents."
 						/>
 						<meta name="twitter:card" content="summary_large_image" />
 					</>
@@ -73,9 +73,9 @@ export function Layout(props: Page & { children: Child }) {
 			<body>
 				<header class="site-header">
 					<nav class="wrap nav" aria-label="Site">
-						<a class="brand" href="/" aria-label="Quest, home">
-							<img src="/theme/logo.svg" alt="" width="30" height="30" />
-							<span class="wordmark">Quest</span>
+						<a class="brand" href="/" aria-label="Kixel Quest, home">
+							<img src="/brand/logo.svg" alt="" width="30" height="30" />
+							<span class="wordmark">Kixel Quest</span>
 						</a>
 						{/* Offline, signing in or out can't work, so the notice offers neither. */}
 						{!props.offlineNotice && (
@@ -99,12 +99,12 @@ export function Layout(props: Page & { children: Child }) {
 				{props.crumbs && <Crumbs crumbs={props.crumbs} />}
 				<main>{props.children}</main>
 				<footer class="wrap site-footer">
-					<a class="moq-brand" href="https://moq.dev/" aria-label="moq.dev">
-						<img src="/theme/moq-dev-wordmark.svg" alt="" width="128" height="28" />
+					<a class="kixel-brand" href="https://kixel.ai/">
+						kixel.ai
 					</a>
 					<p>
-						Quest is a moq.dev project, open source under MIT or Apache-2.0.{" "}
-						<a href={repo}>Read the source on GitHub</a>.
+						Kixel Quest runs <a href={repo}>Quest</a>, moq.dev's open-source quest log, under MIT or
+						Apache-2.0.
 					</p>
 				</footer>
 			</body>
@@ -134,7 +134,7 @@ function Crumbs(props: { crumbs: Crumb[] }) {
 export function Bang() {
 	return (
 		<svg class="glyph" viewBox="-10 -22 20 44" aria-hidden="true">
-			<g fill="currentColor" stroke="#0f172a" stroke-width="2.4" stroke-linejoin="round" paint-order="stroke">
+			<g fill="currentColor" stroke="#07090d" stroke-width="2.4" stroke-linejoin="round" paint-order="stroke">
 				<path d="M-7 -19 H7 L3.5 4 H-3.5 Z" />
 				<rect x="-5" y="8.5" width="10" height="10" rx="2" />
 			</g>
@@ -147,7 +147,7 @@ export function Query() {
 	return (
 		<svg class="glyph" viewBox="-12 -22 24 44" aria-hidden="true">
 			<g stroke-linecap="round" stroke-linejoin="round">
-				<path d="M-8 -9 C-8 -21 8 -21 8 -9 C8 -1 0 -1 0 5" fill="none" stroke="#0f172a" stroke-width="9.5" />
+				<path d="M-8 -9 C-8 -21 8 -21 8 -9 C8 -1 0 -1 0 5" fill="none" stroke="#07090d" stroke-width="9.5" />
 				<path d="M-8 -9 C-8 -21 8 -21 8 -9 C8 -1 0 -1 0 5" fill="none" stroke="currentColor" stroke-width="5" />
 				<rect
 					x="-5"
@@ -156,7 +156,7 @@ export function Query() {
 					height="10"
 					rx="2"
 					fill="currentColor"
-					stroke="#0f172a"
+					stroke="#07090d"
 					stroke-width="2.4"
 					paint-order="stroke"
 				/>

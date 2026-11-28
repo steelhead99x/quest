@@ -2,7 +2,7 @@ import type { Repositories } from "./github/repos.ts";
 import { Difficulty, Entry, Heading, Layout, type User } from "./layout.tsx";
 
 const description =
-	"Find the next ready quest, see what it unblocks, and follow its pull request from your phone. Quest keeps the plan in your Git repository.";
+	"Find the next ready quest, see what it unblocks, and follow its pull request from your phone. Kixel Quest keeps the plan in your Git repository.";
 
 /** The home page: sign-in, or the signed-in person's repositories. */
 export function Home(props: { user: User | null; install: string; repos: Repositories | null; origin: string }) {
@@ -34,14 +34,14 @@ function Pitch(props: { install: string }) {
 						</a>
 					</p>
 				</div>
-				<img class="route-art" src="/theme/route.svg" width="640" height="440" alt="" />
+				<img class="route-art" src="/brand/route.svg" width="640" height="440" alt="" />
 			</section>
 			<section class="wrap board-preview">
 				<div>
 					<h2>Read the work in order</h2>
 					<p>
-						The download button needs a CSV endpoint. Quest puts the endpoint first and shows the button it
-						unlocks. Work already in review has its own place on the board.
+						The download button needs a CSV endpoint. Kixel Quest puts the endpoint first and shows the
+						button it unlocks. Work already in review has its own place on the board.
 					</p>
 				</div>
 				<figure class="sample">
@@ -98,8 +98,8 @@ function Pitch(props: { install: string }) {
 				<ol class="steps">
 					<li>
 						<span>
-							<a href={props.install}>Install the Quest App</a> on the repositories you plan in. They need
-							a quest tree; <code>quest init</code> starts one.
+							<a href={props.install}>Install the Kixel Quest App</a> on the repositories you plan in.
+							They need a quest tree; <code>quest init</code> starts one.
 						</span>
 					</li>
 					<li>

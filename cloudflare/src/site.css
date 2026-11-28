@@ -1,8 +1,8 @@
 /*
- * The quest log site's layout. Colour: moq-dev's slate surfaces, ink, and Signal
- * Green accent (moq-dev/moq.dev's src/layouts/global.css). Quest's own marks stay
- * as design/theme.md defines them, from /theme/theme.css: the amber `!` and `?`,
- * the loot-rarity size colours with their labels, and the mark.
+ * Kixel Quest's layout. Colour: Kixel's graphite surfaces and ink, with Kixel
+ * amber as the one brand colour (brand/README.md). Quest's own marks stay as
+ * design/theme.md defines them, from /theme/theme.css: the `!` and `?` (now in
+ * Kixel amber), and the loot-rarity size colours with their labels.
  *
  * Type: one family, Atkinson Hyperlegible Next, with its Mono for identifiers
  * (branches, commits, paths, code). It was drawn for legibility, telling I, l, 1
@@ -37,31 +37,31 @@
 }
 
 :root {
-	/* moq-dev's tokens, named as moq.dev names them. */
-	--moq-bg: #0f172a;
-	--moq-surface: #131d33;
-	--moq-surface-2: #1a2540;
-	--moq-line: #1f2a42;
-	--moq-line-strong: #2c3a57;
-	--moq-ink: #eef2f8;
-	--moq-ink-2: #c4cddc;
-	--moq-ink-3: #8c99b0;
-	--moq-accent: #22c55e;
-	--moq-accent-ink: #4ade80;
-	--moq-accent-soft: rgb(34 197 94 / 0.12);
-	--moq-on-accent: #052e14;
-	--moq-well: #020617;
+	/* Kixel's tokens: kixel.ai's graphite, its surfaces, and Kixel amber. */
+	--kx-bg: #07090d;
+	--kx-surface: #0d1118;
+	--kx-surface-2: #121820;
+	--kx-line: #1b2430;
+	--kx-line-strong: #2a3340;
+	--kx-ink: #e7ecf2;
+	--kx-ink-2: #b5c0ce;
+	--kx-ink-3: #8b96a5;
+	--kx-amber: #ffb020;
+	--kx-amber-ink: #ffc65a;
+	--kx-amber-soft: rgb(255 176 32 / 0.14);
+	--kx-on-amber: #07090d;
+	--kx-well: #040508;
 
-	/* The theme's surface, text, and type tokens, drawn from moq-dev's. */
-	--ql-bg: var(--moq-bg);
-	--ql-panel: var(--moq-surface);
-	--ql-raised: var(--moq-surface-2);
-	--ql-rule: var(--moq-line);
-	--ql-rule-strong: var(--moq-line-strong);
-	--ql-text: var(--moq-ink);
-	--ql-muted: var(--moq-ink-3);
-	--ql-link: var(--moq-accent-ink);
-	--ql-accent: var(--moq-accent);
+	/* The theme's surface, text, and type tokens, drawn from Kixel's. */
+	--ql-bg: var(--kx-bg);
+	--ql-panel: var(--kx-surface);
+	--ql-raised: var(--kx-surface-2);
+	--ql-rule: var(--kx-line);
+	--ql-rule-strong: var(--kx-line-strong);
+	--ql-text: var(--kx-ink);
+	--ql-muted: var(--kx-ink-3);
+	--ql-link: var(--kx-amber-ink);
+	--ql-accent: var(--kx-amber);
 	--ql-font-display: "Atkinson Hyperlegible Next", system-ui, -apple-system, sans-serif;
 	--ql-font-body: "Atkinson Hyperlegible Next", system-ui, -apple-system, sans-serif;
 	--ql-font-mono: "Atkinson Hyperlegible Mono", ui-monospace, monospace;
@@ -77,8 +77,8 @@
 	--step-6: 2.986rem;
 	--step-7: 3.583rem;
 
-	/* Quest's marker amber, design/theme.md's, apart from the accent. */
-	--ql-marker: #ffc53d;
+	/* Quest's markers take Kixel amber. */
+	--ql-marker: var(--kx-amber);
 
 	--radius: 8px;
 	--gap: 0.625rem;
@@ -87,15 +87,15 @@
 	--ql-wait: var(--ql-marker);
 }
 
-/* The markers keep design/theme.md's amber and grey whatever the accent. */
+/* The ready and in-review markers are Kixel amber; blocked stays grey. */
 .ql-available,
 .ql-turn-in {
 	color: var(--ql-marker);
 }
 
 ::selection {
-	background: var(--moq-accent-soft);
-	color: var(--moq-ink);
+	background: var(--kx-amber-soft);
+	color: var(--kx-ink);
 }
 
 *,
@@ -109,16 +109,14 @@ html {
 	-webkit-text-size-adjust: 100%;
 }
 
-/* A faint grid fading down, with a soft Signal Green glow top left and a slate-blue one top right. */
+/* A faint grid fading down, with a soft Kixel amber glow top left. */
 body {
 	margin: 0;
 	min-height: 100vh;
 	display: flex;
 	flex-direction: column;
-	background:
-		radial-gradient(ellipse 70% 45% at 10% 0%, rgb(34 197 94 / 0.08), transparent 70%),
-		radial-gradient(ellipse 55% 40% at 95% 3%, rgb(96 165 250 / 0.07), transparent 70%), var(--ql-bg);
-	color: var(--moq-ink-2);
+	background: radial-gradient(ellipse 70% 45% at 10% 0%, rgb(255 176 32 / 0.07), transparent 70%), var(--ql-bg);
+	color: var(--kx-ink-2);
 	font-family: var(--ql-font-body);
 	font-size: var(--step-0);
 	line-height: 1.55;
@@ -136,8 +134,8 @@ body::before {
 	z-index: -1;
 	pointer-events: none;
 	background-image:
-		linear-gradient(rgb(148 163 184 / 0.06) 1px, transparent 1px),
-		linear-gradient(90deg, rgb(148 163 184 / 0.06) 1px, transparent 1px);
+		linear-gradient(rgb(139 150 165 / 0.06) 1px, transparent 1px),
+		linear-gradient(90deg, rgb(139 150 165 / 0.06) 1px, transparent 1px);
 	background-size: 48px 48px;
 	mask-image: linear-gradient(180deg, #000, transparent);
 }
@@ -191,7 +189,7 @@ a {
 }
 
 a:hover {
-	color: var(--moq-ink);
+	color: var(--kx-ink);
 }
 
 strong {
@@ -201,7 +199,7 @@ strong {
 code,
 pre {
 	font-family: var(--ql-font-mono);
-	color: var(--moq-ink);
+	color: var(--kx-ink);
 	font-size: 0.875em;
 }
 
@@ -218,7 +216,7 @@ pre {
 	padding: 0.85rem 1rem;
 	overflow-x: auto;
 	line-height: 1.55;
-	background: var(--moq-well);
+	background: var(--kx-well);
 	border: 1px solid var(--ql-rule);
 	border-radius: var(--radius);
 }
@@ -259,7 +257,7 @@ pre {
 	display: none;
 }
 
-/* Buttons, as moq.dev draws them: body type on a rounded rectangle, primary in Signal Green. */
+/* Buttons: body type on a rounded rectangle, primary in Kixel amber with graphite text. */
 
 .button {
 	display: inline-flex;
@@ -283,20 +281,20 @@ pre {
 
 .button:hover {
 	color: var(--ql-text);
-	background: #223052;
-	border-color: #3b4c70;
+	background: var(--kx-line);
+	border-color: #3a4656;
 }
 
 .button.primary {
-	color: var(--moq-on-accent);
-	background: var(--moq-accent);
-	border-color: var(--moq-accent);
+	color: var(--kx-on-amber);
+	background: var(--kx-amber);
+	border-color: var(--kx-amber);
 }
 
 .button.primary:hover {
-	color: var(--moq-on-accent);
-	background: var(--moq-accent-ink);
-	border-color: var(--moq-accent-ink);
+	color: var(--kx-on-amber);
+	background: var(--kx-amber-ink);
+	border-color: var(--kx-amber-ink);
 }
 
 .button.primary:focus-visible {
@@ -305,11 +303,11 @@ pre {
 
 .button.quiet {
 	background: transparent;
-	border-color: var(--moq-line-strong);
+	border-color: var(--kx-line-strong);
 }
 
 .button.quiet:hover {
-	background: rgb(148 163 184 / 0.08);
+	background: rgb(139 150 165 / 0.08);
 }
 
 /* A button inside a row: lower, but still a comfortable tap target. */
@@ -334,8 +332,8 @@ pre {
 	font-size: var(--step--1);
 	font-weight: 600;
 	line-height: 1.5;
-	color: var(--moq-ink-2);
-	background: rgb(148 163 184 / 0.1);
+	color: var(--kx-ink-2);
+	background: rgb(139 150 165 / 0.1);
 	border-radius: 4px;
 }
 
@@ -366,7 +364,7 @@ pre {
 	position: sticky;
 	top: 0;
 	z-index: 10;
-	background: rgb(15 23 42 / 0.82);
+	background: rgb(7 9 13 / 0.82);
 	backdrop-filter: blur(12px);
 	-webkit-backdrop-filter: blur(12px);
 	border-bottom: 1px solid var(--ql-rule);
@@ -427,8 +425,10 @@ pre {
 	font-size: 0.875rem;
 }
 
-.moq-brand img {
-	display: block;
+.site-footer a.kixel-brand {
+	color: var(--ql-text);
+	font-weight: 750;
+	text-decoration: none;
 }
 
 .site-footer p {
@@ -845,7 +845,7 @@ a.entry-title::after {
 	content: counter(step);
 	font-size: var(--step-1);
 	font-weight: 800;
-	color: var(--moq-accent-ink);
+	color: var(--kx-amber-ink);
 	font-variant-numeric: tabular-nums;
 }
 
