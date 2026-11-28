@@ -3,6 +3,7 @@
 // quest branches. One request keeps any tree within the page's budget.
 
 import { parse as parseYaml } from "yaml";
+import { isQuest } from "../../../src/core/index.ts";
 import type { GitHub } from "../github/client.ts";
 
 /** How many directories below `quest/` the query reads; deeper files are reported, not dropped silently. */
@@ -214,7 +215,7 @@ export function tree(value: unknown): Tree {
 				if (e.object?.entries === undefined)
 					gaps.push(`${path}/ is deeper than ${DEPTH} directories; its quests are not shown`);
 				else walk(path, e.object.entries, depth + 1);
-			} else if (e.type === "blob" && e.name.endsWith(".md")) {
+			} else if (e.type === "blob" && isQuest(path)) {
 				if (e.object?.isTruncated || typeof e.object?.text !== "string") {
 					gaps.push(`${path} is too large or not text; it is not shown`);
 					continue;

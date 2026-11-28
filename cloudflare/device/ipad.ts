@@ -248,6 +248,10 @@ export class Ipad implements Driver {
 		}
 	}
 
+	async controlled(): Promise<boolean> {
+		return (await this.evaluateAsync(CONTROLLED_SCRIPT)) === true;
+	}
+
 	async installable(url: string): Promise<Installable> {
 		await this.navigate(url);
 		const result = await this.evaluateAsync(`(async () => {

@@ -32,6 +32,8 @@ export interface PageReport {
 	cold: Record<string, Summary>;
 	warm: Record<string, Summary>;
 	installable: Installable;
+	/** Warm loads skipped because no service worker took control after the cold one. */
+	uncontrolled: number;
 	/** Loads whose device timing and driver clock disagreed beyond their usual gap. */
 	disagreements: number;
 	screenshots: { dark: boolean; file: string }[];
@@ -76,9 +78,16 @@ export async function run(driver: Driver, options: Options): Promise<DeviceRepor
 	for (const url of options.urls) {
 		const cold: Load[] = [];
 		const warm: Load[] = [];
+		let uncontrolled = 0;
 		for (let i = 0; i < options.runs; i++) {
 			cold.push(check(url, await driver.load(url, true)));
-			// The warm load follows the cold one, so the cache and service worker are fresh.
+			// The warm load follows the cold one, so the cache and service worker are fresh. A slow
+			// install can still be running when the cold load ends; a load before the worker controls
+			// the page would time the network, not the warm path, so it waits here, outside the timing.
+			if (!(await driver.controlled())) {
+				uncontrolled++;
+				continue;
+			}
 			warm.push(check(url, await driver.load(url, false)));
 		}
 		const installable = await driver.installable(url);
@@ -93,6 +102,7 @@ export async function run(driver: Driver, options: Options): Promise<DeviceRepor
 			cold: metrics(cold),
 			warm: metrics(warm),
 			installable,
+			uncontrolled,
 			disagreements: disagreements([...cold, ...warm]),
 			screenshots,
 		});
@@ -111,6 +121,7 @@ export function check(url: string, load: Load): Load {
 /** Each metric's summary over the loads, leaving out ones a browser did not report. */
 export function metrics(loads: Load[]): Record<string, Summary> {
 	const out: Record<string, Summary> = {};
+	if (loads.length === 0) return out;
 	for (const key of Object.keys(FLOORS) as (keyof Load)[]) {
 		const values = loads.map((l) => l[key]).filter((v): v is number => typeof v === "number");
 		if (values.length === loads.length) out[key] = summarize(values);
@@ -189,6 +200,12 @@ export function markdown(
 				`| \`${p.path}\` | first paint ${ms(p.cold.paint)} | ${ms(p.cold.load)} | ${ms(p.warm.load)} | ${ms(p.cold.worker)} | ${Math.round(p.cold.bytes?.median ?? 0)} | ${installs(p.installable) ? "yes" : `no (${[...p.installable.errors, ...(p.installable.serviceWorker ? [] : ["no service worker"])].join(", ") || "no manifest"})`} | ${OFFLINE_CELL[p.installable.offline]} | ${p.disagreements === 0 ? "agree" : `${p.disagreements} disagree`} |`,
 			);
 		for (const limit of device.limits) lines.push("", `- Not measured: ${limit}`);
+		for (const p of pages)
+			if (p.uncontrolled)
+				lines.push(
+					"",
+					`- \`${p.path}\`: ${p.uncontrolled} of ${p.cold.load?.runs ?? 0} warm loads skipped, as no service worker took control`,
+				);
 		lines.push("");
 	}
 	if (recorded.length)

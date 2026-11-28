@@ -42,9 +42,10 @@ const device = (overrides: Partial<DeviceInfo> = {}): DeviceInfo => ({
 });
 
 /** A driver whose loads come from a list, so every run is deterministic. */
-function fake(info: DeviceInfo, loads: Load[]): Driver & { calls: string[] } {
+function fake(info: DeviceInfo, loads: Load[], controls: boolean[] = [true]): Driver & { calls: string[] } {
 	const calls: string[] = [];
 	let i = 0;
+	let c = 0;
 	return {
 		calls,
 		info: async () => info,
@@ -52,6 +53,10 @@ function fake(info: DeviceInfo, loads: Load[]): Driver & { calls: string[] } {
 			calls.push(`${cold ? "cold" : "warm"} ${url}`);
 			const l = loads[i++ % loads.length]!;
 			return { ...l, url: l.url || url };
+		},
+		controlled: async () => {
+			calls.push("controlled");
+			return controls[c++ % controls.length]!;
 		},
 		installable: async () => ({ manifest: true, serviceWorker: true, offline: "page" as const, errors: [] }),
 		screenshot: async (_, dark) => new Uint8Array([dark ? 1 : 0]),
@@ -179,8 +184,8 @@ describe("bench", () => {
 			save: async (name) => (saved.push(name), name),
 		});
 		expect(driver.calls).toEqual([
-			...Array(3).fill(["cold https://q.dev/", "warm https://q.dev/"]).flat(),
-			...Array(3).fill(["cold https://q.dev/repos/x", "warm https://q.dev/repos/x"]).flat(),
+			...Array(3).fill(["cold https://q.dev/", "controlled", "warm https://q.dev/"]).flat(),
+			...Array(3).fill(["cold https://q.dev/repos/x", "controlled", "warm https://q.dev/repos/x"]).flat(),
 		]);
 		expect(saved).toEqual([
 			"android-sm-a166b-root-light.png",
@@ -190,6 +195,19 @@ describe("bench", () => {
 		]);
 		expect(report.pages.map((p) => p.path)).toEqual(["/", "/repos/x"]);
 		expect(report.pages[0]!.cold.load).toEqual({ median: 300, p95: 300, spread: 0, runs: 3 });
+	});
+
+	test("skips a warm load the service worker never took control of", async () => {
+		const driver = fake(device(), [load()], [true, false, true]);
+		const report = await run(driver, { urls: ["https://q.dev/"], runs: 3, save: null });
+		expect(driver.calls.filter((call) => call.startsWith("warm"))).toHaveLength(2);
+		expect(report.pages[0]!.warm.load?.runs).toBe(2);
+		expect(report.pages[0]!.uncontrolled).toBe(1);
+		expect(markdown([report], [])).toContain("- `/`: 1 of 3 warm loads skipped, as no service worker took control");
+		// With no warm load at all, the warm column is empty rather than the run failing.
+		const never = await run(fake(device(), [load()], [false]), { urls: ["https://q.dev/"], runs: 3, save: null });
+		expect(never.pages[0]!.warm).toEqual({});
+		expect(markdown([never], [])).toContain("| 300 / 300 ms | n/a |");
 	});
 
 	test.each([

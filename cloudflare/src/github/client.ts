@@ -14,8 +14,11 @@ export class Spent extends Error {
 	}
 }
 
-/** GitHub answered with JSON missing what the request lists. */
+/** GitHub answered with something other than the JSON the request lists. */
 export class Malformed extends Error {}
+
+/** GitHub never answered: the request failed at the network layer. */
+export class Unreachable extends Error {}
 
 /** GitHub answered with an error status. */
 export class GitHubError extends Error {
@@ -69,6 +72,10 @@ export class GitHub {
 		const start = Date.now();
 		try {
 			return await this.fetch(input, init);
+		} catch (error) {
+			throw new Unreachable(`GitHub didn't answer ${input}: ${error instanceof Error ? error.message : error}`, {
+				cause: error,
+			});
 		} finally {
 			this.meter.time += Date.now() - start;
 		}
@@ -97,7 +104,12 @@ export class GitHub {
 			}
 			throw new GitHubError(response.status, path, message);
 		}
-		return (text ? JSON.parse(text) : null) as T;
+		if (!text) return null as T;
+		try {
+			return JSON.parse(text) as T;
+		} catch {
+			throw new Malformed(`GitHub's answer to ${path} is not JSON`);
+		}
 	}
 }
 
