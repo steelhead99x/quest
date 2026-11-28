@@ -367,7 +367,7 @@ test.runIf(posix)("quest run runs a fixture repository's quest.toml end to end",
 	let stdout = "";
 	let stderr = "";
 	try {
-		const code = await main(["--root", dir, "run", "--tier", "gate", "--os", "linux", "--report", report], {
+		const code = await main(["--root", dir, "run", "--tier", "gate", "--os", nativeOs(), "--report", report], {
 			stdout: (text) => void (stdout += text),
 			stderr: (text) => void (stderr += text),
 		});
